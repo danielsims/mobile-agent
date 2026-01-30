@@ -23,6 +23,7 @@ import {
   SessionList,
 } from './components';
 import { useWebSocket } from './hooks/useWebSocket';
+import { useNotifications } from './hooks/useNotifications';
 
 type Screen = 'settings' | 'scanner' | 'chat' | 'sessions';
 
@@ -95,6 +96,23 @@ export default function App() {
       }, 50);
     }
   }, [flushPendingContent]);
+
+  // Notifications
+  const { notifyTaskComplete } = useNotifications();
+
+  // Get the last assistant message content for notifications
+  const getLastAssistantMessage = useCallback(() => {
+    // Find the last assistant message
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].type === 'assistant' && messages[i].content) {
+        // Get first meaningful line or truncate
+        const content = messages[i].content.trim();
+        const firstLine = content.split('\n')[0];
+        return firstLine.length > 100 ? firstLine.slice(0, 97) + '...' : firstLine;
+      }
+    }
+    return 'Task completed';
+  }, [messages]);
 
   // WebSocket
   const { status, connect, send, reconnect, resetPingTimer } = useWebSocket({
@@ -200,6 +218,8 @@ export default function App() {
             setPendingPermission(null);
           }
           permissionSentRef.current = false;
+          // Notify user that task is complete (only shows when app is backgrounded)
+          notifyTaskComplete(getLastAssistantMessage());
           break;
 
         case 'sessions':
