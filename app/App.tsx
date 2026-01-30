@@ -43,10 +43,12 @@ export default function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>('confirm');
+  const [draftText, setDraftText] = useState('');
 
   const pendingConnectRef = useRef<{ url: string; token: string } | null>(null);
   const messageIdRef = useRef(0);
   const permissionSentRef = useRef(false);  // Prevent double-sending permission responses
+  const draftSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Throttle streaming updates to prevent UI freeze
   const pendingContentRef = useRef('');
@@ -243,6 +245,48 @@ export default function App() {
     await AsyncStorage.setItem('authToken', authToken);
   };
 
+  // Draft persistence - keyed by session
+  const getDraftKey = (sid: string | null) => `draft:${sid || 'new'}`;
+
+  // Load draft when session changes
+  useEffect(() => {
+    const loadDraft = async () => {
+      const key = getDraftKey(sessionId);
+      const saved = await AsyncStorage.getItem(key);
+      if (saved) {
+        setDraftText(saved);
+      } else {
+        setDraftText('');
+      }
+    };
+    loadDraft();
+  }, [sessionId]);
+
+  // Save draft with debounce
+  const handleDraftChange = useCallback((text: string) => {
+    setDraftText(text);
+
+    // Debounce saving to storage
+    if (draftSaveTimeoutRef.current) {
+      clearTimeout(draftSaveTimeoutRef.current);
+    }
+    draftSaveTimeoutRef.current = setTimeout(() => {
+      const key = getDraftKey(sessionId);
+      if (text) {
+        AsyncStorage.setItem(key, text);
+      } else {
+        AsyncStorage.removeItem(key);
+      }
+    }, 500);
+  }, [sessionId]);
+
+  // Clear draft after sending
+  const clearDraft = useCallback(() => {
+    setDraftText('');
+    const key = getDraftKey(sessionId);
+    AsyncStorage.removeItem(key);
+  }, [sessionId]);
+
   // Deep linking
   const handleDeepLink = useCallback((url: string) => {
     try {
@@ -311,6 +355,7 @@ export default function App() {
       return;
     }
     send('input', { text });
+    clearDraft();
   };
 
   const handlePermissionResponse = (action: 'yes' | 'no') => {
@@ -476,6 +521,8 @@ export default function App() {
           onSend={handleSend}
           disabled={status !== 'connected' || !!pendingPermission}
           onActivity={resetPingTimer}
+          initialValue={draftText}
+          onDraftChange={handleDraftChange}
         />
       </KeyboardAvoidingView>
     </View>

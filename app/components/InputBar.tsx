@@ -22,6 +22,8 @@ interface InputBarProps {
   disabled?: boolean;
   placeholder?: string;
   onActivity?: () => void;
+  initialValue?: string;
+  onDraftChange?: (text: string) => void;
 }
 
 const KEYBOARD_OVERLAP = 40;
@@ -29,11 +31,18 @@ const KEYBOARD_OVERLAP = 40;
 // Throttle activity notifications to avoid excessive pings
 const ACTIVITY_THROTTLE = 5000;
 
-export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', onActivity }: InputBarProps) {
-  const [text, setText] = useState('');
+export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', onActivity, initialValue = '', onDraftChange }: InputBarProps) {
+  const [text, setText] = useState(initialValue);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const inputRef = useRef<TextInput>(null);
   const lastActivityRef = useRef<number>(0);
+
+  // Update text if initialValue changes (e.g., restored from storage)
+  useEffect(() => {
+    if (initialValue && !text) {
+      setText(initialValue);
+    }
+  }, [initialValue]);
 
   useEffect(() => {
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
@@ -69,6 +78,9 @@ export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', on
   // Notify activity when user is typing (throttled)
   const handleTextChange = (newText: string) => {
     setText(newText);
+
+    // Notify parent of draft change for persistence
+    onDraftChange?.(newText);
 
     // Throttle activity notifications
     const now = Date.now();
