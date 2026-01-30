@@ -21,14 +21,19 @@ interface InputBarProps {
   onSend: (text: string) => void;
   disabled?: boolean;
   placeholder?: string;
+  onActivity?: () => void;
 }
 
 const KEYBOARD_OVERLAP = 40;
 
-export function InputBar({ onSend, disabled, placeholder = 'Ask anything...' }: InputBarProps) {
+// Throttle activity notifications to avoid excessive pings
+const ACTIVITY_THROTTLE = 5000;
+
+export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', onActivity }: InputBarProps) {
   const [text, setText] = useState('');
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const inputRef = useRef<TextInput>(null);
+  const lastActivityRef = useRef<number>(0);
 
   useEffect(() => {
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
@@ -61,6 +66,18 @@ export function InputBar({ onSend, disabled, placeholder = 'Ask anything...' }: 
     };
   }, []);
 
+  // Notify activity when user is typing (throttled)
+  const handleTextChange = (newText: string) => {
+    setText(newText);
+
+    // Throttle activity notifications
+    const now = Date.now();
+    if (onActivity && now - lastActivityRef.current > ACTIVITY_THROTTLE) {
+      lastActivityRef.current = now;
+      onActivity();
+    }
+  };
+
   const handleSend = async () => {
     if (!text.trim() || disabled) return;
 
@@ -91,7 +108,7 @@ export function InputBar({ onSend, disabled, placeholder = 'Ask anything...' }: 
             ref={inputRef}
             style={styles.input}
             value={text}
-            onChangeText={setText}
+            onChangeText={handleTextChange}
             placeholder={placeholder}
             placeholderTextColor="#666"
             onSubmitEditing={handleSend}

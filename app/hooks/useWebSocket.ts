@@ -1,6 +1,9 @@
 import { useRef, useCallback, useState } from 'react';
 import { ConnectionStatus, ServerMessage } from '../types';
 
+// Ping interval to keep connection alive (45 seconds - below typical 60s timeout)
+const PING_INTERVAL = 45000;
+
 interface UseWebSocketOptions {
   onMessage: (msg: ServerMessage) => void;
   onConnect: () => void;
@@ -14,6 +17,27 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect }: UseWebSocke
   // Store credentials for auto-reconnect
   const credentialsRef = useRef<{ url: string; token: string } | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Send a ping to keep the connection alive
+  const sendPing = useCallback(() => {
+    if (ws.current?.readyState === WebSocket.OPEN) {
+      ws.current.send(JSON.stringify({ type: 'ping' }));
+    }
+  }, []);
+
+  // Reset the ping timer (call this when user is active/typing)
+  const resetPingTimer = useCallback(() => {
+    if (pingIntervalRef.current) {
+      clearInterval(pingIntervalRef.current);
+    }
+    if (ws.current?.readyState === WebSocket.OPEN) {
+      // Send an immediate ping when user is active
+      sendPing();
+      // Then continue regular interval
+      pingIntervalRef.current = setInterval(sendPing, PING_INTERVAL);
+    }
+  }, [sendPing]);
 
   const connect = useCallback((serverUrl: string, authToken: string) => {
     if (!serverUrl || !authToken) return;
@@ -25,6 +49,12 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect }: UseWebSocke
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
+    }
+
+    // Clear any existing ping interval
+    if (pingIntervalRef.current) {
+      clearInterval(pingIntervalRef.current);
+      pingIntervalRef.current = null;
     }
 
     setStatus('connecting');
@@ -40,6 +70,8 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect }: UseWebSocke
 
       ws.current.onopen = () => {
         setStatus('connected');
+        // Start ping interval to keep connection alive
+        pingIntervalRef.current = setInterval(sendPing, PING_INTERVAL);
         onConnect();
       };
 
@@ -57,12 +89,17 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect }: UseWebSocke
       ws.current.onclose = (event) => {
         setStatus('disconnected');
         ws.current = null;
+        // Clear ping interval
+        if (pingIntervalRef.current) {
+          clearInterval(pingIntervalRef.current);
+          pingIntervalRef.current = null;
+        }
         onDisconnect(event.code);
       };
     } catch (e) {
       setStatus('disconnected');
     }
-  }, [onMessage, onConnect, onDisconnect]);
+  }, [onMessage, onConnect, onDisconnect, sendPing]);
 
   // Attempt to reconnect using stored credentials
   const reconnect = useCallback(() => {
@@ -101,10 +138,14 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect }: UseWebSocke
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
     }
+    if (pingIntervalRef.current) {
+      clearInterval(pingIntervalRef.current);
+      pingIntervalRef.current = null;
+    }
     credentialsRef.current = null; // Clear credentials to prevent auto-reconnect
     ws.current?.close();
     setStatus('disconnected');
   }, []);
 
-  return { status, connect, send, sendWithReconnect, disconnect, reconnect };
+  return { status, connect, send, sendWithReconnect, disconnect, reconnect, resetPingTimer };
 }

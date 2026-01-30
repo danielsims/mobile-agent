@@ -96,7 +96,7 @@ export default function App() {
   }, [flushPendingContent]);
 
   // WebSocket
-  const { status, connect, send, disconnect, reconnect } = useWebSocket({
+  const { status, connect, send, disconnect, reconnect, resetPingTimer } = useWebSocket({
     onMessage: (msg) => {
       switch (msg.type) {
         case 'connected':
@@ -475,6 +475,7 @@ export default function App() {
         <InputBar
           onSend={handleSend}
           disabled={status !== 'connected' || !!pendingPermission}
+          onActivity={resetPingTimer}
         />
       </KeyboardAvoidingView>
     </View>
