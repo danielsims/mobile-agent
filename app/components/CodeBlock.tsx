@@ -28,7 +28,6 @@ function highlightLine(line: string): React.ReactNode {
   // Numbers
   const numbers = /\b(\d+\.?\d*)\b/g;
 
-  let result = line;
   const parts: { start: number; end: number; style: 'keyword' | 'string' | 'comment' | 'number' }[] = [];
 
   // Find all matches

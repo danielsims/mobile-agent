@@ -7,14 +7,13 @@ import {
   StyleSheet,
   Text,
   View,
-  ScrollView,
   TouchableOpacity,
   SafeAreaView,
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
 
-import { Message, PermissionRequest, Session, ConnectionStatus, PermissionMode } from './types';
+import { Message, PermissionRequest, Session, PermissionMode } from './types';
 import {
   Settings,
   InputBar,
@@ -98,7 +97,7 @@ export default function App() {
   }, [flushPendingContent]);
 
   // WebSocket
-  const { status, connect, send, disconnect, reconnect, resetPingTimer } = useWebSocket({
+  const { status, connect, send, reconnect, resetPingTimer } = useWebSocket({
     onMessage: (msg) => {
       switch (msg.type) {
         case 'connected':
@@ -119,18 +118,15 @@ export default function App() {
         case 'history':
           // Load message history with proper types
           if (msg.messages && Array.isArray(msg.messages)) {
-            console.log(`Received ${msg.messages.length} history messages`);
-            const loadedMessages: Message[] = msg.messages.map((m: any, i: number) => {
-              console.log(`History message ${i}: type=${m.type}, content=${(m.content || '').slice(0, 50)}`);
-              return {
-                id: `history-${i}`,
-                type: m.type as Message['type'],
-                content: m.content || '',
-                toolName: m.toolName,
-                toolInput: m.toolInput,
-                timestamp: Date.now() - (msg.messages.length - i) * 1000,
-              };
-            });
+            const historyMessages = msg.messages;
+            const loadedMessages: Message[] = historyMessages.map((m: { type: string; content?: string; toolName?: string; toolInput?: string }, i: number) => ({
+              id: `history-${i}`,
+              type: m.type as Message['type'],
+              content: m.content || '',
+              toolName: m.toolName,
+              toolInput: m.toolInput,
+              timestamp: Date.now() - (historyMessages.length - i) * 1000,
+            }));
             setMessages(loadedMessages);
           }
           break;
@@ -162,10 +158,11 @@ export default function App() {
 
         case 'toolResult':
           if (msg.content) {
+            const toolResultContent = msg.content;
             setMessages(prev => {
               const last = prev[prev.length - 1];
               if (last && last.type === 'tool') {
-                return [...prev.slice(0, -1), { ...last, content: msg.content }];
+                return [...prev.slice(0, -1), { ...last, content: toolResultContent }];
               }
               return prev;
             });
@@ -300,7 +297,9 @@ export default function App() {
           pendingConnectRef.current = { url: u, token: t };
         }
       }
-    } catch (e) {}
+    } catch {
+      // Invalid URL format, ignore
+    }
   }, []);
 
   useEffect(() => {
@@ -343,7 +342,7 @@ export default function App() {
         pendingConnectRef.current = { url: parsed.url, token: parsed.token };
         setScreen('settings');
       }
-    } catch (e) {
+    } catch {
       setScanned(false);
     }
   };
@@ -360,7 +359,6 @@ export default function App() {
 
   const handlePermissionResponse = (action: 'yes' | 'no') => {
     if (permissionSentRef.current) {
-      console.log('Permission response already sent, ignoring');
       return;
     }
     permissionSentRef.current = true;

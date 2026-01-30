@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, StyleSheet, Platform, Linking, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, Platform, Linking } from 'react-native';
 import { Message } from '../types';
 import { CodeBlock } from './CodeBlock';
 

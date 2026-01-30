@@ -94,7 +94,9 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect }: UseWebSocke
         try {
           const msg = JSON.parse(event.data) as ServerMessage;
           onMessage(msg);
-        } catch (e) {}
+        } catch {
+          // Invalid JSON, ignore
+        }
       };
 
       ws.current.onerror = () => {
@@ -123,7 +125,7 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect }: UseWebSocke
             RECONNECT_DELAY * Math.pow(1.5, reconnectAttemptsRef.current),
             MAX_RECONNECT_DELAY
           );
-          console.log(`Auto-reconnecting in ${delay}ms (attempt ${reconnectAttemptsRef.current + 1})`);
+          // Auto-reconnecting with exponential backoff
           reconnectAttemptsRef.current++;
           reconnectTimeoutRef.current = setTimeout(() => {
             if (credentialsRef.current) {
@@ -136,7 +138,7 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect }: UseWebSocke
 
         onDisconnect(event.code);
       };
-    } catch (e) {
+    } catch {
       setStatus('disconnected');
     }
   }, [onMessage, onConnect, onDisconnect, sendPing]);
@@ -144,7 +146,6 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect }: UseWebSocke
   // Attempt to reconnect using stored credentials
   const reconnect = useCallback(() => {
     if (credentialsRef.current && status === 'disconnected') {
-      console.log('Attempting to reconnect...');
       connect(credentialsRef.current.url, credentialsRef.current.token);
       return true;
     }

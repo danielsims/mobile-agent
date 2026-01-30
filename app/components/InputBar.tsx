@@ -39,7 +39,7 @@ export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', on
 
   // Update text if initialValue changes (e.g., restored from storage)
   useEffect(() => {
-    if (initialValue && !text) {
+    if (initialValue) {
       setText(initialValue);
     }
   }, [initialValue]);
