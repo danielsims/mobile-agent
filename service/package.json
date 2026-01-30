@@ -1,0 +1,19 @@
+{
+  "name": "mobile-agent-service",
+  "version": "1.0.0",
+  "type": "module",
+  "bin": {
+    "mobile-agent": "./src/launcher.js"
+  },
+  "scripts": {
+    "start": "node src/launcher.js",
+    "serve": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0",
+    "qrcode-terminal": "^0.12.0",
+    "uuid": "^9.0.0",
+    "ws": "^8.16.0"
+  }
+}

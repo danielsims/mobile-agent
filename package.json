@@ -1,0 +1,10 @@
+{
+  "name": "mobile-agent",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "cd service && npm start",
+    "app": "cd app && npm start",
+    "install:all": "cd service && npm install && cd ../app && npm install"
+  }
+}
