@@ -28,6 +28,84 @@ console.log(`Claude: ${CLAUDE_PATH}`);
 
 const CLAUDE_PROJECTS_DIR = join(process.env.HOME, '.claude', 'projects');
 
+// Load message history for a specific session
+function loadSessionHistory(targetSessionId) {
+  const messages = [];
+
+  try {
+    if (!existsSync(CLAUDE_PROJECTS_DIR)) return messages;
+
+    const projectDirs = readdirSync(CLAUDE_PROJECTS_DIR);
+
+    for (const projectDir of projectDirs) {
+      const projectPath = join(CLAUDE_PROJECTS_DIR, projectDir);
+
+      // Session files are directly in the project directory, not in a sessions subfolder
+      const sessionFile = join(projectPath, `${targetSessionId}.jsonl`);
+
+      if (existsSync(sessionFile)) {
+        console.log(`Found session file: ${sessionFile}`);
+        const content = readFileSync(sessionFile, 'utf-8');
+        const lines = content.split('\n').filter(l => l.trim());
+
+        for (const line of lines) {
+          try {
+            const entry = JSON.parse(line);
+
+            // Parse user messages - content is a string
+            if (entry.type === 'user') {
+              const text = entry.message?.content || '';
+              if (text && typeof text === 'string') {
+                messages.push({ type: 'user', content: text });
+              }
+            }
+
+            // Parse assistant messages - content is an array of blocks
+            if (entry.type === 'assistant') {
+              let text = '';
+              let toolCalls = [];
+
+              if (entry.message?.content && Array.isArray(entry.message.content)) {
+                for (const block of entry.message.content) {
+                  if (block.type === 'text') {
+                    text += block.text || '';
+                  } else if (block.type === 'tool_use') {
+                    toolCalls.push({
+                      name: block.name,
+                      input: block.input,
+                    });
+                  }
+                }
+              }
+
+              if (text) {
+                messages.push({ type: 'assistant', content: text });
+              }
+
+              for (const tool of toolCalls) {
+                messages.push({
+                  type: 'tool',
+                  toolName: tool.name,
+                  toolInput: JSON.stringify(tool.input, null, 2),
+                });
+              }
+            }
+          } catch (e) {
+            // Skip malformed lines
+          }
+        }
+
+        console.log(`Loaded ${messages.length} messages from session`);
+        break; // Found the session file
+      }
+    }
+  } catch (e) {
+    console.error('Error loading session history:', e.message);
+  }
+
+  return messages;
+}
+
 // Load all sessions from Claude's storage
 function loadSessions() {
   const sessions = [];
@@ -79,7 +157,8 @@ let sessionId = null;
 let sessionName = 'New Chat';
 let lastContent = '';
 let isProcessing = false;
-let skipPermissionBroadcast = false;
+// Permission mode controls UI display only - CLI always skips permissions
+// 'auto' = silent, 'confirm' = show tool notifications
 
 // Permission mode: 'auto' (skip all) or 'confirm' (ask user)
 let permissionMode = process.env.PERMISSION_MODE || 'confirm';
@@ -111,6 +190,7 @@ function output(text) {
 
 // Store the last tool use for permission handling
 let lastToolUse = null;
+let lastBroadcastToolId = null; // Prevent duplicate tool broadcasts
 
 function handleClaudeMessage(msg) {
   switch (msg.type) {
@@ -137,14 +217,21 @@ function handleClaudeMessage(msg) {
               name: block.name,
               input: block.input,
             };
-            terminalOutput(`\n[Tool: ${block.name}]\n`);
-            broadcast('tool', {
-              name: block.name,
-              input: block.input ? JSON.stringify(block.input, null, 2) : null,
-            });
-            if (block.input) {
-              const inputStr = JSON.stringify(block.input, null, 2);
-              terminalOutput(inputStr.slice(0, 500) + '\n');
+
+            // Only broadcast if this is a new tool (not a retry of the same one)
+            const isDuplicateTool = block.id === lastBroadcastToolId;
+            if (!isDuplicateTool) {
+              lastBroadcastToolId = block.id;
+              terminalOutput(`\n[Tool: ${block.name}]\n`);
+              broadcast('tool', {
+                id: block.id,
+                name: block.name,
+                input: block.input ? JSON.stringify(block.input, null, 2) : null,
+              });
+              if (block.input) {
+                const inputStr = JSON.stringify(block.input, null, 2);
+                terminalOutput(inputStr.slice(0, 500) + '\n');
+              }
             }
           }
         }
@@ -158,15 +245,26 @@ function handleClaudeMessage(msg) {
           if (block.type === 'tool_result') {
             const content = typeof block.content === 'string' ? block.content : '';
 
+            // Check for various permission-related messages
             const needsPermission = content.includes('requested permission') ||
                                     content.includes("haven't granted") ||
-                                    content.includes('User did not grant permission');
+                                    content.includes('User did not grant permission') ||
+                                    content.includes('permission to run') ||
+                                    content.includes('requires permission') ||
+                                    content.includes('needs permission') ||
+                                    content.includes('approve this');
+
+            // Debug logging
+            if (content) {
+              console.log(`[Tool Result] mode=${permissionMode}, needsPermission=${needsPermission}, content preview: ${content.slice(0, 100)}`);
+            }
 
             // Use tool_use_id to prevent duplicate broadcasts for the same tool
             const toolId = block.tool_use_id || lastToolUse?.id;
             const isDuplicate = toolId && toolId === lastPermissionToolId;
 
-            if (!skipPermissionBroadcast && needsPermission && !isDuplicate) {
+            // In confirm mode, show permission-related messages (informational only)
+            if (permissionMode === 'confirm' && needsPermission && !isDuplicate) {
               // Permission needed - store details for retry
               lastPermissionToolId = toolId;
               pendingPermission = {
@@ -197,17 +295,12 @@ function handleClaudeMessage(msg) {
 }
 
 function runClaude(prompt, options = {}) {
-  const { skipPermissions = false } = options;
-
   return new Promise((resolve) => {
     const args = ['-p', '--verbose', '--output-format', 'stream-json'];
 
-    // In auto mode, always skip permissions
-    // In confirm mode, only skip if explicitly requested (after user approval)
-    if (permissionMode === 'auto' || skipPermissions) {
-      args.push('--dangerously-skip-permissions');
-      skipPermissionBroadcast = true;
-    }
+    // Always skip permissions at CLI level to prevent hanging
+    // Our mobile app handles permission display/notification
+    args.push('--dangerously-skip-permissions');
 
     if (sessionId) {
       args.push('--resume', sessionId);
@@ -242,7 +335,6 @@ function runClaude(prompt, options = {}) {
 
     proc.on('close', (code) => {
       console.log('Claude exited:', code);
-      skipPermissionBroadcast = false;
       isProcessing = false;
       output('\n');
       broadcast('done', { code });
@@ -266,6 +358,7 @@ async function sendUserMessage(text, options = {}) {
     pendingPermission = null;
     lastPermissionToolId = null;
     lastToolUse = null;
+    lastBroadcastToolId = null;
   }
 
   terminalOutput(`\n> ${text}\n\n`);
@@ -360,12 +453,17 @@ wss.on('connection', (ws, req) => {
     ts: Date.now()
   }));
 
-  if (outputBuffer.length > 0) {
-    ws.send(JSON.stringify({
-      type: 'buffer',
-      data: outputBuffer.slice(-100).join(''),
-      ts: Date.now()
-    }));
+  // If there's an existing session, send the history
+  if (sessionId) {
+    const history = loadSessionHistory(sessionId);
+    if (history.length > 0) {
+      console.log(`Sending ${history.length} history messages to reconnected client`);
+      ws.send(JSON.stringify({
+        type: 'history',
+        messages: history,
+        ts: Date.now()
+      }));
+    }
   }
 
   ws.on('message', async (raw) => {
@@ -396,6 +494,7 @@ wss.on('connection', (ws, req) => {
           pendingPermission = null;
           lastPermissionToolId = null;
           lastToolUse = null;
+          lastBroadcastToolId = null;
           broadcast('reset', {});
           terminalOutput('[Session reset]\n');
           break;
@@ -429,7 +528,23 @@ wss.on('connection', (ws, req) => {
             pendingPermission = null;
             lastPermissionToolId = null;
             lastToolUse = null;
+            lastBroadcastToolId = null;
+
+            // Load and send message history
+            const history = loadSessionHistory(msg.sessionId);
+            console.log(`Loaded ${history.length} messages from history`);
+
             broadcast('session', { sessionId, name: sessionName });
+
+            // Send history to the requesting client
+            if (history.length > 0) {
+              ws.send(JSON.stringify({
+                type: 'history',
+                messages: history,
+                ts: Date.now()
+              }));
+            }
+
             terminalOutput(`[Resumed session: ${sessionId.slice(0, 8)}...]\n`);
           }
           break;
