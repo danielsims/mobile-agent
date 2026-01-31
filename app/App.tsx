@@ -24,6 +24,7 @@ import {
 } from './components';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useNotifications } from './hooks/useNotifications';
+import { useCompletionChime } from './hooks/useCompletionChime';
 
 type Screen = 'settings' | 'scanner' | 'chat' | 'sessions';
 
@@ -53,6 +54,7 @@ export default function App() {
   // Throttle streaming updates to prevent UI freeze
   const pendingContentRef = useRef('');
   const flushTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastAssistantMessageRef = useRef('');
 
   // Message handling
   const addMessage = useCallback((type: Message['type'], content: string, extra?: Partial<Message>) => {
@@ -74,8 +76,11 @@ export default function App() {
       setMessages(prev => {
         const last = prev[prev.length - 1];
         if (last && last.type === 'assistant') {
-          return [...prev.slice(0, -1), { ...last, content: last.content + content }];
+          const newContent = last.content + content;
+          lastAssistantMessageRef.current = newContent;
+          return [...prev.slice(0, -1), { ...last, content: newContent }];
         }
+        lastAssistantMessageRef.current = content;
         return [...prev, {
           id: String(messageIdRef.current++),
           type: 'assistant' as const,
@@ -100,19 +105,19 @@ export default function App() {
   // Notifications
   const { notifyTaskComplete } = useNotifications();
 
+  // Completion chime
+  const { play: playChime } = useCompletionChime();
+
   // Get the last assistant message content for notifications
   const getLastAssistantMessage = useCallback(() => {
-    // Find the last assistant message
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].type === 'assistant' && messages[i].content) {
-        // Get first meaningful line or truncate
-        const content = messages[i].content.trim();
-        const firstLine = content.split('\n')[0];
-        return firstLine.length > 100 ? firstLine.slice(0, 97) + '...' : firstLine;
-      }
+    // Use the ref which is updated synchronously during message flush
+    const content = lastAssistantMessageRef.current.trim();
+    if (content) {
+      const firstLine = content.split('\n')[0];
+      return firstLine.length > 100 ? firstLine.slice(0, 97) + '...' : firstLine;
     }
-    return 'Task completed';
-  }, [messages]);
+    return ''; // Return empty if no message - caller decides what to do
+  }, []);
 
   // WebSocket
   const { status, connect, send, reconnect, resetPingTimer } = useWebSocket({
@@ -218,8 +223,14 @@ export default function App() {
             setPendingPermission(null);
           }
           permissionSentRef.current = false;
+          // Get message content for notification
+          const messageContent = getLastAssistantMessage();
           // Notify user that task is complete (only shows when app is backgrounded)
-          notifyTaskComplete(getLastAssistantMessage());
+          notifyTaskComplete(messageContent || 'Task completed');
+          // Play completion chime
+          playChime();
+          // Reset the message ref for next response
+          lastAssistantMessageRef.current = '';
           break;
 
         case 'sessions':
@@ -232,6 +243,7 @@ export default function App() {
           setSessionId(null);
           setSessionName('New Chat');
           permissionSentRef.current = false;
+          lastAssistantMessageRef.current = '';
           break;
 
         case 'permissionMode':
