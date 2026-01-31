@@ -15,7 +15,7 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.mobileagent.app"
+      "bundleIdentifier": "com.danielsims.mobileagent"
     },
     "android": {
       "adaptiveIcon": {
@@ -23,7 +23,11 @@
         "backgroundColor": "#0d1117"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.mobileagent.app"
+      "package": "com.mobileagent.app",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -34,7 +38,19 @@
         {
           "cameraPermission": "Allow Mobile Agent to scan QR codes"
         }
+      ],
+      [
+        "expo-notifications",
+        {
+          "sounds": []
+        }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "d5acf7c4-e921-48ad-b429-ea9b30a60665"
+      }
+    },
+    "owner": "danielsims"
   }
 }

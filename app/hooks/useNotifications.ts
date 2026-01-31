@@ -14,6 +14,9 @@ Notifications.setNotificationHandler({
   }),
 });
 
+// Android notification channel ID
+const CHANNEL_ID = 'claude-responses';
+
 interface UseNotificationsOptions {
   enabled?: boolean;
 }
@@ -21,29 +24,50 @@ interface UseNotificationsOptions {
 export function useNotifications({ enabled = true }: UseNotificationsOptions = {}) {
   const hasPermissionRef = useRef(false);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+  const isSetupCompleteRef = useRef(false);
 
-  // Request permissions on mount
+  // Setup notifications on mount
   useEffect(() => {
     if (!enabled) return;
 
-    const requestPermissions = async () => {
+    const setup = async () => {
+      // Skip on simulators
       if (!Device.isDevice) {
-        // Notifications don't work on simulators
         return;
       }
 
+      // Create Android notification channel (required for Android 8+)
+      if (Platform.OS === 'android') {
+        await Notifications.setNotificationChannelAsync(CHANNEL_ID, {
+          name: 'Claude Responses',
+          importance: Notifications.AndroidImportance.HIGH,
+          vibrationPattern: [0, 250, 250, 250],
+          sound: 'default',
+          enableVibrate: true,
+          showBadge: true,
+        });
+      }
+
+      // Request permissions
       const { status: existingStatus } = await Notifications.getPermissionsAsync();
       let finalStatus = existingStatus;
 
       if (existingStatus !== 'granted') {
-        const { status } = await Notifications.requestPermissionsAsync();
+        const { status } = await Notifications.requestPermissionsAsync({
+          ios: {
+            allowAlert: true,
+            allowBadge: true,
+            allowSound: true,
+          },
+        });
         finalStatus = status;
       }
 
       hasPermissionRef.current = finalStatus === 'granted';
+      isSetupCompleteRef.current = true;
     };
 
-    requestPermissions();
+    setup();
   }, [enabled]);
 
   // Track app state to only notify when backgrounded
@@ -59,11 +83,22 @@ export function useNotifications({ enabled = true }: UseNotificationsOptions = {
   const notify = useCallback(async (title: string, body: string, options?: {
     forceShow?: boolean;
   }) => {
-    if (!enabled || !hasPermissionRef.current) return;
+    if (!enabled) return;
+
+    // Wait for setup if not complete
+    if (!isSetupCompleteRef.current) {
+      return;
+    }
+
+    if (!hasPermissionRef.current) {
+      return;
+    }
 
     // Only show notification if app is in background (unless forced)
     const isBackground = appStateRef.current !== 'active';
-    if (!isBackground && !options?.forceShow) return;
+    if (!isBackground && !options?.forceShow) {
+      return;
+    }
 
     try {
       await Notifications.scheduleNotificationAsync({
@@ -71,15 +106,14 @@ export function useNotifications({ enabled = true }: UseNotificationsOptions = {
           title,
           body,
           sound: true,
-          priority: Notifications.AndroidNotificationPriority.HIGH,
-          ...(Platform.OS === 'ios' && {
-            interruptionLevel: 'timeSensitive',
+          ...(Platform.OS === 'android' && {
+            priority: Notifications.AndroidNotificationPriority.HIGH,
           }),
         },
         trigger: null, // Show immediately
       });
     } catch {
-      // Notification failed, ignore
+      // Notification failed silently
     }
   }, [enabled]);
 
@@ -93,8 +127,14 @@ export function useNotifications({ enabled = true }: UseNotificationsOptions = {
     notify('Claude finished', truncated);
   }, [notify]);
 
+  // Force a test notification (for debugging)
+  const testNotification = useCallback(() => {
+    notify('Test Notification', 'This is a test from Claude mobile agent', { forceShow: true });
+  }, [notify]);
+
   return {
     notify,
     notifyTaskComplete,
+    testNotification,
   };
 }
