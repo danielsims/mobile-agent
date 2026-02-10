@@ -321,23 +321,39 @@ function AppInner() {
     );
   }
 
-  // Dashboard
-  if (screen === 'dashboard') {
+  // Dashboard + Agent detail (layered so dashboard is visible during swipe-back)
+  if (screen === 'dashboard' || (screen === 'agent' && selectedAgentId)) {
     return (
       <View style={styles.container}>
         <StatusBar style="light" />
         <SafeAreaView style={styles.safeTop} />
-        <Dashboard
-          connectionStatus={connectionStatus}
-          projects={projects}
-          onSelectAgent={handleSelectAgent}
-          onCreateAgent={handleCreateAgent}
-          onDestroyAgent={handleDestroyAgent}
-          onSendMessage={handleSendMessage}
-          onOpenSettings={handleUnpair}
-        />
+        <View style={styles.layerBase} pointerEvents={screen === 'agent' ? 'none' : 'auto'}>
+          <Dashboard
+            connectionStatus={connectionStatus}
+            projects={projects}
+            onSelectAgent={handleSelectAgent}
+            onCreateAgent={handleCreateAgent}
+            onDestroyAgent={handleDestroyAgent}
+            onSendMessage={handleSendMessage}
+            onOpenSettings={handleUnpair}
+          />
+        </View>
+        {screen === 'agent' && selectedAgentId && (
+          <View style={styles.layerOverlay} pointerEvents="box-none">
+            <SafeAreaView style={styles.safeTop} />
+            <AgentDetailScreen
+              agentId={selectedAgentId}
+              connectionStatus={connectionStatus}
+              projects={projects}
+              onBack={handleBackToDashboard}
+              onSendMessage={handleSendMessage}
+              onRespondPermission={handleRespondPermission}
+              onResetPingTimer={resetPingTimer}
+            />
+          </View>
+        )}
         <CreateAgentModal
-          visible={showCreateModal}
+          visible={showCreateModal && screen === 'dashboard'}
           projects={projects}
           projectsLoading={projectsLoading}
           onClose={() => setShowCreateModal(false)}
@@ -345,24 +361,6 @@ function AppInner() {
           onRequestProjects={handleRequestProjects}
           onCreateWorktree={handleCreateWorktree}
           onUnregisterProject={handleUnregisterProject}
-        />
-      </View>
-    );
-  }
-
-  // Agent detail
-  if (screen === 'agent' && selectedAgentId) {
-    return (
-      <View style={styles.container}>
-        <StatusBar style="light" />
-        <SafeAreaView style={styles.safeTop} />
-        <AgentDetailScreen
-          agentId={selectedAgentId}
-          connectionStatus={connectionStatus}
-          onBack={handleBackToDashboard}
-          onSendMessage={handleSendMessage}
-          onRespondPermission={handleRespondPermission}
-          onResetPingTimer={resetPingTimer}
         />
       </View>
     );
@@ -398,6 +396,12 @@ const styles = StyleSheet.create({
   },
   safeTop: {
     backgroundColor: '#0a0a0a',
+  },
+  layerBase: {
+    flex: 1,
+  },
+  layerOverlay: {
+    ...StyleSheet.absoluteFillObject,
   },
   centered: {
     flex: 1,

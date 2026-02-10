@@ -9,7 +9,6 @@ import {
   LayoutAnimation,
   UIManager,
 } from 'react-native';
-import { BlurView } from 'expo-blur';
 import * as Haptics from 'expo-haptics';
 
 // Enable LayoutAnimation on Android
@@ -115,11 +114,7 @@ export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', on
   const canSend = text.trim().length > 0 && !disabled;
 
   return (
-    <BlurView
-      intensity={80}
-      tint="dark"
-      style={styles.blurContainer}
-    >
+    <View style={styles.container}>
       <View style={styles.content}>
         <View style={styles.inputWrapper}>
           <TextInput
@@ -154,7 +149,7 @@ export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', on
       </View>
 
       {!keyboardVisible && Platform.OS === 'ios' && <View style={styles.safeAreaFill} />}
-    </BlurView>
+    </View>
   );
 }
 
@@ -168,7 +163,8 @@ function ArrowUpIcon({ color }: { color: string }) {
 }
 
 const styles = StyleSheet.create({
-  blurContainer: {
+  container: {
+    backgroundColor: '#0a0a0a',
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: 'rgba(255,255,255,0.1)',
   },
