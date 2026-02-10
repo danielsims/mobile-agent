@@ -1,6 +1,7 @@
 export { AgentCard } from './AgentCard';
 export { AgentDetailScreen } from './AgentDetailScreen';
 export { CodeBlock } from './CodeBlock';
+export { CreateAgentModal } from './CreateAgentModal';
 export { Dashboard } from './Dashboard';
 export { InputBar } from './InputBar';
 export { KeyboardScrollView } from './KeyboardScrollView';

@@ -78,7 +78,7 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
           if (msg.status) {
             dispatch({ type: 'UPDATE_AGENT_STATUS', agentId: msg.agentId, status: msg.status });
           }
-          if (msg.model || msg.tools || msg.sessionId || msg.sessionName) {
+          if (msg.model || msg.tools || msg.sessionId || msg.sessionName || msg.cwd || msg.gitBranch || msg.projectName) {
             dispatch({
               type: 'SET_SESSION_INFO',
               agentId: msg.agentId,
@@ -86,6 +86,9 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
               ...(msg.model !== undefined && { model: msg.model }),
               ...(msg.tools !== undefined && { tools: msg.tools }),
               ...(msg.sessionName !== undefined && { sessionName: msg.sessionName }),
+              ...(msg.cwd !== undefined && { cwd: msg.cwd }),
+              ...(msg.gitBranch !== undefined && { gitBranch: msg.gitBranch }),
+              ...(msg.projectName !== undefined && { projectName: msg.projectName }),
             });
           }
         }

@@ -27,6 +27,9 @@ function snapshotToAgentState(snapshot: AgentSnapshot): AgentState {
     pendingPermissions: permissionsArrayToMap(snapshot.pendingPermissions),
     model: snapshot.model,
     tools: [],
+    cwd: snapshot.cwd || null,
+    gitBranch: snapshot.gitBranch || null,
+    projectName: snapshot.projectName || null,
     totalCost: snapshot.totalCost,
     contextUsedPercent: snapshot.contextUsedPercent,
     outputTokens: snapshot.outputTokens,
@@ -88,6 +91,9 @@ export function agentReducer(state: AppState, action: AgentAction): AppState {
             ...existing,
             status: snapshot.status,
             model: snapshot.model || existing.model,
+            cwd: snapshot.cwd || existing.cwd,
+            gitBranch: snapshot.gitBranch || existing.gitBranch,
+            projectName: snapshot.projectName || existing.projectName,
             totalCost: snapshot.totalCost,
             contextUsedPercent: snapshot.contextUsedPercent,
             outputTokens: snapshot.outputTokens,
@@ -181,6 +187,9 @@ export function agentReducer(state: AppState, action: AgentAction): AppState {
         ...(action.tools !== undefined && { tools: action.tools }),
         ...(action.sessionName !== undefined && { sessionName: action.sessionName }),
         ...(action.status !== undefined && { status: action.status }),
+        ...(action.cwd !== undefined && { cwd: action.cwd }),
+        ...(action.gitBranch !== undefined && { gitBranch: action.gitBranch }),
+        ...(action.projectName !== undefined && { projectName: action.projectName }),
       }));
     }
 

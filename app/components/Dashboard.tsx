@@ -71,6 +71,9 @@ export function Dashboard({
   }, []);
 
   const handleLongPress = (agent: AgentState) => {
+    if (Platform.OS === 'ios') {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+    }
     Alert.alert(
       'Destroy Agent',
       `End "${agent.sessionName}"? This will terminate the agent process.`,

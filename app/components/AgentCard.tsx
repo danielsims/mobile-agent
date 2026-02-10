@@ -3,6 +3,7 @@ import {
   View,
   Text,
   TouchableOpacity,
+  Pressable,
   ScrollView,
   StyleSheet,
   Platform,
@@ -59,10 +60,29 @@ const STATUS_LABELS: Record<AgentStatus, string> = {
   exited: 'Exited',
 };
 
+// Format raw model ID to display name
+// e.g. "claude-opus-4-6-20250801" → "Claude Opus 4.6"
+// e.g. "claude-sonnet-4-5-20250929" → "Claude Sonnet 4.5"
+function formatModelName(model: string | null, type: AgentType): string {
+  if (!model) {
+    return type.charAt(0).toUpperCase() + type.slice(1);
+  }
+
+  // Try to parse Claude model IDs
+  const claudeMatch = model.match(/^claude-(\w+)-(\d+)-(\d+)/);
+  if (claudeMatch) {
+    const variant = claudeMatch[1].charAt(0).toUpperCase() + claudeMatch[1].slice(1);
+    return `Claude ${variant} ${claudeMatch[2]}.${claudeMatch[3]}`;
+  }
+
+  // Fallback: capitalize first letter, truncate long IDs
+  if (model.length > 30) return model.slice(0, 30) + '...';
+  return model;
+}
+
 // Extract displayable text from a message
 function extractMessageText(msg: AgentMessage): string {
   if (typeof msg.content === 'string') return msg.content;
-  // ContentBlock array — extract text and tool_use names
   return (msg.content as ContentBlock[])
     .map(block => {
       if (block.type === 'text') return block.text;
@@ -135,29 +155,18 @@ function AgentIcon({ type, size = 28 }: { type: AgentType; size?: number }) {
   );
 }
 
-// Chat bubble icon
-function ChatBubbleIcon({ size = 16 }: { size?: number }) {
-  const tailSize = size * 0.25;
+// Chevron arrow for "Open" button
+function ChevronRight({ size = 12, color = '#555' }: { size?: number; color?: string }) {
   return (
     <View style={{ width: size, height: size, justifyContent: 'center', alignItems: 'center' }}>
       <View style={{
-        width: size,
-        height: size * 0.7,
-        borderRadius: size * 0.22,
-        borderWidth: 1.5,
-        borderColor: '#666',
-        backgroundColor: 'transparent',
-      }} />
-      <View style={{
-        position: 'absolute',
-        bottom: 0,
-        left: size * 0.18,
-        width: 0,
-        height: 0,
-        borderTopWidth: tailSize,
-        borderRightWidth: tailSize,
-        borderTopColor: '#666',
-        borderRightColor: 'transparent',
+        width: size * 0.5,
+        height: size * 0.5,
+        borderRightWidth: 1.5,
+        borderBottomWidth: 1.5,
+        borderColor: color,
+        transform: [{ rotate: '-45deg' }],
+        marginLeft: -size * 0.15,
       }} />
     </View>
   );
@@ -168,17 +177,21 @@ export function AgentCard({ agent, onPress, onLongPress, onChat, layout = 'grid'
   const scrollRef = useRef<ScrollView>(null);
   const hasPermission = agent.pendingPermissions.size > 0;
   const statusColor = STATUS_COLORS[agent.status];
+  const brand = getAgentBrand(agent.type);
+
+  const modelDisplayName = useMemo(
+    () => formatModelName(agent.model, agent.type),
+    [agent.model, agent.type],
+  );
 
   // Build terminal content from messages
   const terminalContent = useMemo(() => {
     if (isFull) {
-      // Full mode: render from message history for richer content
       return agent.messages
         .map(msg => extractMessageText(msg))
         .filter(Boolean)
         .join('\n');
     }
-    // Grid mode: use lastOutput (compact)
     return getPreviewLines(agent.lastOutput, 4);
   }, [isFull, agent.messages, agent.lastOutput]);
 
@@ -194,33 +207,65 @@ export function AgentCard({ agent, onPress, onLongPress, onChat, layout = 'grid'
     cardStyle.push(styles.cardFull);
   }
 
+  // Build the cwd/branch subtitle line (terminal-prompt style)
+  const cwdLine = useMemo(() => {
+    if (!agent.projectName && !agent.cwd) return null;
+    const name = agent.projectName || '';
+    const branch = agent.gitBranch;
+    if (branch) return `${name} git:(${branch})`;
+    return name;
+  }, [agent.projectName, agent.cwd, agent.gitBranch]);
+
+  // Always use the agent type icon (Claude logo, Codex X, etc.)
+  const iconElement = <AgentIcon type={agent.type} size={isFull ? 32 : 28} />;
+
   const headerContent = (
-    <>
-      {/* Header: icon + name */}
-      <View style={styles.header}>
-        <AgentIcon type={agent.type} size={isFull ? 32 : 28} />
-        <View style={styles.headerInfo}>
-          <Text style={[styles.sessionName, isFull && styles.sessionNameFull]} numberOfLines={1}>
-            {agent.sessionName}
+    <View style={styles.header}>
+      {iconElement}
+      <View style={styles.headerInfo}>
+        <Text style={[styles.modelName, isFull && styles.modelNameFull]} numberOfLines={1}>
+          {modelDisplayName}
+        </Text>
+        <View style={styles.statusRow}>
+          <StatusDot status={agent.status} size={isFull ? 7 : 6} />
+          <Text style={[styles.statusText, { color: statusColor }, isFull && styles.statusTextFull]}>
+            {STATUS_LABELS[agent.status]}
           </Text>
-          <View style={styles.statusRow}>
-            <StatusDot status={agent.status} size={isFull ? 7 : 6} />
-            <Text style={[styles.statusText, { color: statusColor }, isFull && styles.statusTextFull]}>
-              {STATUS_LABELS[agent.status]}
-            </Text>
-          </View>
+          {cwdLine && (
+            <>
+              <View style={styles.statusSeparator} />
+              <Text style={[styles.cwdText, isFull && styles.cwdTextFull]} numberOfLines={1}>
+                {cwdLine}
+              </Text>
+            </>
+          )}
         </View>
       </View>
-
-      {/* Permission banner */}
-      {hasPermission && (
-        <View style={styles.permissionBanner}>
-          <Text style={styles.permissionDot}>●</Text>
-          <Text style={styles.permissionText}>Permission needed</Text>
-        </View>
-      )}
-    </>
+      <TouchableOpacity
+        style={styles.openButton}
+        onPress={onPress}
+        activeOpacity={0.6}
+        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+      >
+        <Text style={styles.openButtonText}>Open</Text>
+        <ChevronRight size={10} color="#666" />
+      </TouchableOpacity>
+    </View>
   );
+
+  const permissionBanner = hasPermission ? (
+    <View style={styles.permissionBanner}>
+      <Text style={styles.permissionDot}>●</Text>
+      <Text style={styles.permissionText}>Permission needed</Text>
+    </View>
+  ) : null;
+
+  // Session name as identifier subtitle (only show if it differs from model name)
+  const sessionSubtitle = agent.sessionName && agent.sessionName !== 'New Agent' ? (
+    <Text style={[styles.sessionName, isFull && styles.sessionNameFull]} numberOfLines={1}>
+      {agent.sessionName}
+    </Text>
+  ) : null;
 
   const bodyContent = terminalContent ? (
     isFull ? (
@@ -250,9 +295,6 @@ export function AgentCard({ agent, onPress, onLongPress, onChat, layout = 'grid'
   const footerContent = (
     <View style={styles.footer}>
       <View style={styles.footerLeft}>
-        <Text style={[styles.footerModel, isFull && styles.footerModelFull]} numberOfLines={1}>
-          {agent.model || agent.type}
-        </Text>
         {agent.contextUsedPercent > 0 && (
           <View style={[styles.contextBar, isFull && styles.contextBarFull]}>
             <View
@@ -267,36 +309,43 @@ export function AgentCard({ agent, onPress, onLongPress, onChat, layout = 'grid'
             />
           </View>
         )}
+        {agent.totalCost > 0 && (
+          <Text style={styles.costText}>${agent.totalCost.toFixed(2)}</Text>
+        )}
       </View>
       <TouchableOpacity
-        style={styles.chatButton}
+        style={[styles.messageButton, { borderColor: brand.bg }]}
         onPress={() => onChat ? onChat() : onPress()}
         activeOpacity={0.6}
-        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
       >
-        <ChatBubbleIcon size={isFull ? 18 : 16} />
+        <Text style={[styles.messageButtonText, { color: brand.color }]}>Message</Text>
       </TouchableOpacity>
     </View>
   );
 
-  // Full mode: header taps to navigate, body scrolls independently
+  // Full mode: long press on the entire card for destroy, body scrolls independently,
+  // navigation via the explicit "Open" button in the header.
+  // Using only onLongPress (no onPress) so ScrollView gets normal touch events.
   if (isFull) {
     return (
-      <View style={cardStyle}>
-        <TouchableOpacity onPress={onPress} onLongPress={onLongPress} activeOpacity={0.7} delayLongPress={500}>
-          {headerContent}
-        </TouchableOpacity>
+      <Pressable style={cardStyle} onLongPress={onLongPress} delayLongPress={500}>
+        {headerContent}
+        {permissionBanner}
+        {sessionSubtitle}
         <View style={styles.body}>{bodyContent}</View>
         {footerContent}
-      </View>
+      </Pressable>
     );
   }
 
-  // Grid mode: header + body tappable (no scrolling), footer separate for chat button
+  // Grid mode: header + body tappable (no scrolling), footer separate for message button
   return (
     <View style={cardStyle}>
       <TouchableOpacity style={styles.cardTappable} onPress={onPress} onLongPress={onLongPress} activeOpacity={0.7} delayLongPress={500}>
         {headerContent}
+        {permissionBanner}
+        {sessionSubtitle}
         <View style={styles.body}>{bodyContent}</View>
       </TouchableOpacity>
       {footerContent}
@@ -359,7 +408,7 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 8,
+    marginBottom: 6,
   },
   agentIcon: {
     borderRadius: 8,
@@ -376,14 +425,14 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
   },
-  sessionName: {
+  modelName: {
     color: '#e5e5e5',
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '600',
     marginBottom: 2,
   },
-  sessionNameFull: {
-    fontSize: 15,
+  modelNameFull: {
+    fontSize: 16,
   },
   statusRow: {
     flexDirection: 'row',
@@ -396,6 +445,48 @@ const styles = StyleSheet.create({
   },
   statusTextFull: {
     fontSize: 11,
+  },
+  statusSeparator: {
+    width: 3,
+    height: 3,
+    borderRadius: 1.5,
+    backgroundColor: '#333',
+    marginHorizontal: 2,
+  },
+  cwdText: {
+    color: '#555',
+    fontSize: 10,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    flex: 1,
+  },
+  cwdTextFull: {
+    fontSize: 11,
+  },
+  // Open button
+  openButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 6,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+  },
+  openButtonText: {
+    color: '#666',
+    fontSize: 11,
+    fontWeight: '500',
+  },
+  // Session name subtitle
+  sessionName: {
+    color: '#4a4a4a',
+    fontSize: 11,
+    marginBottom: 6,
+    paddingLeft: 36, // align with header text (icon width + margin)
+  },
+  sessionNameFull: {
+    fontSize: 12,
+    paddingLeft: 40,
   },
   // Permission banner
   permissionBanner: {
@@ -459,15 +550,22 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: 8,
   },
-  footerModel: {
+  costText: {
     color: '#4a4a4a',
     fontSize: 10,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
-  footerModelFull: {
+  // Message button (replaces chat bubble icon)
+  messageButton: {
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  messageButtonText: {
     fontSize: 11,
-  },
-  chatButton: {
-    padding: 4,
+    fontWeight: '500',
   },
   contextBar: {
     width: 28,

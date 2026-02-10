@@ -68,6 +68,9 @@ export interface AgentState {
   pendingPermissions: Map<string, PermissionRequest>;
   model: string | null;
   tools: string[];
+  cwd: string | null;
+  gitBranch: string | null;
+  projectName: string | null;
   totalCost: number;
   contextUsedPercent: number;
   outputTokens: number;
@@ -95,7 +98,7 @@ export type AgentAction =
   | { type: 'SET_MESSAGES'; agentId: string; messages: AgentMessage[] }
   | { type: 'ADD_PERMISSION'; agentId: string; permission: PermissionRequest }
   | { type: 'REMOVE_PERMISSION'; agentId: string; requestId: string }
-  | { type: 'SET_SESSION_INFO'; agentId: string; sessionId?: string; model?: string; tools?: string[]; sessionName?: string; status?: AgentStatus }
+  | { type: 'SET_SESSION_INFO'; agentId: string; sessionId?: string; model?: string; tools?: string[]; sessionName?: string; status?: AgentStatus; cwd?: string; gitBranch?: string; projectName?: string }
   | { type: 'UPDATE_COST'; agentId: string; totalCost: number; outputTokens: number; contextUsedPercent: number }
   | { type: 'SET_PERMISSIONS'; agentId: string; permissions: PermissionRequest[] }
   | { type: 'SET_DRAFT'; agentId: string; text: string }
@@ -111,12 +114,31 @@ export interface AgentSnapshot {
   sessionId: string | null;
   sessionName: string;
   model: string | null;
+  cwd: string | null;
+  gitBranch: string | null;
+  projectName: string | null;
   totalCost: number;
   contextUsedPercent: number;
   outputTokens: number;
   lastOutput: string;
   pendingPermissions: PermissionRequest[];
   createdAt: number;
+}
+
+// --- Project/Worktree Types ---
+
+export interface Worktree {
+  path: string;
+  branch: string;
+  isMain: boolean;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  path: string;
+  icon: string | null;
+  worktrees: Worktree[];
 }
 
 // --- Server Messages (new protocol) ---
@@ -159,10 +181,21 @@ export interface ServerMessage {
   sessionName?: string;
   model?: string;
   tools?: string[];
+  cwd?: string;
+  gitBranch?: string;
+  projectName?: string;
 
   // agentHistory
   messages?: AgentMessage[];
   pendingPermissions?: PermissionRequest[];
+
+  // projectList
+  projects?: Project[];
+
+  // worktreeCreated / worktreeRemoved
+  projectId?: string;
+  worktree?: Worktree;
+  worktrees?: Worktree[];
 
   // error
   error?: string;

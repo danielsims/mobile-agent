@@ -4,6 +4,57 @@ import { spawn } from 'node:child_process';
 import qrcode from 'qrcode-terminal';
 import { Bridge } from './bridge.js';
 import { hasDevices, logAudit, PAIRING_TOKEN_TTL_MS } from './auth.js';
+import { loadProjects, registerProject, unregisterProject, getProjects } from './projects.js';
+
+// --- CLI Subcommands (handled before starting the server) ---
+
+const subcommand = process.argv[2];
+
+if (subcommand === 'register') {
+  const targetPath = process.argv[3];
+  if (!targetPath) {
+    console.error('Usage: mobile-agent register <path-to-repo> [name]');
+    process.exit(1);
+  }
+  loadProjects();
+  try {
+    const result = registerProject(targetPath, process.argv[4]);
+    console.log(`Registered project: ${result.name} (${result.path}) [${result.id}]`);
+  } catch (e) {
+    console.error(`Failed: ${e.message}`);
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
+if (subcommand === 'unregister') {
+  const projectId = process.argv[3];
+  if (!projectId) {
+    console.error('Usage: mobile-agent unregister <project-id>');
+    process.exit(1);
+  }
+  loadProjects();
+  const removed = unregisterProject(projectId);
+  console.log(removed ? 'Project unregistered.' : 'Project not found.');
+  process.exit(0);
+}
+
+if (subcommand === 'projects') {
+  loadProjects();
+  const all = getProjects();
+  const entries = Object.entries(all);
+  if (entries.length === 0) {
+    console.log('No registered projects.');
+  } else {
+    console.log('Registered projects:');
+    for (const [id, p] of entries) {
+      console.log(`  ${id}  ${p.name}  ${p.path}`);
+    }
+  }
+  process.exit(0);
+}
+
+// --- Server ---
 
 const PORT = parseInt(process.env.PORT, 10) || 3001;
 

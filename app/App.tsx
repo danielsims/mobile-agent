@@ -12,11 +12,12 @@ import {
 } from 'react-native';
 
 import { AgentProvider, useAgentState } from './state/AgentContext';
-import { Dashboard, AgentDetailScreen } from './components';
+import { Dashboard, AgentDetailScreen, CreateAgentModal } from './components';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useNotifications } from './hooks/useNotifications';
 import { useCompletionChime } from './hooks/useCompletionChime';
 import { parseQRCode, clearCredentials, getStoredServerPublicKey, updateServerUrl, type QRPairingData } from './utils/auth';
+import type { Project, AgentType } from './state/types';
 
 type Screen = 'pairing' | 'scanner' | 'dashboard' | 'agent';
 
@@ -27,6 +28,9 @@ function AppInner() {
   const scannedRef = useRef(false); // Synchronous guard — state is async
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [permission, requestPermission] = useCameraPermissions();
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(false);
 
   const { state, dispatch, handleServerMessage } = useAgentState();
   const { notifyTaskComplete } = useNotifications();
@@ -47,6 +51,22 @@ function AppInner() {
       for (const agent of msg.agents) {
         sendRef.current('getHistory', { agentId: agent.id });
       }
+    }
+
+    // Project list response
+    if (msg.type === 'projectList') {
+      console.log('[App] Received projectList:', JSON.stringify(msg.projects));
+      if (msg.projects) {
+        setProjects(msg.projects);
+      }
+      setProjectsLoading(false);
+    }
+
+    // Worktree created — update projects list with new worktrees
+    if (msg.type === 'worktreeCreated' && msg.projectId && msg.worktrees) {
+      setProjects(prev => prev.map(p =>
+        p.id === msg.projectId ? { ...p, worktrees: msg.worktrees! } : p
+      ));
     }
 
     // Play chime + notify on agent result
@@ -156,7 +176,29 @@ function AppInner() {
 
   // Agent actions
   const handleCreateAgent = () => {
-    send('createAgent', { agentType: 'claude' });
+    setShowCreateModal(true);
+  };
+
+  const handleCreateAgentSubmit = (config: {
+    agentType: AgentType;
+    projectId?: string;
+    worktreePath?: string;
+  }) => {
+    send('createAgent', {
+      agentType: config.agentType,
+      projectId: config.projectId,
+      worktreePath: config.worktreePath,
+    });
+  };
+
+  const handleRequestProjects = () => {
+    setProjectsLoading(true);
+    const sent = send('listProjects');
+    console.log('[App] listProjects sent:', sent, 'connectionStatus:', connectionStatus);
+  };
+
+  const handleCreateWorktree = (projectId: string, branchName: string) => {
+    send('createWorktree', { projectId, branchName });
   };
 
   const handleDestroyAgent = (agentId: string) => {
@@ -268,6 +310,15 @@ function AppInner() {
           onDestroyAgent={handleDestroyAgent}
           onSendMessage={handleSendMessage}
           onOpenSettings={handleUnpair}
+        />
+        <CreateAgentModal
+          visible={showCreateModal}
+          projects={projects}
+          projectsLoading={projectsLoading}
+          onClose={() => setShowCreateModal(false)}
+          onSubmit={handleCreateAgentSubmit}
+          onRequestProjects={handleRequestProjects}
+          onCreateWorktree={handleCreateWorktree}
         />
       </View>
     );

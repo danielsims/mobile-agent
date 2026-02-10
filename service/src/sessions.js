@@ -41,6 +41,7 @@ export function saveSession(agentId, info) {
     type: info.type || 'claude',
     sessionName: info.sessionName || null,
     createdAt: info.createdAt || Date.now(),
+    cwd: info.cwd || null,
   };
   writeSessions();
 }

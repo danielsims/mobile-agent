@@ -1,5 +1,6 @@
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { basename } from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
 
 const MAX_HISTORY = 200;
@@ -35,6 +36,9 @@ export class AgentSession {
     this.pendingPermissions = new Map();
     this.model = null;
     this.tools = [];
+    this.cwd = null;
+    this.gitBranch = null;
+    this.projectName = null;
     this.totalCost = 0;
     this.contextUsedPercent = 0;
     this.outputTokens = 0;
@@ -70,7 +74,7 @@ export class AgentSession {
    * @param {number} serverPort
    * @param {string|null} resumeSessionId - If provided, passes --resume to restore a previous session
    */
-  spawn(serverPort, resumeSessionId = null) {
+  spawn(serverPort, resumeSessionId = null, cwd = null) {
     const sdkUrl = `ws://127.0.0.1:${serverPort}/ws/cli/${this.id}`;
 
     // --sdk-url makes the CLI connect as a WebSocket client to our server.
@@ -90,7 +94,7 @@ export class AgentSession {
     console.log(`[Agent ${this.id.slice(0, 8)}] Spawning: ${CLAUDE_PATH} ${resumeSessionId ? `--resume ${resumeSessionId.slice(0, 8)}...` : '--sdk-url'} ws://.../${this.id.slice(0, 8)}...`);
 
     this._process = spawn(CLAUDE_PATH, args, {
-      cwd: process.env.HOME,
+      cwd: cwd || process.env.HOME,
       env: { ...process.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -186,12 +190,31 @@ export class AgentSession {
           this.model = msg.model || null;
           this.tools = msg.tools || [];
           this._initialized = true;
-          console.log(`[Agent ${this.id.slice(0, 8)}] Init: model=${this.model}, permissionMode=${msg.permissionMode || 'default'}, tools=${this.tools.length}`);
+
+          // Capture working directory and derive git info
+          if (msg.cwd) {
+            this.cwd = msg.cwd;
+            this.projectName = basename(msg.cwd);
+            try {
+              this.gitBranch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+                cwd: msg.cwd,
+                encoding: 'utf-8',
+                timeout: 3000,
+              }).trim();
+            } catch {
+              this.gitBranch = null;
+            }
+          }
+
+          console.log(`[Agent ${this.id.slice(0, 8)}] Init: model=${this.model}, cwd=${this.projectName || '?'}, branch=${this.gitBranch || '?'}, tools=${this.tools.length}`);
           this._broadcast('agentUpdated', {
             agentId: this.id,
             sessionId: this.sessionId,
             model: this.model,
             tools: this.tools,
+            cwd: this.cwd,
+            gitBranch: this.gitBranch,
+            projectName: this.projectName,
             status: 'running',
           });
           // Don't set idle here — init comes right before first response
@@ -311,6 +334,10 @@ export class AgentSession {
         });
         break;
       }
+
+      // User messages (tool results echoed back) — no action needed
+      case 'user':
+        break;
 
       default:
         if (msg.type) {
@@ -434,6 +461,9 @@ export class AgentSession {
       sessionId: this.sessionId,
       sessionName: this.sessionName || 'New Agent',
       model: this.model,
+      cwd: this.cwd,
+      gitBranch: this.gitBranch,
+      projectName: this.projectName,
       totalCost: this.totalCost,
       contextUsedPercent: this.contextUsedPercent,
       outputTokens: this.outputTokens,

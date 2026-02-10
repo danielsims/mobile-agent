@@ -13,6 +13,16 @@ import {
   logAudit,
 } from './auth.js';
 import { loadSessions, getSavedSessions, saveSession, removeSession } from './sessions.js';
+import {
+  loadProjects,
+  getProjects,
+  getProject,
+  listWorktrees,
+  createWorktree,
+  removeWorktree,
+  resolveProjectCwd,
+  getProjectIcon,
+} from './projects.js';
 
 const MAX_CONCURRENT_AGENTS = 10;
 const IDLE_TIMEOUT_MS = 30 * 60_000; // 30 minutes
@@ -38,6 +48,7 @@ export class Bridge {
     // Initialize auth keys and load saved sessions
     const { publicKeyRaw } = initializeKeys();
     loadSessions();
+    loadProjects();
     console.log(`Server public key: ${publicKeyRaw.toString('hex').slice(0, 16)}...`);
 
     return new Promise((resolve) => {
@@ -281,6 +292,7 @@ export class Bridge {
           type: session.type,
           sessionName: session.sessionName,
           createdAt: session.createdAt,
+          cwd: session.cwd,
         });
       }
 
@@ -319,7 +331,7 @@ export class Bridge {
 
       this._setupAgentBroadcast(session);
       this.agents.set(agentId, session);
-      session.spawn(this.port, info.sessionId);
+      session.spawn(this.port, info.sessionId, info.cwd || null);
 
       logAudit('agent_restored', {
         agentId: agentId.slice(0, 8),
@@ -357,6 +369,18 @@ export class Bridge {
         this._handleGetHistory(ws, msg);
         break;
 
+      case 'listProjects':
+        this._handleListProjects(ws);
+        break;
+
+      case 'createWorktree':
+        this._handleCreateWorktree(ws, msg, deviceId);
+        break;
+
+      case 'removeWorktree':
+        this._handleRemoveWorktree(ws, msg, deviceId);
+        break;
+
       case 'ping':
         this._sendTo(ws, 'pong');
         break;
@@ -381,14 +405,26 @@ export class Bridge {
 
     const agentId = uuidv4();
     const type = msg.agentType || 'claude';
+
+    // Resolve working directory from project/worktree selection
+    let cwd = null;
+    if (msg.projectId) {
+      try {
+        cwd = resolveProjectCwd(msg.projectId, msg.worktreePath || null);
+      } catch (e) {
+        this._sendTo(ws, 'error', { error: `Invalid project/worktree: ${e.message}` });
+        return;
+      }
+    }
+
     const session = new AgentSession(agentId, type);
 
     this._setupAgentBroadcast(session);
     this.agents.set(agentId, session);
-    logAudit('agent_created', { agentId: agentId.slice(0, 8), type, deviceId });
+    logAudit('agent_created', { agentId: agentId.slice(0, 8), type, deviceId, cwd: cwd || '~' });
 
-    // Spawn the CLI process (it will connect back to /ws/cli/:agentId)
-    session.spawn(this.port);
+    // Spawn the CLI process in the selected directory (or $HOME by default)
+    session.spawn(this.port, null, cwd);
 
     this._broadcastToMobile('agentCreated', { agent: session.getSnapshot() });
   }
@@ -471,6 +507,84 @@ export class Bridge {
       messages: history.messages,
       pendingPermissions: history.pendingPermissions,
     });
+  }
+
+  // --- Project/Worktree handlers ---
+
+  _handleListProjects(ws) {
+    try {
+      loadProjects(); // Reload from disk — projects may have been registered via CLI
+      const all = getProjects();
+      const result = [];
+
+      for (const [id, project] of Object.entries(all)) {
+        let worktrees = [];
+        try {
+          worktrees = listWorktrees(id);
+        } catch (e) {
+          console.error(`[Projects] Failed to list worktrees for ${id}:`, e.message);
+        }
+
+        let icon = null;
+        try {
+          icon = getProjectIcon(project.path);
+        } catch (e) {
+          console.error(`[Projects] Failed to get icon for ${id}:`, e.message);
+        }
+
+        result.push({
+          id,
+          name: project.name,
+          path: project.path,
+          icon,
+          worktrees,
+        });
+      }
+
+      console.log(`[Projects] Sending ${result.length} project(s) to mobile`);
+      this._sendTo(ws, 'projectList', { projects: result });
+    } catch (e) {
+      console.error('[Projects] _handleListProjects failed:', e);
+      this._sendTo(ws, 'projectList', { projects: [] });
+    }
+  }
+
+  _handleCreateWorktree(ws, msg, deviceId) {
+    const { projectId, branchName } = msg;
+
+    if (!projectId || !branchName) {
+      this._sendTo(ws, 'error', { error: 'projectId and branchName required.' });
+      return;
+    }
+
+    try {
+      const worktree = createWorktree(projectId, branchName);
+      logAudit('worktree_created_remote', { projectId, branchName, deviceId });
+
+      const worktrees = listWorktrees(projectId);
+      this._sendTo(ws, 'worktreeCreated', { projectId, worktree, worktrees });
+    } catch (e) {
+      this._sendTo(ws, 'error', { error: e.message });
+    }
+  }
+
+  _handleRemoveWorktree(ws, msg, deviceId) {
+    const { projectId, worktreePath } = msg;
+
+    if (!projectId || !worktreePath) {
+      this._sendTo(ws, 'error', { error: 'projectId and worktreePath required.' });
+      return;
+    }
+
+    try {
+      removeWorktree(projectId, worktreePath);
+      logAudit('worktree_removed_remote', { projectId, worktreePath, deviceId });
+
+      const worktrees = listWorktrees(projectId);
+      this._sendTo(ws, 'worktreeRemoved', { projectId, worktrees });
+    } catch (e) {
+      this._sendTo(ws, 'error', { error: e.message });
+    }
   }
 
   // --- Broadcasting ---
