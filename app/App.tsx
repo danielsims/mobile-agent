@@ -1,6 +1,6 @@
 import { StatusBar } from 'expo-status-bar';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   StyleSheet,
   Text,
@@ -16,7 +16,7 @@ import { Dashboard, AgentDetailScreen, CreateAgentModal } from './components';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useNotifications } from './hooks/useNotifications';
 import { useCompletionChime } from './hooks/useCompletionChime';
-import { parseQRCode, clearCredentials, getStoredServerPublicKey, updateServerUrl, type QRPairingData } from './utils/auth';
+import { parseQRCode, clearCredentials, isPaired, type QRPairingData } from './utils/auth';
 import type { Project, AgentType } from './state/types';
 
 type Screen = 'pairing' | 'scanner' | 'dashboard' | 'agent';
@@ -36,6 +36,12 @@ function AppInner() {
   const { notifyTaskComplete } = useNotifications();
   const { play: playChime } = useCompletionChime();
 
+  // Whether we have stored pairing credentials (checked on mount, updated on pair/unpair)
+  const [hasCreds, setHasCreds] = useState(false);
+  useEffect(() => {
+    isPaired().then(setHasCreds);
+  }, []);
+
   // Stable refs for WebSocket callbacks — avoids stale closures
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -47,10 +53,12 @@ function AppInner() {
     handleServerMessageRef.current(msg);
 
     // On initial connect, request history for all agents so dashboard cards show content
+    // and fetch projects so agent card favicons are available immediately
     if (msg.type === 'connected' && msg.agents) {
       for (const agent of msg.agents) {
         sendRef.current('getHistory', { agentId: agent.id });
       }
+      sendRef.current('listProjects');
     }
 
     // Project list response
@@ -80,6 +88,7 @@ function AppInner() {
   }, [playChime, notifyTaskComplete]);
 
   const onWsConnect = useCallback(() => {
+    setHasCreds(true);
     // Navigate to dashboard from pre-auth screens.
     // If already on dashboard/agent (mid-session reconnect), stay put.
     setScreen(prev =>
@@ -111,13 +120,14 @@ function AppInner() {
     onConnect: onWsConnect,
     onDisconnect: onWsDisconnect,
     onAuthError: () => {
-      // Auth failed — connection will close, onWsDisconnect navigates to pairing.
-      // No alert needed — user just sees the scan button again.
+      clearCredentials();
+      setHasCreds(false);
     },
   });
 
   // Keep sendRef in sync so onWsMessage can call send() without circular deps
   sendRef.current = send;
+
 
   // QR code scanning
   const handleScanPress = async () => {
@@ -152,15 +162,11 @@ function AppInner() {
     // onWsConnect will navigate to dashboard when the connection succeeds.
     setScreen('pairing');
 
-    // Check if already paired with this server (same public key).
-    // If so, just update the URL and reconnect — don't consume the pairing token.
-    const storedServerPub = await getStoredServerPublicKey();
-    if (storedServerPub && storedServerPub === qrData.serverPublicKey) {
-      await updateServerUrl(qrData.url);
-      connect();
-    } else {
-      pair(qrData);
-    }
+    // Always pair when scanning a QR code. The token is fresh from the QR,
+    // and re-pairing handles device re-registration cleanly (e.g. after service
+    // restart where the device was lost from devices.json, or after app reinstall
+    // where the device generated a new keypair).
+    pair(qrData);
     // Success: onWsConnect → dashboard
     // Failure: onWsDisconnect → stays on pairing, status resets, button reappears
   };
@@ -168,6 +174,7 @@ function AppInner() {
   const handleUnpair = async () => {
     disconnect();
     await clearCredentials();
+    setHasCreds(false);
     dispatch({ type: 'SET_AGENTS', agents: [] });
     dispatch({ type: 'SET_ACTIVE_AGENT', agentId: null });
     setScreen('pairing');
@@ -278,16 +285,31 @@ function AppInner() {
           </Text>
 
           {isConnecting ? (
-            <View style={styles.pairingLoading}>
-              <ActivityIndicator color="#fff" size="small" />
-              <Text style={styles.pairingLoadingText}>Connecting...</Text>
-            </View>
+            <>
+              <TouchableOpacity style={styles.primaryBtnConnecting} activeOpacity={1}>
+                <View style={styles.primaryBtnRow}>
+                  <ActivityIndicator color="#888" size="small" />
+                  <Text style={styles.primaryBtnTextConnecting}>Connecting...</Text>
+                </View>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.secondaryBtn} onPress={() => disconnect()}>
+                <Text style={styles.secondaryBtnText}>Cancel</Text>
+              </TouchableOpacity>
+            </>
+          ) : hasCreds ? (
+            <>
+              <TouchableOpacity style={styles.primaryBtn} onPress={() => connect()}>
+                <Text style={styles.primaryBtnText}>Connect</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.secondaryBtn} onPress={handleScanPress}>
+                <Text style={styles.secondaryBtnText}>Scan New QR Code</Text>
+              </TouchableOpacity>
+            </>
           ) : (
             <>
               <TouchableOpacity style={styles.primaryBtn} onPress={handleScanPress}>
                 <Text style={styles.primaryBtnText}>Scan QR Code</Text>
               </TouchableOpacity>
-
               <Text style={styles.pairingHelp}>
                 Run `npm start` in the mobile-agent/service directory,{'\n'}
                 then scan the QR code shown in your terminal.
@@ -307,6 +329,7 @@ function AppInner() {
         <SafeAreaView style={styles.safeTop} />
         <Dashboard
           connectionStatus={connectionStatus}
+          projects={projects}
           onSelectAgent={handleSelectAgent}
           onCreateAgent={handleCreateAgent}
           onDestroyAgent={handleDestroyAgent}
@@ -413,20 +436,38 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
   },
+  primaryBtnConnecting: {
+    backgroundColor: '#1a1a1a',
+    padding: 16,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  primaryBtnRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  primaryBtnTextConnecting: {
+    color: '#888',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  secondaryBtn: {
+    padding: 14,
+    alignItems: 'center',
+    marginTop: 12,
+  },
+  secondaryBtnText: {
+    color: '#666',
+    fontSize: 14,
+    fontWeight: '500',
+  },
   pairingHelp: {
     color: '#555',
     fontSize: 13,
     textAlign: 'center',
     marginTop: 24,
     lineHeight: 20,
-  },
-  pairingLoading: {
-    alignItems: 'center',
-    gap: 12,
-  },
-  pairingLoadingText: {
-    color: '#888',
-    fontSize: 14,
   },
   // Scanner
   scannerContainer: {

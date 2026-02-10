@@ -118,10 +118,20 @@ async function main() {
     tunnelUrl = `ws://127.0.0.1:${PORT}`;
   }
 
+  let refreshTimer = null;
+
   function refreshQR() {
+    if (refreshTimer) clearTimeout(refreshTimer);
     const pairingInfo = bridge.getPairingInfo(tunnelUrl);
     showPairingQR(pairingInfo);
+    // Auto-refresh 30s before the token expires so there's always a valid QR
+    refreshTimer = setTimeout(refreshQR, PAIRING_TOKEN_TTL_MS - 30_000);
   }
+
+  // Auto-refresh QR after any pairing attempt (token is consumed/expired)
+  bridge.onPairingAttempt = () => {
+    refreshQR();
+  };
 
   refreshQR();
 

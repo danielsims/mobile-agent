@@ -42,6 +42,9 @@ export class Bridge {
 
     // Idle timeout tracking per mobile client
     this._idleTimers = new Map(); // ws -> timeout handle
+
+    // Called after any pairing attempt so the launcher can refresh the QR
+    this.onPairingAttempt = null;
   }
 
   /**
@@ -227,6 +230,8 @@ export class Bridge {
         console.log(`[auth] Pairing rejected from ${ip}: ${result.error}`);
         this._sendTo(ws, 'authError', { error: result.error });
       }
+      // Token is consumed (success) or expired/invalid — refresh QR
+      this.onPairingAttempt?.();
       return;
     }
 

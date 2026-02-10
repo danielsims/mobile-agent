@@ -12,12 +12,13 @@ import {
 } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { useAgentState } from '../state/AgentContext';
-import type { AgentState } from '../state/types';
+import type { AgentState, Project } from '../state/types';
 import type { ConnectionStatus } from '../types';
 import { AgentCard } from './AgentCard';
 
 interface DashboardProps {
   connectionStatus: ConnectionStatus;
+  projects: Project[];
   onSelectAgent: (agentId: string) => void;
   onCreateAgent: () => void;
   onDestroyAgent: (agentId: string) => void;
@@ -30,6 +31,7 @@ const GRID_THRESHOLD = 4;
 
 export function Dashboard({
   connectionStatus,
+  projects,
   onSelectAgent,
   onCreateAgent,
   onDestroyAgent,
@@ -190,6 +192,7 @@ export function Dashboard({
     const renderItem = ({ item }: { item: AgentState }) => (
       <AgentCard
         agent={item}
+        projects={projects}
         layout="grid"
         onPress={() => onSelectAgent(item.id)}
         onLongPress={() => handleLongPress(item)}
@@ -229,6 +232,7 @@ export function Dashboard({
             <AgentCard
               key={agent.id}
               agent={agent}
+              projects={projects}
               layout="full"
               onPress={() => onSelectAgent(agent.id)}
               onLongPress={() => handleLongPress(agent)}

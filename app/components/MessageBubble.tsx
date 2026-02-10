@@ -50,6 +50,37 @@ function extractToolDescription(input: Record<string, unknown>): string | null {
   return null;
 }
 
+// Diff view for Edit tool — shows old_string/new_string as red/green lines
+function DiffView({ filePath, oldStr, newStr }: { filePath?: string; oldStr: string; newStr: string }) {
+  const oldLines = oldStr.split('\n');
+  const newLines = newStr.split('\n');
+
+  return (
+    <View>
+      {filePath && (
+        <Text style={styles.diffHeader} numberOfLines={1}>{filePath}</Text>
+      )}
+      {oldLines.map((line, i) => (
+        <View key={`r${i}`} style={styles.diffLineRemoved}>
+          <Text style={styles.diffPrefixRemoved}>-</Text>
+          <Text style={styles.diffTextRemoved}>{line}</Text>
+        </View>
+      ))}
+      {newLines.map((line, i) => (
+        <View key={`a${i}`} style={styles.diffLineAdded}>
+          <Text style={styles.diffPrefixAdded}>+</Text>
+          <Text style={styles.diffTextAdded}>{line}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+// Check if a tool_use block is an Edit with old_string/new_string
+function isEditWithDiff(name: string, input: Record<string, unknown>): boolean {
+  return name === 'Edit' && typeof input.old_string === 'string' && typeof input.new_string === 'string';
+}
+
 // Collapsible tool invocation card
 function ToolUseCard({ block, result }: { block: ContentBlock & { type: 'tool_use' }; result?: string | null }) {
   const [expanded, setExpanded] = useState(false);
@@ -78,14 +109,31 @@ function ToolUseCard({ block, result }: { block: ContentBlock & { type: 'tool_us
 
       {expanded && (
         <View style={styles.toolBody}>
-          <Text style={styles.toolSectionLabel}>INPUT</Text>
-          <ScrollView style={styles.toolCodeScroll} nestedScrollEnabled>
-            <View style={styles.toolCodeBlock}>
-              <Text style={styles.toolCodeText}>
-                {JSON.stringify(block.input, null, 2)}
-              </Text>
-            </View>
-          </ScrollView>
+          {isEditWithDiff(block.name, block.input) ? (
+            <>
+              <Text style={styles.toolSectionLabel}>DIFF</Text>
+              <ScrollView style={styles.toolCodeScroll} nestedScrollEnabled>
+                <View style={styles.toolCodeBlock}>
+                  <DiffView
+                    filePath={typeof block.input.file_path === 'string' ? block.input.file_path : undefined}
+                    oldStr={block.input.old_string as string}
+                    newStr={block.input.new_string as string}
+                  />
+                </View>
+              </ScrollView>
+            </>
+          ) : (
+            <>
+              <Text style={styles.toolSectionLabel}>INPUT</Text>
+              <ScrollView style={styles.toolCodeScroll} nestedScrollEnabled>
+                <View style={styles.toolCodeBlock}>
+                  <Text style={styles.toolCodeText}>
+                    {JSON.stringify(block.input, null, 2)}
+                  </Text>
+                </View>
+              </ScrollView>
+            </>
+          )}
           {result != null && (
             <>
               <Text style={[styles.toolSectionLabel, { marginTop: 10 }]}>OUTPUT</Text>
@@ -329,6 +377,54 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     lineHeight: 16,
+  },
+
+  // --- Diff view ---
+  diffHeader: {
+    color: '#666',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginBottom: 8,
+  },
+  diffLineRemoved: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(239,68,68,0.08)',
+    paddingVertical: 1,
+    paddingHorizontal: 4,
+  },
+  diffLineAdded: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(34,197,94,0.08)',
+    paddingVertical: 1,
+    paddingHorizontal: 4,
+  },
+  diffPrefixRemoved: {
+    color: '#ef4444',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 16,
+    width: 14,
+  },
+  diffPrefixAdded: {
+    color: '#22c55e',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 16,
+    width: 14,
+  },
+  diffTextRemoved: {
+    color: '#ef4444',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 16,
+    flex: 1,
+  },
+  diffTextAdded: {
+    color: '#22c55e',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 16,
+    flex: 1,
   },
 
   // --- Thinking ---

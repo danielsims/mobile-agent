@@ -32,6 +32,10 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect, onAuthError }
   const reconnectAttemptsRef = useRef(0);
   const autoReconnectRef = useRef(true);
   const isAuthenticatedRef = useRef(false);
+  // Generation counter — incremented on each connect/pair call.
+  // If a connect() resumes after an async gap and finds its generation is stale,
+  // it means pair() (or another connect) started in the meantime, so it aborts.
+  const generationRef = useRef(0);
 
   const sendPing = useCallback(() => {
     if (ws.current?.readyState === WebSocket.OPEN && isAuthenticatedRef.current) {
@@ -65,10 +69,15 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect, onAuthError }
    * This is the normal auth flow after initial pairing.
    */
   const connect = useCallback(async (isReconnect = false) => {
+    const myGen = ++generationRef.current;
+
     const wsUrl = await getWebSocketUrl();
+    // After the async gap, check if a newer connect/pair call started
+    if (myGen !== generationRef.current) return;
     if (!wsUrl) return;
 
-    autoReconnectRef.current = true;
+    // Only auto-reconnect on reconnects (mid-session drops), not initial connects
+    autoReconnectRef.current = isReconnect;
     if (!isReconnect) {
       reconnectAttemptsRef.current = 0;
     }
@@ -139,6 +148,7 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect, onAuthError }
           if (msg.type === 'connected') {
             clearTimeout(connectTimeout);
             isAuthenticatedRef.current = true;
+            autoReconnectRef.current = true; // Enable reconnect for mid-session drops
             setAuthStatus('authenticated');
             setStatus('connected');
             reconnectAttemptsRef.current = 0;
@@ -206,6 +216,7 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect, onAuthError }
    * Used for initial device registration.
    */
   const pair = useCallback(async (qrData: QRPairingData) => {
+    const myGen = ++generationRef.current;
     autoReconnectRef.current = false; // Don't reconnect during pairing
 
     // Close any existing connection before opening a new one
@@ -226,6 +237,8 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect, onAuthError }
 
     // Build the pairing message (also stores server info and generates keypair)
     const pairMsg = await buildPairMessage(qrData);
+    // After the async gap, check if a newer connect/pair call started
+    if (myGen !== generationRef.current) return;
 
     // Connect to the server's mobile endpoint
     const base = qrData.url.replace(/\/+$/, '');

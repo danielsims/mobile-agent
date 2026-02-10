@@ -90,6 +90,17 @@ export class AgentSession {
   spawn(serverPort, resumeSessionId = null, cwd = null) {
     const sdkUrl = `ws://127.0.0.1:${serverPort}/ws/cli/${this.id}`;
 
+    // Set cwd/projectName early so the initial snapshot includes them
+    if (cwd) {
+      this.cwd = cwd;
+      this.projectName = basename(cwd);
+      try {
+        this.gitBranch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+          cwd, encoding: 'utf-8', timeout: 3000,
+        }).trim();
+      } catch { /* not a git repo or git not available */ }
+    }
+
     // --sdk-url makes the CLI connect as a WebSocket client to our server.
     // Without --print/-p, it connects and waits for user messages via WS.
     // system/init is sent after the first user message, not on connect.

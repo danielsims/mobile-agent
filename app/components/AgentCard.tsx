@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useMemo, useState } from 'react'
 import {
   View,
   Text,
+  Image,
   TouchableOpacity,
   ScrollView,
   StyleSheet,
@@ -11,12 +12,13 @@ import {
   type ViewStyle,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
-import type { AgentState, AgentStatus, AgentType, AgentMessage, ContentBlock } from '../state/types';
+import type { AgentState, AgentStatus, AgentType, AgentMessage, ContentBlock, Project } from '../state/types';
 
 export type CardLayout = 'full' | 'grid';
 
 interface AgentCardProps {
   agent: AgentState;
+  projects?: Project[];
   onPress: () => void;
   onLongPress: () => void;
   onDestroy?: () => void;
@@ -173,7 +175,7 @@ function ChevronRight({ size = 12, color = '#555' }: { size?: number; color?: st
   );
 }
 
-export function AgentCard({ agent, onPress, onLongPress, onDestroy, onChat, layout = 'grid' }: AgentCardProps) {
+export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, onChat, layout = 'grid' }: AgentCardProps) {
   const isFull = layout === 'full';
   const scrollRef = useRef<ScrollView>(null);
   const [bodyHeight, setBodyHeight] = useState(0);
@@ -219,8 +221,40 @@ export function AgentCard({ agent, onPress, onLongPress, onDestroy, onChat, layo
     return name;
   }, [agent.projectName, agent.cwd, agent.gitBranch]);
 
-  // Always use the agent type icon (Claude logo, Codex X, etc.)
-  const iconElement = <AgentIcon type={agent.type} size={isFull ? 32 : 28} />;
+  // Show project favicon if available, otherwise fall back to agent type icon
+  const matchedProject = useMemo(() => {
+    if (!projects?.length) return null;
+    // Match by cwd against project path and worktree paths
+    if (agent.cwd) {
+      for (const p of projects) {
+        if (agent.cwd === p.path) return p;
+        if (p.worktrees?.some(wt => agent.cwd === wt.path)) return p;
+      }
+    }
+    // Fallback: match by projectName (handles main worktree case)
+    if (agent.projectName) {
+      return projects.find(p => p.name === agent.projectName) || null;
+    }
+    return null;
+  }, [agent.cwd, agent.projectName, projects]);
+
+  const iconSize = isFull ? 32 : 28;
+  const iconElement = matchedProject ? (
+    matchedProject.icon ? (
+      <Image
+        source={{ uri: matchedProject.icon }}
+        style={{ width: iconSize, height: iconSize, borderRadius: iconSize * 0.22, marginRight: 8 }}
+      />
+    ) : (
+      <View style={[styles.agentIcon, { width: iconSize, height: iconSize, backgroundColor: 'rgba(255,255,255,0.06)' }]}>
+        <Text style={[styles.agentIconLetter, { color: '#888', fontSize: iconSize * 0.48 }]}>
+          {matchedProject.name.charAt(0).toUpperCase()}
+        </Text>
+      </View>
+    )
+  ) : (
+    <AgentIcon type={agent.type} size={iconSize} />
+  );
 
   const headerContent = (
     <View style={styles.header}>
