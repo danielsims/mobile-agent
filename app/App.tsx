@@ -55,7 +55,6 @@ function AppInner() {
 
     // Project list response
     if (msg.type === 'projectList') {
-      console.log('[App] Received projectList:', JSON.stringify(msg.projects));
       if (msg.projects) {
         setProjects(msg.projects);
       }
@@ -65,7 +64,7 @@ function AppInner() {
     // Worktree created — update projects list with new worktrees
     if (msg.type === 'worktreeCreated' && msg.projectId && msg.worktrees) {
       setProjects(prev => prev.map(p =>
-        p.id === msg.projectId ? { ...p, worktrees: msg.worktrees! } : p
+        p.id === msg.projectId ? { ...p, worktrees: msg.worktrees || [] } : p
       ));
     }
 
@@ -193,12 +192,15 @@ function AppInner() {
 
   const handleRequestProjects = () => {
     setProjectsLoading(true);
-    const sent = send('listProjects');
-    console.log('[App] listProjects sent:', sent, 'connectionStatus:', connectionStatus);
+    send('listProjects');
   };
 
   const handleCreateWorktree = (projectId: string, branchName: string) => {
     send('createWorktree', { projectId, branchName });
+  };
+
+  const handleUnregisterProject = (projectId: string) => {
+    send('unregisterProject', { projectId });
   };
 
   const handleDestroyAgent = (agentId: string) => {
@@ -319,6 +321,7 @@ function AppInner() {
           onSubmit={handleCreateAgentSubmit}
           onRequestProjects={handleRequestProjects}
           onCreateWorktree={handleCreateWorktree}
+          onUnregisterProject={handleUnregisterProject}
         />
       </View>
     );

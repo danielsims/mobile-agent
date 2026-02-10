@@ -53,6 +53,19 @@ export class AgentSession {
     this._initialized = false; // True after system/init received
   }
 
+  /**
+   * Populate from a transcript read from CLI session storage.
+   * Called on restore before the CLI reconnects.
+   * @param {{ model: string|null, messages: Array, lastOutput: string }} transcript
+   */
+  loadTranscript(transcript) {
+    if (transcript.model) this.model = transcript.model;
+    if (transcript.lastOutput) this.lastOutput = transcript.lastOutput;
+    if (transcript.messages?.length > 0) {
+      this.messageHistory = transcript.messages;
+    }
+  }
+
   setOnBroadcast(fn) {
     this._onBroadcast = fn;
   }
@@ -217,6 +230,7 @@ export class AgentSession {
             projectName: this.projectName,
             status: 'running',
           });
+
           // Don't set idle here — init comes right before first response
           this._setStatus('running');
         }
@@ -257,6 +271,7 @@ export class AgentSession {
           timestamp: Date.now(),
         });
         this._trimHistory();
+
 
         this._setStatus('running');
         this._broadcast('assistantMessage', { agentId: this.id, content: normalized });

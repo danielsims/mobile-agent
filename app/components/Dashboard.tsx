@@ -4,7 +4,6 @@ import {
   Text,
   TextInput,
   FlatList,
-  Pressable,
   TouchableOpacity,
   StyleSheet,
   Alert,
@@ -219,27 +218,26 @@ export function Dashboard({
   return (
     <View style={styles.container}>
       {header}
-      <Pressable style={styles.singleColumnContent} onPress={() => chatAgentId && handleChatDismiss()}>
-        {agents.length === 0 ? (
-          <View style={styles.emptyState}>
-            <Text style={styles.emptyTitle}>No agents running</Text>
-            <Text style={styles.emptySubtitle}>Create an agent to get started</Text>
-          </View>
-        ) : (
-          <View style={styles.singleColumnCards}>
-            {agents.map((agent) => (
-              <AgentCard
-                key={agent.id}
-                agent={agent}
-                layout="full"
-                onPress={() => onSelectAgent(agent.id)}
-                onLongPress={() => handleLongPress(agent)}
-                onChat={() => handleChatOpen(agent.id)}
-              />
-            ))}
-          </View>
-        )}
-      </Pressable>
+      {agents.length === 0 ? (
+        <View style={styles.emptyState}>
+          <Text style={styles.emptyTitle}>No agents running</Text>
+          <Text style={styles.emptySubtitle}>Create an agent to get started</Text>
+        </View>
+      ) : (
+        <View style={styles.singleColumnContent}>
+          {agents.map((agent) => (
+            <AgentCard
+              key={agent.id}
+              agent={agent}
+              layout="full"
+              onPress={() => onSelectAgent(agent.id)}
+              onLongPress={() => handleLongPress(agent)}
+              onDestroy={() => onDestroyAgent(agent.id)}
+              onChat={() => handleChatOpen(agent.id)}
+            />
+          ))}
+        </View>
+      )}
       {inlineInput}
     </View>
   );
@@ -321,10 +319,7 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingHorizontal: 16,
     paddingTop: 12,
-    paddingBottom: 34, // Safe area bottom — container extends to screen edge
-  },
-  singleColumnCards: {
-    flex: 1,
+    paddingBottom: 34,
     gap: 8,
   },
   // Empty state

@@ -7,6 +7,7 @@ import {
   TextInput,
   ScrollView,
   ActivityIndicator,
+  Alert,
   Image,
   StyleSheet,
   Platform,
@@ -27,6 +28,7 @@ interface CreateAgentModalProps {
   }) => void;
   onRequestProjects: () => void;
   onCreateWorktree: (projectId: string, branchName: string) => void;
+  onUnregisterProject: (projectId: string) => void;
 }
 
 type Step = 'type' | 'project';
@@ -79,17 +81,20 @@ export function CreateAgentModal({
   onSubmit,
   onRequestProjects,
   onCreateWorktree,
+  onUnregisterProject,
 }: CreateAgentModalProps) {
   const [step, setStep] = useState<Step>('type');
   const [selectedType, setSelectedType] = useState<AgentType>('claude');
   const [expandedNewWorktree, setExpandedNewWorktree] = useState<string | null>(null);
   const [newBranchName, setNewBranchName] = useState('');
+  const [menuProjectId, setMenuProjectId] = useState<string | null>(null);
 
   const handleClose = useCallback(() => {
     setStep('type');
     setSelectedType('claude');
     setExpandedNewWorktree(null);
     setNewBranchName('');
+    setMenuProjectId(null);
     onClose();
   }, [onClose]);
 
@@ -122,7 +127,24 @@ export function CreateAgentModal({
     setStep('type');
     setExpandedNewWorktree(null);
     setNewBranchName('');
+    setMenuProjectId(null);
   }, []);
+
+  const handleUnregister = useCallback((projectId: string, projectName: string) => {
+    setMenuProjectId(null);
+    Alert.alert(
+      'Unregister Project',
+      `Remove "${projectName}" from the project list? This won't delete any files.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Unregister',
+          style: 'destructive',
+          onPress: () => onUnregisterProject(projectId),
+        },
+      ],
+    );
+  }, [onUnregisterProject]);
 
   // --- Step 1: Agent Type ---
   if (step === 'type') {
@@ -215,7 +237,25 @@ export function CreateAgentModal({
                 <View style={styles.sectionHeader}>
                   <ProjectIcon project={project} size={24} />
                   <Text style={styles.sectionName}>{project.name}</Text>
+                  <TouchableOpacity
+                    style={styles.menuBtn}
+                    onPress={() => setMenuProjectId(menuProjectId === project.id ? null : project.id)}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  >
+                    <Text style={styles.menuBtnText}>···</Text>
+                  </TouchableOpacity>
                 </View>
+                {menuProjectId === project.id && (
+                  <View style={styles.menuDropdown}>
+                    <TouchableOpacity
+                      style={styles.menuItem}
+                      onPress={() => handleUnregister(project.id, project.name)}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.menuItemTextDestructive}>Unregister project</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
                 {project.worktrees.map(wt => (
                   <TouchableOpacity
                     key={wt.path}
@@ -409,6 +449,32 @@ const styles = StyleSheet.create({
     color: '#aaa',
     fontSize: 14,
     fontWeight: '600',
+    flex: 1,
+  },
+  menuBtn: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  menuBtnText: {
+    color: '#555',
+    fontSize: 16,
+    fontWeight: '700',
+    letterSpacing: 1,
+  },
+  menuDropdown: {
+    backgroundColor: '#222',
+    borderRadius: 8,
+    marginBottom: 4,
+    overflow: 'hidden',
+  },
+  menuItem: {
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+  },
+  menuItemTextDestructive: {
+    color: '#ef4444',
+    fontSize: 13,
+    fontWeight: '500',
   },
   // Worktree rows
   worktreeRow: {

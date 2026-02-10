@@ -1,13 +1,13 @@
-import React, { useEffect, useRef, useMemo } from 'react';
+import React, { useCallback, useEffect, useRef, useMemo, useState } from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
-  Pressable,
   ScrollView,
   StyleSheet,
   Platform,
   Animated,
+  Alert,
   type ViewStyle,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
@@ -19,6 +19,7 @@ interface AgentCardProps {
   agent: AgentState;
   onPress: () => void;
   onLongPress: () => void;
+  onDestroy?: () => void;
   onChat?: () => void;
   layout?: CardLayout;
 }
@@ -172,9 +173,11 @@ function ChevronRight({ size = 12, color = '#555' }: { size?: number; color?: st
   );
 }
 
-export function AgentCard({ agent, onPress, onLongPress, onChat, layout = 'grid' }: AgentCardProps) {
+export function AgentCard({ agent, onPress, onLongPress, onDestroy, onChat, layout = 'grid' }: AgentCardProps) {
   const isFull = layout === 'full';
   const scrollRef = useRef<ScrollView>(null);
+  const [bodyHeight, setBodyHeight] = useState(0);
+  const [showMenu, setShowMenu] = useState(false);
   const hasPermission = agent.pendingPermissions.size > 0;
   const statusColor = STATUS_COLORS[agent.status];
   const brand = getAgentBrand(agent.type);
@@ -260,18 +263,16 @@ export function AgentCard({ agent, onPress, onLongPress, onChat, layout = 'grid'
     </View>
   ) : null;
 
-  // Session name as identifier subtitle (only show if it differs from model name)
-  const sessionSubtitle = agent.sessionName && agent.sessionName !== 'New Agent' ? (
-    <Text style={[styles.sessionName, isFull && styles.sessionNameFull]} numberOfLines={1}>
-      {agent.sessionName}
-    </Text>
-  ) : null;
+  const handleBodyLayout = useCallback((e: { nativeEvent: { layout: { height: number } } }) => {
+    const h = e.nativeEvent.layout.height;
+    if (h > 0 && h !== bodyHeight) setBodyHeight(h);
+  }, [bodyHeight]);
 
   const bodyContent = terminalContent ? (
     isFull ? (
       <ScrollView
         ref={scrollRef}
-        style={styles.terminalScroll}
+        style={bodyHeight > 0 ? { maxHeight: bodyHeight } : styles.terminalScroll}
         showsVerticalScrollIndicator={false}
         nestedScrollEnabled
       >
@@ -291,6 +292,18 @@ export function AgentCard({ agent, onPress, onLongPress, onChat, layout = 'grid'
        agent.status === 'exited' ? 'Session ended' : ''}
     </Text>
   );
+
+  const handleDestroyPress = useCallback(() => {
+    setShowMenu(false);
+    Alert.alert(
+      'Remove Agent',
+      `End "${agent.sessionName}"? This will terminate the agent process.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Remove', style: 'destructive', onPress: onDestroy },
+      ],
+    );
+  }, [agent.sessionName, onDestroy]);
 
   const footerContent = (
     <View style={styles.footer}>
@@ -313,29 +326,47 @@ export function AgentCard({ agent, onPress, onLongPress, onChat, layout = 'grid'
           <Text style={styles.costText}>${agent.totalCost.toFixed(2)}</Text>
         )}
       </View>
-      <TouchableOpacity
-        style={[styles.messageButton, { borderColor: brand.bg }]}
-        onPress={() => onChat ? onChat() : onPress()}
-        activeOpacity={0.6}
-        hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
-      >
-        <Text style={[styles.messageButtonText, { color: brand.color }]}>Message</Text>
-      </TouchableOpacity>
+      <View style={styles.footerRight}>
+        <TouchableOpacity
+          style={[styles.messageButton, { borderColor: brand.bg }]}
+          onPress={() => onChat ? onChat() : onPress()}
+          activeOpacity={0.6}
+          hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+        >
+          <Text style={[styles.messageButtonText, { color: brand.color }]}>Message</Text>
+        </TouchableOpacity>
+        {isFull && onDestroy && (
+          <View>
+            <TouchableOpacity
+              style={styles.ellipsisBtn}
+              onPress={() => setShowMenu(prev => !prev)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Text style={styles.ellipsisText}>···</Text>
+            </TouchableOpacity>
+            {showMenu && (
+              <View style={styles.menuDropdown}>
+                <TouchableOpacity style={styles.menuItem} onPress={handleDestroyPress}>
+                  <Text style={styles.menuItemDestructive}>Remove agent</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          </View>
+        )}
+      </View>
     </View>
   );
 
-  // Full mode: long press on the entire card for destroy, body scrolls independently,
-  // navigation via the explicit "Open" button in the header.
-  // Using only onLongPress (no onPress) so ScrollView gets normal touch events.
+  // Full mode: no gesture wrappers around ScrollView — scrolling is reliable.
   if (isFull) {
     return (
-      <Pressable style={cardStyle} onLongPress={onLongPress} delayLongPress={500}>
+      <View style={cardStyle}>
         {headerContent}
         {permissionBanner}
-        {sessionSubtitle}
-        <View style={styles.body}>{bodyContent}</View>
+
+        <View style={styles.body} onLayout={handleBodyLayout}>{bodyContent}</View>
         {footerContent}
-      </Pressable>
+      </View>
     );
   }
 
@@ -345,7 +376,7 @@ export function AgentCard({ agent, onPress, onLongPress, onChat, layout = 'grid'
       <TouchableOpacity style={styles.cardTappable} onPress={onPress} onLongPress={onLongPress} activeOpacity={0.7} delayLongPress={500}>
         {headerContent}
         {permissionBanner}
-        {sessionSubtitle}
+
         <View style={styles.body}>{bodyContent}</View>
       </TouchableOpacity>
       {footerContent}
@@ -477,17 +508,6 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '500',
   },
-  // Session name subtitle
-  sessionName: {
-    color: '#4a4a4a',
-    fontSize: 11,
-    marginBottom: 6,
-    paddingLeft: 36, // align with header text (icon width + margin)
-  },
-  sessionNameFull: {
-    fontSize: 12,
-    paddingLeft: 40,
-  },
   // Permission banner
   permissionBanner: {
     flexDirection: 'row',
@@ -555,7 +575,44 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
-  // Message button (replaces chat bubble icon)
+  footerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  // Ellipsis menu
+  ellipsisBtn: {
+    paddingVertical: 4,
+    paddingHorizontal: 6,
+  },
+  ellipsisText: {
+    color: '#555',
+    fontSize: 16,
+    fontWeight: '600',
+    letterSpacing: 1,
+  },
+  menuDropdown: {
+    position: 'absolute',
+    bottom: '100%',
+    right: 0,
+    backgroundColor: '#1f1f1f',
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#333',
+    marginBottom: 4,
+    minWidth: 140,
+    overflow: 'hidden',
+  },
+  menuItem: {
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+  },
+  menuItemDestructive: {
+    color: '#ef4444',
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  // Message button
   messageButton: {
     paddingVertical: 4,
     paddingHorizontal: 10,

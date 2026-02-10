@@ -1,4 +1,6 @@
 import { createServer } from 'node:http';
+import { execFileSync } from 'node:child_process';
+import { basename } from 'node:path';
 import { WebSocketServer } from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import { URL } from 'node:url';
@@ -13,10 +15,12 @@ import {
   logAudit,
 } from './auth.js';
 import { loadSessions, getSavedSessions, saveSession, removeSession } from './sessions.js';
+import { readTranscript } from './transcripts.js';
 import {
   loadProjects,
   getProjects,
   getProject,
+  unregisterProject,
   listWorktrees,
   createWorktree,
   removeWorktree,
@@ -328,6 +332,22 @@ export class Bridge {
       session.sessionId = info.sessionId;
       session.sessionName = info.sessionName || 'Restored Agent';
       session.createdAt = info.createdAt || Date.now();
+      session.cwd = info.cwd || null;
+      if (info.cwd) {
+        session.projectName = basename(info.cwd);
+        try {
+          session.gitBranch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+            cwd: info.cwd, encoding: 'utf-8', timeout: 3000,
+          }).trim();
+        } catch { /* not a git repo or git not available */ }
+      }
+
+      // Read conversation history from CLI's session storage (not our own DB)
+      const transcript = readTranscript(info.type || 'claude', info.sessionId, info.cwd);
+      if (transcript) {
+        session.loadTranscript(transcript);
+        console.log(`[Agent ${agentId.slice(0, 8)}] Loaded transcript: ${transcript.messages.length} messages, model=${transcript.model || '?'}`);
+      }
 
       this._setupAgentBroadcast(session);
       this.agents.set(agentId, session);
@@ -379,6 +399,10 @@ export class Bridge {
 
       case 'removeWorktree':
         this._handleRemoveWorktree(ws, msg, deviceId);
+        break;
+
+      case 'unregisterProject':
+        this._handleUnregisterProject(ws, msg, deviceId);
         break;
 
       case 'ping':
@@ -582,6 +606,29 @@ export class Bridge {
 
       const worktrees = listWorktrees(projectId);
       this._sendTo(ws, 'worktreeRemoved', { projectId, worktrees });
+    } catch (e) {
+      this._sendTo(ws, 'error', { error: e.message });
+    }
+  }
+
+  _handleUnregisterProject(ws, msg, deviceId) {
+    const { projectId } = msg;
+
+    if (!projectId) {
+      this._sendTo(ws, 'error', { error: 'projectId required.' });
+      return;
+    }
+
+    try {
+      loadProjects(); // Reload from disk
+      const removed = unregisterProject(projectId);
+      if (!removed) {
+        this._sendTo(ws, 'error', { error: 'Project not found.' });
+        return;
+      }
+      logAudit('project_unregistered_remote', { projectId, deviceId });
+      // Send updated project list
+      this._handleListProjects(ws);
     } catch (e) {
       this._sendTo(ws, 'error', { error: e.message });
     }

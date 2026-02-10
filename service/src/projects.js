@@ -13,23 +13,17 @@ import { logAudit } from './auth.js';
 const DATA_DIR = join(process.env.HOME, '.mobile-agent');
 const PROJECTS_PATH = join(DATA_DIR, 'projects.json');
 
-// Common icon file locations to scan (checked in order, first match wins)
-const ICON_CANDIDATES = [
-  'favicon.png',
+// Icon filenames to search for (checked in order, first match wins)
+const ICON_FILENAMES = [
   'favicon.ico',
+  'favicon.png',
   'icon.png',
   'logo.png',
   'logo.svg',
-  'public/favicon.png',
-  'public/favicon.ico',
-  'public/icon.png',
-  'public/logo.png',
-  'static/favicon.png',
-  '.github/logo.png',
-  'assets/icon.png',
 ];
 
 const MAX_ICON_SIZE = 32 * 1024; // 32KB limit for base64 icons
+const ICON_SEARCH_DEPTH = 5; // Max directory depth for recursive search
 
 // Branch name validation: alphanumeric, hyphens, underscores, dots, slashes
 const BRANCH_NAME_RE = /^[a-zA-Z0-9_\-./]+$/;
@@ -285,20 +279,60 @@ export function resolveProjectCwd(projectId, worktreePath) {
 
 /**
  * Scan a project directory for a favicon/logo and return as base64 data URI.
+ * Searches recursively up to ICON_SEARCH_DEPTH levels deep, skipping
+ * node_modules, .git, and other heavy directories.
  * @param {string} projectPath
  * @returns {string|null} Data URI or null if no icon found
  */
 export function getProjectIcon(projectPath) {
-  for (const candidate of ICON_CANDIDATES) {
-    const iconPath = join(projectPath, candidate);
-    try {
-      if (!existsSync(iconPath)) continue;
+  // Build a find command that searches for icon filenames, skipping heavy dirs
+  const nameArgs = ICON_FILENAMES.flatMap((name, i) =>
+    i === 0 ? ['-name', name] : ['-o', '-name', name]
+  );
 
+  let matches;
+  try {
+    const output = execFileSync('find', [
+      projectPath,
+      '-maxdepth', String(ICON_SEARCH_DEPTH),
+      // Skip heavy/irrelevant directories
+      '(', '-name', 'node_modules', '-o', '-name', '.git', '-o', '-name', 'dist',
+            '-o', '-name', 'build', '-o', '-name', '.next', '-o', '-name', 'coverage', ')',
+      '-prune', '-o',
+      '-type', 'f',
+      '(', ...nameArgs, ')',
+      '-print',
+    ], {
+      encoding: 'utf-8',
+      timeout: 5000,
+    });
+    matches = output.trim().split('\n').filter(Boolean);
+  } catch {
+    return null;
+  }
+
+  if (matches.length === 0) return null;
+
+  // Prefer shallower paths (closer to project root) and favicon over logo
+  matches.sort((a, b) => {
+    const depthA = a.split(sep).length;
+    const depthB = b.split(sep).length;
+    if (depthA !== depthB) return depthA - depthB;
+    // Prefer favicon over icon over logo
+    const nameA = basename(a).toLowerCase();
+    const nameB = basename(b).toLowerCase();
+    const priority = (n) => n.startsWith('favicon') ? 0 : n.startsWith('icon') ? 1 : 2;
+    return priority(nameA) - priority(nameB);
+  });
+
+  // Try each match until we find one that's readable and small enough
+  for (const iconPath of matches) {
+    try {
       const stat = statSync(iconPath);
-      if (!stat.isFile() || stat.size > MAX_ICON_SIZE) continue;
+      if (!stat.isFile() || stat.size > MAX_ICON_SIZE || stat.size === 0) continue;
 
       const data = readFileSync(iconPath);
-      const ext = candidate.split('.').pop().toLowerCase();
+      const ext = iconPath.split('.').pop().toLowerCase();
 
       let mime;
       if (ext === 'png') mime = 'image/png';

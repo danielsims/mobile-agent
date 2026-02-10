@@ -2,7 +2,8 @@
 // Stores lightweight session references in ~/.mobile-agent/sessions.json
 // so agents can be restored with `claude --resume <sessionId>`.
 //
-// Follows the same pattern as auth.js (devices.json).
+// Conversation history is NOT stored here — it's read from the CLI's own
+// session storage on restore (see transcripts.js).
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -12,7 +13,7 @@ const DATA_DIR = join(process.env.HOME, '.mobile-agent');
 const SESSIONS_PATH = join(DATA_DIR, 'sessions.json');
 
 // In-memory state
-let sessions = {}; // agentId -> { sessionId, type, sessionName, createdAt }
+let sessions = {}; // agentId -> { sessionId, type, sessionName, createdAt, cwd }
 
 /**
  * Load saved sessions from disk. Called on bridge startup.
@@ -33,7 +34,7 @@ export function loadSessions() {
 /**
  * Save/update a session reference. Called when an agent gets a sessionId.
  * @param {string} agentId
- * @param {{ sessionId: string, type: string, sessionName?: string, createdAt?: number }} info
+ * @param {Object} info
  */
 export function saveSession(agentId, info) {
   sessions[agentId] = {
@@ -58,7 +59,7 @@ export function removeSession(agentId) {
 
 /**
  * Get all saved sessions.
- * @returns {Object} agentId -> { sessionId, type, sessionName, createdAt }
+ * @returns {Object} agentId -> { sessionId, type, sessionName, createdAt, cwd }
  */
 export function getSavedSessions() {
   return { ...sessions };
