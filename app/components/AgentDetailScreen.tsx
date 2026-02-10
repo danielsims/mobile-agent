@@ -1,4 +1,4 @@
-import React, { useCallback, useState, useEffect } from 'react';
+import React, { useCallback, useState, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -12,9 +12,10 @@ import * as Haptics from 'expo-haptics';
 import { useAgent, useAgentState } from '../state/AgentContext';
 import type { ConnectionStatus, PermissionRequest } from '../types';
 import { KeyboardScrollView } from './KeyboardScrollView';
-import { MessageBubble } from './MessageBubble';
+import { MessageBubble, buildToolResultMap } from './MessageBubble';
 import { InputBar } from './InputBar';
 import { CodeBlock } from './CodeBlock';
+import type { AgentMessage } from '../state/types';
 
 interface AgentDetailScreenProps {
   agentId: string;
@@ -157,6 +158,12 @@ export function AgentDetailScreen({
   const isDisabled = connectionStatus !== 'connected' || agent.status === 'exited';
   const permissions = Array.from(agent.pendingPermissions.values());
 
+  // Build a global toolUseId → result map across ALL messages
+  const toolResultMap = useMemo(
+    () => buildToolResultMap(agent.messages),
+    [agent.messages],
+  );
+
   return (
     <View style={styles.container}>
       {/* Header */}
@@ -208,7 +215,7 @@ export function AgentDetailScreen({
             <Text style={styles.placeholder}>Send a message to start...</Text>
           ) : (
             agent.messages.map((msg) => (
-              <MessageBubble key={msg.id} message={msg} />
+              <MessageBubble key={msg.id} message={msg} toolResultMap={toolResultMap} />
             ))
           )}
 

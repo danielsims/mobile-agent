@@ -1,125 +1,143 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, Platform, Linking, TouchableOpacity } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, Platform, TouchableOpacity } from 'react-native';
+import { StreamdownRN } from 'streamdown-rn';
 import type { AgentMessage, ContentBlock } from '../state/types';
-import { CodeBlock } from './CodeBlock';
 
 interface MessageBubbleProps {
   message: AgentMessage;
+  toolResultMap?: Map<string, string>;
 }
 
-// URL regex pattern
-const urlRegex = /(https?:\/\/[^\s<>"\])}]+)/g;
+// Extract markdown string from content blocks
+function blocksToMarkdown(blocks: ContentBlock[]): string {
+  return blocks
+    .filter(b => b.type === 'text')
+    .map(b => b.text)
+    .join('\n\n');
+}
 
-// Parse text for URLs and make them clickable
-function parseTextWithLinks(text: string, baseKey: number): React.ReactNode[] {
-  const parts: React.ReactNode[] = [];
-  let lastIndex = 0;
-  let match;
-  let key = baseKey;
+// Format tool name: "Read" → "Read", "Bash" → "Bash", "mcp__ide__getDiagnostics" → "getDiagnostics"
+function formatToolName(name: string): string {
+  if (name.includes('__')) {
+    const parts = name.split('__');
+    return parts[parts.length - 1];
+  }
+  return name;
+}
 
-  urlRegex.lastIndex = 0;
-  while ((match = urlRegex.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      parts.push(
-        <Text key={key++} style={styles.text}>
-          {text.slice(lastIndex, match.index)}
-        </Text>,
-      );
+// Minimal tool icon — two horizontal bars (terminal/code style)
+function ToolIcon({ size = 11, color = '#666' }: { size?: number; color?: string }) {
+  const barH = Math.max(1.5, size * 0.15);
+  return (
+    <View style={{ width: size, height: size, justifyContent: 'center', gap: size * 0.22 }}>
+      <View style={{ width: size * 0.55, height: barH, backgroundColor: color, borderRadius: barH / 2 }} />
+      <View style={{ width: size * 0.85, height: barH, backgroundColor: color, borderRadius: barH / 2 }} />
+    </View>
+  );
+}
+
+// Extract a short description from tool input for the card header.
+// Checks common field names across tools (Bash, Read, Write, Grep, Glob, Task, etc.)
+function extractToolDescription(input: Record<string, unknown>): string | null {
+  const candidates = ['description', 'file_path', 'command', 'pattern', 'query', 'url', 'prompt', 'subject'];
+  for (const key of candidates) {
+    const val = input[key];
+    if (typeof val === 'string' && val.length > 0) {
+      // Trim to a reasonable header length
+      return val.length > 80 ? val.slice(0, 80) + '...' : val;
     }
-    const url = match[1];
-    parts.push(
-      <Text key={key++} style={styles.link} onPress={() => Linking.openURL(url)}>
-        {url}
-      </Text>,
-    );
-    lastIndex = match.index + match[0].length;
   }
-  if (lastIndex < text.length) {
-    parts.push(
-      <Text key={key++} style={styles.text}>
-        {text.slice(lastIndex)}
-      </Text>,
-    );
-  }
-  return parts;
+  return null;
 }
 
-// Parse markdown-ish content with code blocks and links
-function parseContent(content: string): React.ReactNode[] {
-  const codeBlockRegex = /```(\w+)?\n([\s\S]*?)```/g;
-  const parts: React.ReactNode[] = [];
-  let lastIndex = 0;
-  let match;
-  let key = 0;
+// Collapsible tool invocation card
+function ToolUseCard({ block, result }: { block: ContentBlock & { type: 'tool_use' }; result?: string | null }) {
+  const [expanded, setExpanded] = useState(false);
+  const fallbackName = formatToolName(block.name);
+  const title = extractToolDescription(block.input) || fallbackName;
 
-  while ((match = codeBlockRegex.exec(content)) !== null) {
-    if (match.index > lastIndex) {
-      const text = content.slice(lastIndex, match.index).trim();
-      if (text) {
-        const textParts = parseTextWithLinks(text, key);
-        parts.push(<Text key={key++} style={styles.text}>{textParts}</Text>);
-        key += textParts.length;
+  return (
+    <View style={styles.toolCard}>
+      <TouchableOpacity
+        style={styles.toolHeader}
+        onPress={() => setExpanded(!expanded)}
+        activeOpacity={0.7}
+      >
+        <View style={styles.toolHeaderLeft}>
+          <ToolIcon size={11} color="#666" />
+          <Text style={styles.toolName} numberOfLines={1}>{title}</Text>
+          <View style={styles.toolBadge}>
+            <View style={styles.toolBadgeDot} />
+            <Text style={styles.toolBadgeText}>Completed</Text>
+          </View>
+        </View>
+        <View style={[styles.toolChevronBox, expanded && styles.toolChevronBoxOpen]}>
+          <View style={styles.toolChevronArrow} />
+        </View>
+      </TouchableOpacity>
+
+      {expanded && (
+        <View style={styles.toolBody}>
+          <Text style={styles.toolSectionLabel}>INPUT</Text>
+          <ScrollView style={styles.toolCodeScroll} nestedScrollEnabled>
+            <View style={styles.toolCodeBlock}>
+              <Text style={styles.toolCodeText}>
+                {JSON.stringify(block.input, null, 2)}
+              </Text>
+            </View>
+          </ScrollView>
+          {result != null && (
+            <>
+              <Text style={[styles.toolSectionLabel, { marginTop: 10 }]}>OUTPUT</Text>
+              <ScrollView style={styles.toolCodeScroll} nestedScrollEnabled>
+                <View style={styles.toolCodeBlock}>
+                  <Text style={styles.toolCodeText}>
+                    {result}
+                  </Text>
+                </View>
+              </ScrollView>
+            </>
+          )}
+        </View>
+      )}
+    </View>
+  );
+}
+
+// Build a map from tool_use id → tool_result content string across all messages
+export function buildToolResultMap(messages: AgentMessage[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const msg of messages) {
+    if (typeof msg.content === 'string') continue;
+    for (const b of msg.content) {
+      if (b.type === 'tool_result') {
+        const content = typeof b.content === 'string' ? b.content : JSON.stringify(b.content);
+        map.set(b.toolUseId, content);
       }
     }
-    parts.push(<CodeBlock key={key++} language={match[1]} code={match[2].trim()} />);
-    lastIndex = match.index + match[0].length;
   }
-
-  if (lastIndex < content.length) {
-    const text = content.slice(lastIndex).trim();
-    if (text) {
-      const textParts = parseTextWithLinks(text, key);
-      parts.push(<Text key={key++} style={styles.text}>{textParts}</Text>);
-    }
-  }
-
-  if (parts.length === 0) {
-    const textParts = parseTextWithLinks(content, 0);
-    return [<Text key={0} style={styles.text}>{textParts}</Text>];
-  }
-
-  return parts;
+  return map;
 }
 
-// Render a single ContentBlock
-function ContentBlockView({ block, index }: { block: ContentBlock; index: number }) {
+// Render a single ContentBlock (tool_result handled inline with tool_use)
+function ContentBlockView({ block, resultMap }: { block: ContentBlock; resultMap?: Map<string, string> }) {
   const [expanded, setExpanded] = useState(false);
 
   switch (block.type) {
     case 'text':
-      return <View key={index}>{parseContent(block.text)}</View>;
+      return null; // Text blocks are rendered together via StreamdownRN
 
-    case 'tool_use':
-      return (
-        <TouchableOpacity
-          key={index}
-          style={styles.toolUseContainer}
-          onPress={() => setExpanded(!expanded)}
-          activeOpacity={0.7}
-        >
-          <View style={styles.toolUseHeader}>
-            <Text style={styles.toolUseName}>{block.name}</Text>
-            <Text style={[styles.toolUseChevron, !expanded && styles.toolUseChevronDown]}>{'\u2303'}</Text>
-          </View>
-          {expanded && (
-            <CodeBlock code={JSON.stringify(block.input, null, 2)} language="json" />
-          )}
-        </TouchableOpacity>
-      );
+    case 'tool_use': {
+      const result = resultMap?.get(block.id) ?? null;
+      return <ToolUseCard block={block as ContentBlock & { type: 'tool_use' }} result={result} />;
+    }
 
     case 'tool_result':
-      return (
-        <View key={index} style={styles.toolResultContainer}>
-          <Text style={styles.toolResultText}>
-            {typeof block.content === 'string' ? block.content : JSON.stringify(block.content)}
-          </Text>
-        </View>
-      );
+      return null; // Rendered inline within the matching ToolUseCard
 
     case 'thinking':
       return (
         <TouchableOpacity
-          key={index}
           style={styles.thinkingContainer}
           onPress={() => setExpanded(!expanded)}
           activeOpacity={0.7}
@@ -136,7 +154,7 @@ function ContentBlockView({ block, index }: { block: ContentBlock; index: number
   }
 }
 
-export function MessageBubble({ message }: MessageBubbleProps) {
+export function MessageBubble({ message, toolResultMap }: MessageBubbleProps) {
   const isUser = message.type === 'user';
   const isSystem = message.type === 'system';
 
@@ -156,14 +174,26 @@ export function MessageBubble({ message }: MessageBubbleProps) {
       if (isUser) {
         return <Text style={styles.userText}>{message.content}</Text>;
       }
-      return <View style={styles.bubble}>{parseContent(message.content)}</View>;
+      // Assistant streaming text — render as markdown
+      return (
+        <View style={styles.bubble}>
+          <StreamdownRN theme="dark">{message.content}</StreamdownRN>
+        </View>
+      );
     }
 
-    // ContentBlock array
+    // ContentBlock array — render text blocks as unified markdown,
+    // non-text blocks (tool_use, thinking) as custom components
+    const textMarkdown = blocksToMarkdown(message.content);
+    const nonTextBlocks = message.content.filter(b => b.type !== 'text' && b.type !== 'tool_result');
+
     return (
       <View style={styles.bubble}>
-        {message.content.map((block, i) => (
-          <ContentBlockView key={i} block={block} index={i} />
+        {textMarkdown.length > 0 && (
+          <StreamdownRN theme="dark">{textMarkdown}</StreamdownRN>
+        )}
+        {nonTextBlocks.map((block, i) => (
+          <ContentBlockView key={i} block={block} resultMap={toolResultMap} />
         ))}
       </View>
     );
@@ -198,17 +228,6 @@ const styles = StyleSheet.create({
     fontSize: 15,
     lineHeight: 22,
   },
-  text: {
-    color: '#e5e5e5',
-    fontSize: 15,
-    lineHeight: 22,
-  },
-  link: {
-    color: '#60a5fa',
-    fontSize: 15,
-    lineHeight: 22,
-    textDecorationLine: 'underline',
-  },
   systemContainer: {
     alignItems: 'center',
     marginVertical: 12,
@@ -218,46 +237,101 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontStyle: 'italic',
   },
-  // Tool use blocks
-  toolUseContainer: {
-    backgroundColor: '#141414',
-    borderRadius: 8,
-    padding: 12,
-    marginVertical: 4,
+
+  // --- Tool use card ---
+  toolCard: {
     borderWidth: 1,
-    borderColor: '#2a2a2a',
+    borderColor: '#252525',
+    borderRadius: 8,
+    marginVertical: 6,
+    overflow: 'hidden',
   },
-  toolUseHeader: {
+  toolHeader: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
   },
-  toolUseName: {
-    color: '#e5e5e5',
+  toolHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
+  },
+  toolName: {
+    color: '#ccc',
     fontSize: 13,
     fontWeight: '500',
+    flexShrink: 1,
   },
-  toolUseChevron: {
-    color: '#888',
-    fontSize: 16,
+  toolBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(34,197,94,0.1)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    gap: 5,
   },
-  toolUseChevronDown: {
+  toolBadgeDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+    backgroundColor: '#22c55e',
+  },
+  toolBadgeText: {
+    color: '#22c55e',
+    fontSize: 10,
+    fontWeight: '500',
+  },
+  toolChevronBox: {
+    width: 20,
+    height: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  toolChevronBoxOpen: {
     transform: [{ rotate: '180deg' }],
   },
-  // Tool result blocks
-  toolResultContainer: {
-    marginVertical: 4,
-    paddingLeft: 10,
-    borderLeftWidth: 2,
-    borderLeftColor: '#2a2a2a',
+  toolChevronArrow: {
+    width: 7,
+    height: 7,
+    borderRightWidth: 1.5,
+    borderBottomWidth: 1.5,
+    borderColor: '#555',
+    transform: [{ rotate: '45deg' }],
+    marginTop: -3,
   },
-  toolResultText: {
-    color: '#666',
-    fontSize: 12,
+  toolBody: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#252525',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  toolSectionLabel: {
+    color: '#555',
+    fontSize: 10,
+    fontWeight: '600',
+    letterSpacing: 1,
+    marginBottom: 8,
+  },
+  toolCodeScroll: {
+    maxHeight: 500,
+  },
+  toolCodeBlock: {
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    borderRadius: 6,
+    padding: 10,
+  },
+  toolCodeText: {
+    color: '#888',
+    fontSize: 11,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    lineHeight: 18,
+    lineHeight: 16,
   },
-  // Thinking blocks
+
+  // --- Thinking ---
   thinkingContainer: {
     backgroundColor: 'rgba(139,92,246,0.06)',
     borderRadius: 6,

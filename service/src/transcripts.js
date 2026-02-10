@@ -62,12 +62,33 @@ function _readClaudeTranscript(sessionId, cwd) {
         ? new Date(entry.timestamp).getTime()
         : Date.now();
 
-      // User messages
-      if (entry.type === 'user' && entry.message?.content) {
-        const text = typeof entry.message.content === 'string'
-          ? entry.message.content
-          : JSON.stringify(entry.message.content);
-        messages.push({ id: entry.uuid || `t-${messages.length}`, type: 'user', content: text, timestamp: ts });
+      // User messages — two cases:
+      // 1. Actual human input: string content → add as user message
+      // 2. Tool results: array content with tool_result blocks → merge into preceding assistant message
+      if (entry.type === 'user') {
+        if (typeof entry.message?.content === 'string') {
+          messages.push({ id: entry.uuid || `t-${messages.length}`, type: 'user', content: entry.message.content, timestamp: ts });
+        } else if (Array.isArray(entry.message?.content)) {
+          // Extract tool_result blocks and append to the last assistant message
+          const lastMsg = messages[messages.length - 1];
+          if (lastMsg && lastMsg.type === 'assistant' && Array.isArray(lastMsg.content)) {
+            for (const b of entry.message.content) {
+              if (b.type === 'tool_result' && b.tool_use_id) {
+                // content can be string or array of {type:'text', text:'...'}
+                let resultText = '';
+                if (typeof b.content === 'string') {
+                  resultText = b.content;
+                } else if (Array.isArray(b.content)) {
+                  resultText = b.content
+                    .filter(c => c.type === 'text' && c.text)
+                    .map(c => c.text)
+                    .join('\n');
+                }
+                lastMsg.content.push({ type: 'tool_result', toolUseId: b.tool_use_id, content: resultText });
+              }
+            }
+          }
+        }
         continue;
       }
 

@@ -350,9 +350,30 @@ export class AgentSession {
         break;
       }
 
-      // User messages (tool results echoed back) — no action needed
-      case 'user':
+      case 'user': {
+        // Merge tool_result blocks into the preceding assistant message
+        const userContent = msg.message?.content;
+        if (Array.isArray(userContent)) {
+          const lastAssistant = [...this.messageHistory].reverse().find(m => m.type === 'assistant');
+          if (lastAssistant && Array.isArray(lastAssistant.content)) {
+            for (const b of userContent) {
+              if (b.type === 'tool_result' && b.tool_use_id) {
+                let resultText = '';
+                if (typeof b.content === 'string') {
+                  resultText = b.content;
+                } else if (Array.isArray(b.content)) {
+                  resultText = b.content
+                    .filter(c => c.type === 'text' && c.text)
+                    .map(c => c.text)
+                    .join('\n');
+                }
+                lastAssistant.content.push({ type: 'tool_result', toolUseId: b.tool_use_id, content: resultText });
+              }
+            }
+          }
+        }
         break;
+      }
 
       default:
         if (msg.type) {

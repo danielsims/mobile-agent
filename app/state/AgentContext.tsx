@@ -186,11 +186,14 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
 
       case 'agentHistory': {
         if (msg.agentId && msg.messages) {
-          // Ensure every history message has a unique ID
-          const messages = (msg.messages as AgentMessage[]).map((m, i) => ({
-            ...m,
-            id: m.id || nextMsgId(`history-${i}`),
-          }));
+          // Filter out tool-result "user" messages (internal protocol, not human input)
+          // and ensure every history message has a unique ID
+          const messages = (msg.messages as AgentMessage[])
+            .filter(m => !(m.type === 'user' && typeof m.content !== 'string'))
+            .map((m, i) => ({
+              ...m,
+              id: m.id || nextMsgId(`history-${i}`),
+            }));
           dispatch({
             type: 'SET_MESSAGES',
             agentId: msg.agentId,
