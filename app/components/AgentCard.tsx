@@ -12,6 +12,7 @@ import {
   type ViewStyle,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
+import { useSettings } from '../state/SettingsContext';
 import type { AgentState, AgentStatus, AgentType, AgentMessage, ContentBlock, Project } from '../state/types';
 
 export type CardLayout = 'full' | 'grid';
@@ -182,7 +183,7 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
   const [showMenu, setShowMenu] = useState(false);
   const hasPermission = agent.pendingPermissions.size > 0;
   const statusColor = STATUS_COLORS[agent.status];
-  const brand = getAgentBrand(agent.type);
+  const { settings } = useSettings();
 
   const modelDisplayName = useMemo(
     () => formatModelName(agent.model, agent.type),
@@ -211,15 +212,6 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
   if (isFull) {
     cardStyle.push(styles.cardFull);
   }
-
-  // Build the cwd/branch subtitle line (terminal-prompt style)
-  const cwdLine = useMemo(() => {
-    if (!agent.projectName && !agent.cwd) return null;
-    const name = agent.projectName || '';
-    const branch = agent.gitBranch;
-    if (branch) return `${name} git:(${branch})`;
-    return name;
-  }, [agent.projectName, agent.cwd, agent.gitBranch]);
 
   // Show project favicon if available, otherwise fall back to agent type icon
   const matchedProject = useMemo(() => {
@@ -268,25 +260,19 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
           <Text style={[styles.statusText, { color: statusColor }, isFull && styles.statusTextFull]}>
             {STATUS_LABELS[agent.status]}
           </Text>
-          {cwdLine && (
+          {agent.projectName && (
             <>
               <View style={styles.statusSeparator} />
               <Text style={[styles.cwdText, isFull && styles.cwdTextFull]} numberOfLines={1}>
-                {cwdLine}
+                <Text style={settings.colorfulGitLabels ? styles.cwdProjectName : undefined}>{agent.projectName}</Text>
+                {agent.gitBranch ? (
+                  <Text style={settings.colorfulGitLabels ? styles.cwdGit : undefined}> git:(<Text style={settings.colorfulGitLabels ? styles.cwdBranchName : undefined}>{agent.gitBranch}</Text>)</Text>
+                ) : null}
               </Text>
             </>
           )}
         </View>
       </View>
-      <TouchableOpacity
-        style={styles.openButton}
-        onPress={onPress}
-        activeOpacity={0.6}
-        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-      >
-        <Text style={styles.openButtonText}>Open</Text>
-        <ChevronRight size={10} color="#666" />
-      </TouchableOpacity>
     </View>
   );
 
@@ -342,34 +328,7 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
   const footerContent = (
     <View style={styles.footer}>
       <View style={styles.footerLeft}>
-        {agent.contextUsedPercent > 0 && (
-          <View style={[styles.contextBar, isFull && styles.contextBarFull]}>
-            <View
-              style={[
-                styles.contextFill,
-                {
-                  width: `${Math.min(agent.contextUsedPercent, 100)}%`,
-                  backgroundColor: agent.contextUsedPercent > 80 ? '#ef4444' :
-                                   agent.contextUsedPercent > 50 ? '#f59e0b' : '#22c55e',
-                },
-              ]}
-            />
-          </View>
-        )}
-        {agent.totalCost > 0 && (
-          <Text style={styles.costText}>${agent.totalCost.toFixed(2)}</Text>
-        )}
-      </View>
-      <View style={styles.footerRight}>
-        <TouchableOpacity
-          style={[styles.messageButton, { borderColor: brand.bg }]}
-          onPress={() => onChat ? onChat() : onPress()}
-          activeOpacity={0.6}
-          hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
-        >
-          <Text style={[styles.messageButtonText, { color: brand.color }]}>Message</Text>
-        </TouchableOpacity>
-        {isFull && onDestroy && (
+        {isFull && onDestroy ? (
           <View>
             <TouchableOpacity
               style={styles.ellipsisBtn}
@@ -386,7 +345,46 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
               </View>
             )}
           </View>
+        ) : (
+          <>
+            {agent.contextUsedPercent > 0 && (
+              <View style={[styles.contextBar, isFull && styles.contextBarFull]}>
+                <View
+                  style={[
+                    styles.contextFill,
+                    {
+                      width: `${Math.min(agent.contextUsedPercent, 100)}%`,
+                      backgroundColor: agent.contextUsedPercent > 80 ? '#ef4444' :
+                                       agent.contextUsedPercent > 50 ? '#f59e0b' : '#22c55e',
+                    },
+                  ]}
+                />
+              </View>
+            )}
+            {agent.totalCost > 0 && (
+              <Text style={styles.costText}>${agent.totalCost.toFixed(2)}</Text>
+            )}
+          </>
         )}
+      </View>
+      <View style={styles.footerRight}>
+        <TouchableOpacity
+          style={styles.openButton}
+          onPress={() => onChat ? onChat() : onPress()}
+          activeOpacity={0.6}
+          hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+        >
+          <Text style={styles.openButtonText}>Message</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.openButton}
+          onPress={onPress}
+          activeOpacity={0.6}
+          hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+        >
+          <Text style={styles.openButtonText}>Open</Text>
+          <ChevronRight size={10} color="#666" />
+        </TouchableOpacity>
       </View>
     </View>
   );
@@ -527,6 +525,15 @@ const styles = StyleSheet.create({
   cwdTextFull: {
     fontSize: 11,
   },
+  cwdProjectName: {
+    color: '#17c6b2',
+  },
+  cwdGit: {
+    color: '#5fa2f9',
+  },
+  cwdBranchName: {
+    color: '#ec605f',
+  },
   // Open button
   openButton: {
     flexDirection: 'row',
@@ -628,7 +635,7 @@ const styles = StyleSheet.create({
   menuDropdown: {
     position: 'absolute',
     bottom: '100%',
-    right: 0,
+    left: 0,
     backgroundColor: '#1f1f1f',
     borderRadius: 8,
     borderWidth: StyleSheet.hairlineWidth,
@@ -644,18 +651,6 @@ const styles = StyleSheet.create({
   menuItemDestructive: {
     color: '#ef4444',
     fontSize: 13,
-    fontWeight: '500',
-  },
-  // Message button
-  messageButton: {
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
-  },
-  messageButtonText: {
-    fontSize: 11,
     fontWeight: '500',
   },
   contextBar: {

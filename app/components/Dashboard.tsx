@@ -10,11 +10,34 @@ import {
   Keyboard,
   Platform,
 } from 'react-native';
+import Svg, { Path } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
 import { useAgentState } from '../state/AgentContext';
+import { useSettings } from '../state/SettingsContext';
 import type { AgentState, Project } from '../state/types';
 import type { ConnectionStatus } from '../types';
 import { AgentCard } from './AgentCard';
+
+function GearIcon({ size = 18, color = '#888' }: { size?: number; color?: string }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M12 15a3 3 0 100-6 3 3 0 000 6z"
+        stroke={color}
+        strokeWidth={1.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <Path
+        d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-1.415 3.417 2 2 0 01-1.415-.587l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"
+        stroke={color}
+        strokeWidth={1.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
 
 interface DashboardProps {
   connectionStatus: ConnectionStatus;
@@ -39,6 +62,7 @@ export function Dashboard({
   onOpenSettings,
 }: DashboardProps) {
   const { state } = useAgentState();
+  const { settings } = useSettings();
   const [chatAgentId, setChatAgentId] = useState<string | null>(null);
   const [chatText, setChatText] = useState('');
   const [keyboardHeight, setKeyboardHeight] = useState(0);
@@ -126,14 +150,15 @@ export function Dashboard({
         <TouchableOpacity style={styles.newAgentBtn} onPress={onCreateAgent} activeOpacity={0.7}>
           <Text style={styles.newAgentBtnText}>+</Text>
         </TouchableOpacity>
-        <TouchableOpacity onPress={onOpenSettings}>
-          <View style={styles.statusPill}>
-            <View style={[styles.statusDot, isConnected ? styles.dotGreen : styles.dotRed]} />
-            <Text style={styles.statusText}>
-              {connectionStatus === 'connected' ? 'Connected' :
-               connectionStatus === 'connecting' ? 'Connecting' : 'Offline'}
-            </Text>
-          </View>
+        <View style={styles.statusPill}>
+          <View style={[styles.statusDot, isConnected ? styles.dotGreen : styles.dotRed]} />
+          <Text style={styles.statusText}>
+            {connectionStatus === 'connected' ? 'Connected' :
+             connectionStatus === 'connecting' ? 'Connecting' : 'Offline'}
+          </Text>
+        </View>
+        <TouchableOpacity onPress={onOpenSettings} style={styles.settingsBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          <GearIcon />
         </TouchableOpacity>
       </View>
     </View>
@@ -145,7 +170,12 @@ export function Dashboard({
       <View style={styles.inlineContainer}>
         <View style={styles.inlineHeader}>
           <Text style={styles.inlineLabel} numberOfLines={1}>
-            Message Agent: &ldquo;{chatAgent.sessionName}&rdquo;
+            Send to: {chatAgent.projectName ? (
+              <>
+                <Text style={settings.colorfulGitLabels ? styles.inlineProjectName : undefined}>{chatAgent.projectName}</Text>
+                {chatAgent.gitBranch ? <Text style={settings.colorfulGitLabels ? styles.inlineGit : undefined}> git:(<Text style={settings.colorfulGitLabels ? styles.inlineBranchName : undefined}>{chatAgent.gitBranch}</Text>)</Text> : null}
+              </>
+            ) : chatAgent.sessionName}
           </Text>
           <TouchableOpacity
             onPress={handleChatDismiss}
@@ -286,6 +316,9 @@ const styles = StyleSheet.create({
     fontWeight: '300',
     marginTop: -1,
   },
+  settingsBtn: {
+    padding: 4,
+  },
   statusPill: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -369,6 +402,18 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '500',
     flex: 1,
+  },
+  inlineProjectName: {
+    color: '#17c6b2',
+    fontWeight: '500',
+  },
+  inlineGit: {
+    color: '#5fa2f9',
+    fontWeight: '500',
+  },
+  inlineBranchName: {
+    color: '#ec605f',
+    fontWeight: '500',
   },
   inlineDismiss: {
     color: '#555',

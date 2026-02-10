@@ -7,4 +7,4 @@ export { InputBar } from './InputBar';
 export { KeyboardScrollView } from './KeyboardScrollView';
 export { MessageBubble } from './MessageBubble';
 export { PermissionPrompt } from './PermissionPrompt';
-export { Settings } from './Settings';
+export { SettingsScreen } from './SettingsScreen';

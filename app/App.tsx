@@ -12,14 +12,15 @@ import {
 } from 'react-native';
 
 import { AgentProvider, useAgentState } from './state/AgentContext';
-import { Dashboard, AgentDetailScreen, CreateAgentModal } from './components';
+import { SettingsProvider } from './state/SettingsContext';
+import { Dashboard, AgentDetailScreen, CreateAgentModal, SettingsScreen } from './components';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useNotifications } from './hooks/useNotifications';
 import { useCompletionChime } from './hooks/useCompletionChime';
 import { parseQRCode, clearCredentials, isPaired, type QRPairingData } from './utils/auth';
 import type { Project, AgentType } from './state/types';
 
-type Screen = 'pairing' | 'scanner' | 'dashboard' | 'agent';
+type Screen = 'pairing' | 'scanner' | 'dashboard' | 'agent' | 'settings';
 
 // Inner app component that has access to AgentContext
 function AppInner() {
@@ -242,6 +243,14 @@ function AppInner() {
     setScreen('dashboard');
   };
 
+  const handleOpenSettings = () => {
+    setScreen('settings');
+  };
+
+  const handleBackFromSettings = () => {
+    setScreen('dashboard');
+  };
+
   // --- Screen rendering ---
 
   // QR Scanner
@@ -335,7 +344,7 @@ function AppInner() {
             onCreateAgent={handleCreateAgent}
             onDestroyAgent={handleDestroyAgent}
             onSendMessage={handleSendMessage}
-            onOpenSettings={handleUnpair}
+            onOpenSettings={handleOpenSettings}
           />
         </View>
         {screen === 'agent' && selectedAgentId && (
@@ -366,6 +375,20 @@ function AppInner() {
     );
   }
 
+  // Settings
+  if (screen === 'settings') {
+    return (
+      <View style={styles.container}>
+        <StatusBar style="light" />
+        <SafeAreaView style={styles.safeTop} />
+        <SettingsScreen
+          onBack={handleBackFromSettings}
+          onUnpair={handleUnpair}
+        />
+      </View>
+    );
+  }
+
   // Fallback
   return (
     <View style={styles.container}>
@@ -380,12 +403,14 @@ function AppInner() {
   );
 }
 
-// Root component: wraps with AgentProvider
+// Root component: wraps with providers
 export default function App() {
   return (
-    <AgentProvider>
-      <AppInner />
-    </AgentProvider>
+    <SettingsProvider>
+      <AgentProvider>
+        <AppInner />
+      </AgentProvider>
+    </SettingsProvider>
   );
 }
 
