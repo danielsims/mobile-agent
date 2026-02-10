@@ -97,6 +97,7 @@ export type AgentAction =
   | { type: 'REMOVE_PERMISSION'; agentId: string; requestId: string }
   | { type: 'SET_SESSION_INFO'; agentId: string; sessionId?: string; model?: string; tools?: string[]; sessionName?: string; status?: AgentStatus }
   | { type: 'UPDATE_COST'; agentId: string; totalCost: number; outputTokens: number; contextUsedPercent: number }
+  | { type: 'SET_PERMISSIONS'; agentId: string; permissions: PermissionRequest[] }
   | { type: 'SET_DRAFT'; agentId: string; text: string }
   | { type: 'SET_LAST_OUTPUT'; agentId: string; text: string }
   | { type: 'SET_ACTIVE_AGENT'; agentId: string | null };
@@ -114,7 +115,7 @@ export interface AgentSnapshot {
   contextUsedPercent: number;
   outputTokens: number;
   lastOutput: string;
-  pendingPermissions: number;
+  pendingPermissions: PermissionRequest[];
   createdAt: number;
 }
 
@@ -161,6 +162,7 @@ export interface ServerMessage {
 
   // agentHistory
   messages?: AgentMessage[];
+  pendingPermissions?: PermissionRequest[];
 
   // error
   error?: string;

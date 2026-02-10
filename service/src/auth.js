@@ -23,7 +23,7 @@ const AUDIT_LOG_PATH = join(DATA_DIR, 'audit.log');
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 
 const CHALLENGE_WINDOW_MS = 30_000; // 30 seconds
-const PAIRING_TOKEN_TTL_MS = 5 * 60_000; // 5 minutes
+export const PAIRING_TOKEN_TTL_MS = 5 * 60_000; // 5 minutes
 const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
 const RATE_LIMIT_MAX_FAILURES = 5;
 const RATE_LIMIT_BLOCK_MS = 15 * 60_000; // 15 minutes

@@ -193,6 +193,15 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
             agentId: msg.agentId,
             messages,
           });
+
+          // Restore pending permissions from server (authoritative source)
+          if (msg.pendingPermissions && Array.isArray(msg.pendingPermissions)) {
+            dispatch({
+              type: 'SET_PERMISSIONS',
+              agentId: msg.agentId,
+              permissions: msg.pendingPermissions,
+            });
+          }
         }
         break;
       }

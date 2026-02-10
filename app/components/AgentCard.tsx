@@ -1,19 +1,25 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useMemo } from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
+  ScrollView,
   StyleSheet,
   Platform,
   Animated,
+  type ViewStyle,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
-import type { AgentState, AgentStatus, AgentType } from '../state/types';
+import type { AgentState, AgentStatus, AgentType, AgentMessage, ContentBlock } from '../state/types';
+
+export type CardLayout = 'full' | 'grid';
 
 interface AgentCardProps {
   agent: AgentState;
   onPress: () => void;
   onLongPress: () => void;
+  onChat?: () => void;
+  layout?: CardLayout;
 }
 
 // --- Agent type branding ---
@@ -53,10 +59,18 @@ const STATUS_LABELS: Record<AgentStatus, string> = {
   exited: 'Exited',
 };
 
-function formatCost(cost: number): string {
-  if (cost === 0) return '$0.00';
-  if (cost < 0.01) return '<$0.01';
-  return `$${cost.toFixed(2)}`;
+// Extract displayable text from a message
+function extractMessageText(msg: AgentMessage): string {
+  if (typeof msg.content === 'string') return msg.content;
+  // ContentBlock array — extract text and tool_use names
+  return (msg.content as ContentBlock[])
+    .map(block => {
+      if (block.type === 'text') return block.text;
+      if (block.type === 'tool_use') return `> ${block.name}`;
+      return '';
+    })
+    .filter(Boolean)
+    .join('\n');
 }
 
 function getPreviewLines(text: string, maxLines = 4): string {
@@ -104,7 +118,7 @@ function StatusDot({ status, size = 6 }: { status: AgentStatus; size?: number })
 // Agent type icon — SVG logo or colored letter fallback
 function AgentIcon({ type, size = 28 }: { type: AgentType; size?: number }) {
   const brand = getAgentBrand(type);
-  const iconSize = size * 0.58; // SVG size relative to container
+  const iconSize = size * 0.58;
 
   return (
     <View style={[styles.agentIcon, { width: size, height: size, backgroundColor: brand.bg }]}>
@@ -121,29 +135,77 @@ function AgentIcon({ type, size = 28 }: { type: AgentType; size?: number }) {
   );
 }
 
-export function AgentCard({ agent, onPress, onLongPress }: AgentCardProps) {
-  const preview = getPreviewLines(agent.lastOutput);
+// Chat bubble icon
+function ChatBubbleIcon({ size = 16 }: { size?: number }) {
+  const tailSize = size * 0.25;
+  return (
+    <View style={{ width: size, height: size, justifyContent: 'center', alignItems: 'center' }}>
+      <View style={{
+        width: size,
+        height: size * 0.7,
+        borderRadius: size * 0.22,
+        borderWidth: 1.5,
+        borderColor: '#666',
+        backgroundColor: 'transparent',
+      }} />
+      <View style={{
+        position: 'absolute',
+        bottom: 0,
+        left: size * 0.18,
+        width: 0,
+        height: 0,
+        borderTopWidth: tailSize,
+        borderRightWidth: tailSize,
+        borderTopColor: '#666',
+        borderRightColor: 'transparent',
+      }} />
+    </View>
+  );
+}
+
+export function AgentCard({ agent, onPress, onLongPress, onChat, layout = 'grid' }: AgentCardProps) {
+  const isFull = layout === 'full';
+  const scrollRef = useRef<ScrollView>(null);
   const hasPermission = agent.pendingPermissions.size > 0;
   const statusColor = STATUS_COLORS[agent.status];
 
-  return (
-    <TouchableOpacity
-      style={styles.card}
-      onPress={onPress}
-      onLongPress={onLongPress}
-      activeOpacity={0.7}
-      delayLongPress={500}
-    >
+  // Build terminal content from messages
+  const terminalContent = useMemo(() => {
+    if (isFull) {
+      // Full mode: render from message history for richer content
+      return agent.messages
+        .map(msg => extractMessageText(msg))
+        .filter(Boolean)
+        .join('\n');
+    }
+    // Grid mode: use lastOutput (compact)
+    return getPreviewLines(agent.lastOutput, 4);
+  }, [isFull, agent.messages, agent.lastOutput]);
+
+  // Auto-scroll to bottom when content changes
+  useEffect(() => {
+    if (isFull && scrollRef.current) {
+      scrollRef.current.scrollToEnd({ animated: false });
+    }
+  }, [isFull, terminalContent]);
+
+  const cardStyle: ViewStyle[] = [styles.card];
+  if (isFull) {
+    cardStyle.push(styles.cardFull);
+  }
+
+  const headerContent = (
+    <>
       {/* Header: icon + name */}
       <View style={styles.header}>
-        <AgentIcon type={agent.type} />
+        <AgentIcon type={agent.type} size={isFull ? 32 : 28} />
         <View style={styles.headerInfo}>
-          <Text style={styles.sessionName} numberOfLines={1}>
+          <Text style={[styles.sessionName, isFull && styles.sessionNameFull]} numberOfLines={1}>
             {agent.sessionName}
           </Text>
           <View style={styles.statusRow}>
-            <StatusDot status={agent.status} />
-            <Text style={[styles.statusText, { color: statusColor }]}>
+            <StatusDot status={agent.status} size={isFull ? 7 : 6} />
+            <Text style={[styles.statusText, { color: statusColor }, isFull && styles.statusTextFull]}>
               {STATUS_LABELS[agent.status]}
             </Text>
           </View>
@@ -157,50 +219,92 @@ export function AgentCard({ agent, onPress, onLongPress }: AgentCardProps) {
           <Text style={styles.permissionText}>Permission needed</Text>
         </View>
       )}
+    </>
+  );
 
-      {/* Output preview */}
-      <View style={styles.body}>
-        {preview ? (
-          <Text style={styles.previewText} numberOfLines={4}>
-            {preview}
-          </Text>
-        ) : (
-          <Text style={styles.emptyText}>
-            {agent.status === 'idle' ? 'Waiting for prompt...' :
-             agent.status === 'starting' ? 'Starting...' :
-             agent.status === 'exited' ? 'Session ended' : ''}
-          </Text>
-        )}
-      </View>
+  const bodyContent = terminalContent ? (
+    isFull ? (
+      <ScrollView
+        ref={scrollRef}
+        style={styles.terminalScroll}
+        showsVerticalScrollIndicator={false}
+        nestedScrollEnabled
+      >
+        <Text style={[styles.previewText, styles.previewTextFull]}>
+          {terminalContent}
+        </Text>
+      </ScrollView>
+    ) : (
+      <Text style={styles.previewText} numberOfLines={4}>
+        {terminalContent}
+      </Text>
+    )
+  ) : (
+    <Text style={[styles.emptyText, isFull && styles.emptyTextFull]}>
+      {agent.status === 'idle' ? 'Waiting for prompt...' :
+       agent.status === 'starting' ? 'Starting...' :
+       agent.status === 'exited' ? 'Session ended' : ''}
+    </Text>
+  );
 
-      {/* Footer: model + cost + context */}
-      <View style={styles.footer}>
-        <Text style={styles.footerModel} numberOfLines={1}>
+  const footerContent = (
+    <View style={styles.footer}>
+      <View style={styles.footerLeft}>
+        <Text style={[styles.footerModel, isFull && styles.footerModelFull]} numberOfLines={1}>
           {agent.model || agent.type}
         </Text>
-        <View style={styles.footerRight}>
-          <Text style={styles.costText}>{formatCost(agent.totalCost)}</Text>
-          {agent.contextUsedPercent > 0 && (
-            <View style={styles.contextBar}>
-              <View
-                style={[
-                  styles.contextFill,
-                  {
-                    width: `${Math.min(agent.contextUsedPercent, 100)}%`,
-                    backgroundColor: agent.contextUsedPercent > 80 ? '#ef4444' :
-                                     agent.contextUsedPercent > 50 ? '#f59e0b' : '#22c55e',
-                  },
-                ]}
-              />
-            </View>
-          )}
-        </View>
+        {agent.contextUsedPercent > 0 && (
+          <View style={[styles.contextBar, isFull && styles.contextBarFull]}>
+            <View
+              style={[
+                styles.contextFill,
+                {
+                  width: `${Math.min(agent.contextUsedPercent, 100)}%`,
+                  backgroundColor: agent.contextUsedPercent > 80 ? '#ef4444' :
+                                   agent.contextUsedPercent > 50 ? '#f59e0b' : '#22c55e',
+                },
+              ]}
+            />
+          </View>
+        )}
       </View>
-    </TouchableOpacity>
+      <TouchableOpacity
+        style={styles.chatButton}
+        onPress={() => onChat ? onChat() : onPress()}
+        activeOpacity={0.6}
+        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+      >
+        <ChatBubbleIcon size={isFull ? 18 : 16} />
+      </TouchableOpacity>
+    </View>
+  );
+
+  // Full mode: header taps to navigate, body scrolls independently
+  if (isFull) {
+    return (
+      <View style={cardStyle}>
+        <TouchableOpacity onPress={onPress} onLongPress={onLongPress} activeOpacity={0.7} delayLongPress={500}>
+          {headerContent}
+        </TouchableOpacity>
+        <View style={styles.body}>{bodyContent}</View>
+        {footerContent}
+      </View>
+    );
+  }
+
+  // Grid mode: header + body tappable (no scrolling), footer separate for chat button
+  return (
+    <View style={cardStyle}>
+      <TouchableOpacity style={styles.cardTappable} onPress={onPress} onLongPress={onLongPress} activeOpacity={0.7} delayLongPress={500}>
+        {headerContent}
+        <View style={styles.body}>{bodyContent}</View>
+      </TouchableOpacity>
+      {footerContent}
+    </View>
   );
 }
 
-// "New Agent" card
+// "New Agent" card (for grid layout)
 export function NewAgentCard({ onPress }: { onPress: () => void }) {
   return (
     <TouchableOpacity style={[styles.card, styles.newCard]} onPress={onPress} activeOpacity={0.7}>
@@ -215,7 +319,21 @@ export function NewAgentCard({ onPress }: { onPress: () => void }) {
   );
 }
 
+// Compact "New Agent" button (for single-column layout)
+export function NewAgentButton({ onPress }: { onPress: () => void }) {
+  return (
+    <TouchableOpacity style={styles.newButton} onPress={onPress} activeOpacity={0.7}>
+      <View style={styles.newButtonPlusCircle}>
+        <View style={styles.plusH} />
+        <View style={styles.plusV} />
+      </View>
+      <Text style={styles.newButtonText}>New Agent</Text>
+    </TouchableOpacity>
+  );
+}
+
 const styles = StyleSheet.create({
+  // --- Card base ---
   card: {
     flex: 1,
     minHeight: 180,
@@ -226,6 +344,16 @@ const styles = StyleSheet.create({
     padding: 12,
     margin: 4,
     justifyContent: 'space-between',
+    overflow: 'hidden',
+  },
+  cardFull: {
+    minHeight: 0,
+    padding: 16,
+    margin: 0,
+    marginBottom: 0,
+  },
+  cardTappable: {
+    flex: 1,
   },
   // Header
   header: {
@@ -254,6 +382,9 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginBottom: 2,
   },
+  sessionNameFull: {
+    fontSize: 15,
+  },
   statusRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -262,6 +393,9 @@ const styles = StyleSheet.create({
   statusText: {
     fontSize: 10,
     fontWeight: '500',
+  },
+  statusTextFull: {
+    fontSize: 11,
   },
   // Permission banner
   permissionBanner: {
@@ -287,6 +421,10 @@ const styles = StyleSheet.create({
   body: {
     flex: 1,
     marginBottom: 8,
+    overflow: 'hidden',
+  },
+  terminalScroll: {
+    flex: 1,
   },
   previewText: {
     color: '#777',
@@ -294,10 +432,17 @@ const styles = StyleSheet.create({
     lineHeight: 15,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
+  previewTextFull: {
+    fontSize: 11,
+    lineHeight: 17,
+  },
   emptyText: {
     color: '#3a3a3a',
     fontSize: 11,
     fontStyle: 'italic',
+  },
+  emptyTextFull: {
+    fontSize: 12,
   },
   // Footer
   footer: {
@@ -308,22 +453,21 @@ const styles = StyleSheet.create({
     borderTopColor: '#1f1f1f',
     paddingTop: 8,
   },
+  footerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    gap: 8,
+  },
   footerModel: {
     color: '#4a4a4a',
     fontSize: 10,
-    flex: 1,
-    marginRight: 8,
   },
-  footerRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
+  footerModelFull: {
+    fontSize: 11,
   },
-  costText: {
-    color: '#555',
-    fontSize: 10,
-    fontWeight: '500',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  chatButton: {
+    padding: 4,
   },
   contextBar: {
     width: 28,
@@ -332,11 +476,15 @@ const styles = StyleSheet.create({
     borderRadius: 2,
     overflow: 'hidden',
   },
+  contextBarFull: {
+    width: 40,
+    height: 4,
+  },
   contextFill: {
     height: '100%',
     borderRadius: 2,
   },
-  // New card
+  // New card (grid layout)
   newCard: {
     borderStyle: 'dashed',
     borderColor: '#252525',
@@ -373,6 +521,32 @@ const styles = StyleSheet.create({
   newCardText: {
     color: '#444',
     fontSize: 13,
+    fontWeight: '500',
+  },
+  // New button (single-column layout)
+  newButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#141414',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderColor: '#252525',
+    paddingVertical: 14,
+    gap: 10,
+  },
+  newButtonPlusCircle: {
+    width: 24,
+    height: 24,
+    borderRadius: 7,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  newButtonText: {
+    color: '#444',
+    fontSize: 14,
     fontWeight: '500',
   },
 });

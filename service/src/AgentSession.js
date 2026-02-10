@@ -432,13 +432,16 @@ export class AgentSession {
       contextUsedPercent: this.contextUsedPercent,
       outputTokens: this.outputTokens,
       lastOutput: this.lastOutput,
-      pendingPermissions: this.pendingPermissions.size,
+      pendingPermissions: Array.from(this.pendingPermissions.values()),
       createdAt: this.createdAt,
     };
   }
 
   getHistory() {
-    return this.messageHistory;
+    return {
+      messages: this.messageHistory,
+      pendingPermissions: Array.from(this.pendingPermissions.values()),
+    };
   }
 
   destroy() {

@@ -237,6 +237,25 @@ export async function buildAuthMessage(): Promise<{
   };
 }
 
+// --- Server URL Management ---
+
+/**
+ * Get the stored server public key (hex).
+ * Used to detect if a scanned QR is from the same server we're already paired with.
+ */
+export async function getStoredServerPublicKey(): Promise<string | null> {
+  return SecureStore.getItemAsync(STORE_KEY_SERVER_PUB);
+}
+
+/**
+ * Update the stored server URL without re-pairing.
+ * Used when scanning a QR from a server we're already paired with
+ * (e.g., tunnel URL changed after restart, but same server keys).
+ */
+export async function updateServerUrl(url: string): Promise<void> {
+  await SecureStore.setItemAsync(STORE_KEY_SERVER_URL, url);
+}
+
 // --- Credential Management ---
 
 /**

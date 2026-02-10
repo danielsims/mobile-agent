@@ -1,9 +1,19 @@
-import type { AppState, AgentState, AgentAction, AgentSnapshot } from './types';
+import type { AppState, AgentState, AgentAction, AgentSnapshot, PermissionRequest } from './types';
 
 let messageIdCounter = 0;
 
 function nextMessageId(): string {
   return String(messageIdCounter++);
+}
+
+function permissionsArrayToMap(perms: AgentSnapshot['pendingPermissions']): Map<string, PermissionRequest> {
+  const map = new Map<string, PermissionRequest>();
+  if (Array.isArray(perms)) {
+    for (const p of perms) {
+      if (p.requestId) map.set(p.requestId, p);
+    }
+  }
+  return map;
 }
 
 function snapshotToAgentState(snapshot: AgentSnapshot): AgentState {
@@ -14,7 +24,7 @@ function snapshotToAgentState(snapshot: AgentSnapshot): AgentState {
     sessionId: snapshot.sessionId,
     sessionName: snapshot.sessionName || 'New Agent',
     messages: [],
-    pendingPermissions: new Map(),
+    pendingPermissions: permissionsArrayToMap(snapshot.pendingPermissions),
     model: snapshot.model,
     tools: [],
     totalCost: snapshot.totalCost,
@@ -69,6 +79,11 @@ export function agentReducer(state: AppState, action: AgentAction): AppState {
         // Preserve existing state if agent already exists (reconnect scenario)
         const existing = state.agents.get(snapshot.id);
         if (existing) {
+          // Merge permissions: server data is authoritative, but keep any
+          // existing permissions the server also has (preserves local state)
+          const serverPerms = permissionsArrayToMap(snapshot.pendingPermissions);
+          // Use server permissions if available, otherwise keep existing
+          const mergedPerms = serverPerms.size > 0 ? serverPerms : existing.pendingPermissions;
           newAgents.set(snapshot.id, {
             ...existing,
             status: snapshot.status,
@@ -77,6 +92,7 @@ export function agentReducer(state: AppState, action: AgentAction): AppState {
             contextUsedPercent: snapshot.contextUsedPercent,
             outputTokens: snapshot.outputTokens,
             lastOutput: snapshot.lastOutput || existing.lastOutput,
+            pendingPermissions: mergedPerms,
           });
         } else {
           newAgents.set(snapshot.id, snapshotToAgentState(snapshot));
@@ -175,6 +191,20 @@ export function agentReducer(state: AppState, action: AgentAction): AppState {
         outputTokens: action.outputTokens,
         contextUsedPercent: action.contextUsedPercent,
       }));
+    }
+
+    case 'SET_PERMISSIONS': {
+      return updateAgent(state, action.agentId, (agent) => {
+        const perms = new Map<string, PermissionRequest>();
+        for (const p of action.permissions) {
+          if (p.requestId) perms.set(p.requestId, p);
+        }
+        return {
+          ...agent,
+          pendingPermissions: perms,
+          status: perms.size > 0 ? 'awaiting_permission' : agent.status,
+        };
+      });
     }
 
     case 'SET_DRAFT': {

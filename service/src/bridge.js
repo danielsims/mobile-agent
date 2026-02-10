@@ -145,6 +145,7 @@ export class Bridge {
     const authTimeout = setTimeout(() => {
       if (!authenticated) {
         logAudit('mobile_auth_timeout', { ip });
+        console.log(`[auth] Timeout — mobile client from ${ip} did not authenticate within ${AUTH_TIMEOUT_MS / 1000}s`);
         ws.close(4008, 'Authentication timeout');
       }
     }, AUTH_TIMEOUT_MS);
@@ -195,14 +196,17 @@ export class Bridge {
       const { pairingToken, devicePublicKey, deviceId: reqDeviceId, deviceName } = msg;
 
       if (!pairingToken || !devicePublicKey || !reqDeviceId) {
+        console.log(`[auth] Pairing rejected from ${ip}: missing fields`);
         this._sendTo(ws, 'authError', { error: 'Missing pairing fields.' });
         return;
       }
 
       const result = registerDevice(pairingToken, devicePublicKey, reqDeviceId, deviceName, ip);
       if (result.success) {
+        console.log(`[auth] Pairing successful: ${deviceName || reqDeviceId} from ${ip}`);
         callback({ success: true, deviceId: reqDeviceId });
       } else {
+        console.log(`[auth] Pairing rejected from ${ip}: ${result.error}`);
         this._sendTo(ws, 'authError', { error: result.error });
       }
       return;
@@ -213,6 +217,7 @@ export class Bridge {
       const { payload, signature } = msg;
 
       if (!payload || !signature) {
+        console.log(`[auth] Auth rejected from ${ip}: missing fields`);
         this._sendTo(ws, 'authError', { error: 'Missing authentication fields.' });
         return;
       }
@@ -221,12 +226,14 @@ export class Bridge {
       if (result.success) {
         callback({ success: true, deviceId: result.deviceId });
       } else {
+        console.log(`[auth] Auth rejected from ${ip}: ${result.error}`);
         this._sendTo(ws, 'authError', { error: result.error });
       }
       return;
     }
 
     // Unknown auth message type
+    console.log(`[auth] Unknown auth message type "${msg.type}" from ${ip}`);
     this._sendTo(ws, 'authError', { error: 'Send "authenticate" or "pair" as first message.' });
   }
 
@@ -392,9 +399,11 @@ export class Bridge {
       return;
     }
 
+    const history = session.getHistory();
     this._sendTo(ws, 'agentHistory', {
       agentId: msg.agentId,
-      messages: session.getHistory(),
+      messages: history.messages,
+      pendingPermissions: history.pendingPermissions,
     });
   }
 

@@ -10,12 +10,15 @@ const RECONNECT_DELAY = 2_000;
 const MAX_RECONNECT_DELAY = 30_000;
 const MAX_RECONNECT_ATTEMPTS = 10;
 
+// Timeout for pairing/auth to complete before giving up
+const AUTH_TIMEOUT_MS = 15_000;
+
 export type AuthStatus = 'none' | 'authenticating' | 'authenticated' | 'failed';
 
 interface UseWebSocketOptions {
   onMessage: (msg: ServerMessage) => void;
   onConnect: () => void;
-  onDisconnect: (code: number) => void;
+  onDisconnect: (code: number, willReconnect: boolean) => void;
   onAuthError?: (error: string) => void;
 }
 
@@ -89,12 +92,21 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect, onAuthError }
       // Connect to /ws/mobile — no auth in URL
       ws.current = new WebSocket(wsUrl);
 
+      // Timeout — if auth doesn't complete, don't hang silently
+      const connectTimeout = setTimeout(() => {
+        if (!isAuthenticatedRef.current && ws.current) {
+          console.warn('[useWebSocket] Auth timed out after', AUTH_TIMEOUT_MS, 'ms');
+          ws.current.close();
+        }
+      }, AUTH_TIMEOUT_MS);
+
       ws.current.onopen = async () => {
         // WebSocket is open — now authenticate with signed challenge
         setAuthStatus('authenticating');
 
         const authMsg = await buildAuthMessage();
         if (!authMsg || ws.current?.readyState !== WebSocket.OPEN) {
+          clearTimeout(connectTimeout);
           setAuthStatus('failed');
           ws.current?.close();
           return;
@@ -114,6 +126,7 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect, onAuthError }
         // Handle auth errors before we're authenticated
         if (!isAuthenticatedRef.current) {
           if (msg.type === 'authError') {
+            clearTimeout(connectTimeout);
             setAuthStatus('failed');
             autoReconnectRef.current = false; // Don't retry bad auth
             onAuthError?.(msg.error || 'Authentication failed');
@@ -124,6 +137,7 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect, onAuthError }
           // First successful message means we're authenticated
           // The server sends 'connected' with agent snapshots after auth succeeds
           if (msg.type === 'connected') {
+            clearTimeout(connectTimeout);
             isAuthenticatedRef.current = true;
             setAuthStatus('authenticated');
             setStatus('connected');
@@ -146,6 +160,7 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect, onAuthError }
       };
 
       ws.current.onclose = (event) => {
+        clearTimeout(connectTimeout);
         ws.current = null;
         isAuthenticatedRef.current = false;
 
@@ -154,11 +169,13 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect, onAuthError }
           pingIntervalRef.current = null;
         }
 
-        // Don't auto-reconnect on auth failure or explicit disconnect
+        // Don't auto-reconnect on auth failure, explicit disconnect, or superseded connection
         const shouldReconnect =
           autoReconnectRef.current &&
-          event.code !== 4001 && // Auth failure
           event.code !== 1000 && // Normal closure
+          event.code !== 4001 && // Auth failure
+          event.code !== 4008 && // Auth timeout
+          event.code !== 4010 && // Superseded by new connection
           reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS;
 
         if (shouldReconnect) {
@@ -176,7 +193,7 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect, onAuthError }
           setAuthStatus('none');
         }
 
-        onDisconnect(event.code);
+        onDisconnect(event.code, shouldReconnect);
       };
     } catch {
       setStatus('disconnected');
@@ -220,6 +237,15 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect, onAuthError }
     try {
       ws.current = new WebSocket(fullUrl);
 
+      // Timeout — if pairing doesn't complete, surface an error
+      const pairTimeout = setTimeout(() => {
+        if (!isAuthenticatedRef.current && ws.current) {
+          console.warn('[useWebSocket] Pairing timed out after', AUTH_TIMEOUT_MS, 'ms');
+          onAuthError?.('Pairing timed out. Make sure the server is running and the QR code is fresh.');
+          ws.current.close();
+        }
+      }, AUTH_TIMEOUT_MS);
+
       ws.current.onopen = () => {
         if (ws.current?.readyState === WebSocket.OPEN) {
           ws.current.send(JSON.stringify(pairMsg));
@@ -236,6 +262,7 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect, onAuthError }
 
         if (!isAuthenticatedRef.current) {
           if (msg.type === 'authError') {
+            clearTimeout(pairTimeout);
             setAuthStatus('failed');
             setStatus('disconnected');
             onAuthError?.(msg.error || 'Pairing failed');
@@ -244,6 +271,7 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect, onAuthError }
           }
 
           if (msg.type === 'connected') {
+            clearTimeout(pairTimeout);
             isAuthenticatedRef.current = true;
             setAuthStatus('authenticated');
             setStatus('connected');
@@ -263,6 +291,7 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect, onAuthError }
       ws.current.onerror = () => {};
 
       ws.current.onclose = (event) => {
+        clearTimeout(pairTimeout);
         const wasPaired = isAuthenticatedRef.current;
         ws.current = null;
         isAuthenticatedRef.current = false;
@@ -274,7 +303,8 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect, onAuthError }
 
         // If we were successfully paired and connection dropped,
         // use the normal connect() flow to auto-reconnect with signed challenge.
-        if (wasPaired && autoReconnectRef.current && event.code !== 1000) {
+        const willReconnect = wasPaired && autoReconnectRef.current && event.code !== 1000;
+        if (willReconnect) {
           setStatus('connecting');
           reconnectAttemptsRef.current = 0;
           reconnectTimeoutRef.current = setTimeout(() => {
@@ -288,7 +318,7 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect, onAuthError }
           setAuthStatus('none');
         }
 
-        onDisconnect(event.code);
+        onDisconnect(event.code, willReconnect);
       };
     } catch {
       setStatus('disconnected');

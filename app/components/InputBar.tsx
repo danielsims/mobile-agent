@@ -24,12 +24,13 @@ interface InputBarProps {
   onActivity?: () => void;
   initialValue?: string;
   onDraftChange?: (text: string) => void;
+  autoFocus?: boolean;
 }
 
 // Throttle activity notifications to avoid excessive pings
 const ACTIVITY_THROTTLE = 5000;
 
-export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', onActivity, initialValue = '', onDraftChange }: InputBarProps) {
+export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', onActivity, initialValue = '', onDraftChange, autoFocus }: InputBarProps) {
   const [text, setText] = useState(initialValue);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const inputRef = useRef<TextInput>(null);
@@ -41,6 +42,16 @@ export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', on
       setText(initialValue);
     }
   }, [initialValue]);
+
+  // Auto-focus the input when requested (e.g., inline chat on dashboard)
+  useEffect(() => {
+    if (autoFocus) {
+      // Short delay to let the layout settle before focusing
+      const timer = setTimeout(() => inputRef.current?.focus(), 100);
+      return () => clearTimeout(timer);
+    }
+    return undefined;
+  }, [autoFocus]);
 
   useEffect(() => {
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
@@ -124,6 +135,7 @@ export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', on
             editable={!disabled}
             autoCapitalize="sentences"
             autoCorrect={false}
+            spellCheck={false}
             autoComplete="off"
             keyboardAppearance="dark"
           />

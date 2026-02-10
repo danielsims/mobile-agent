@@ -1,4 +1,4 @@
-export { AgentCard, NewAgentCard } from './AgentCard';
+export { AgentCard } from './AgentCard';
 export { AgentDetailScreen } from './AgentDetailScreen';
 export { CodeBlock } from './CodeBlock';
 export { Dashboard } from './Dashboard';

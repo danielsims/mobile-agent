@@ -1,6 +1,6 @@
 import { StatusBar } from 'expo-status-bar';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import {
   StyleSheet,
   Text,
@@ -16,13 +16,13 @@ import { Dashboard, AgentDetailScreen } from './components';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useNotifications } from './hooks/useNotifications';
 import { useCompletionChime } from './hooks/useCompletionChime';
-import { isPaired, parseQRCode, clearCredentials, type QRPairingData } from './utils/auth';
+import { parseQRCode, clearCredentials, getStoredServerPublicKey, updateServerUrl, type QRPairingData } from './utils/auth';
 
-type Screen = 'loading' | 'pairing' | 'scanner' | 'dashboard' | 'agent';
+type Screen = 'pairing' | 'scanner' | 'dashboard' | 'agent';
 
 // Inner app component that has access to AgentContext
 function AppInner() {
-  const [screen, setScreen] = useState<Screen>('loading');
+  const [screen, setScreen] = useState<Screen>('pairing');
   const [scanned, setScanned] = useState(false);
   const scannedRef = useRef(false); // Synchronous guard — state is async
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
@@ -37,9 +37,17 @@ function AppInner() {
   stateRef.current = state;
   const handleServerMessageRef = useRef(handleServerMessage);
   handleServerMessageRef.current = handleServerMessage;
+  const sendRef = useRef<(type: string, data?: Record<string, unknown>) => boolean>(() => false);
 
   const onWsMessage = useCallback((msg: import('./state/types').ServerMessage) => {
     handleServerMessageRef.current(msg);
+
+    // On initial connect, request history for all agents so dashboard cards show content
+    if (msg.type === 'connected' && msg.agents) {
+      for (const agent of msg.agents) {
+        sendRef.current('getHistory', { agentId: agent.id });
+      }
+    }
 
     // Play chime + notify on agent result
     if (msg.type === 'agentResult' && msg.agentId) {
@@ -53,11 +61,21 @@ function AppInner() {
   }, [playChime, notifyTaskComplete]);
 
   const onWsConnect = useCallback(() => {
-    setScreen('dashboard');
+    // Navigate to dashboard from pre-auth screens.
+    // If already on dashboard/agent (mid-session reconnect), stay put.
+    setScreen(prev =>
+      prev === 'pairing' || prev === 'scanner'
+        ? 'dashboard'
+        : prev,
+    );
   }, []);
 
-  const onWsDisconnect = useCallback(() => {
-    // Stay on current screen — auto-reconnect handles recovery
+  const onWsDisconnect = useCallback((code: number, willReconnect: boolean) => {
+    if (!willReconnect && code !== 1000) {
+      // All retries exhausted or non-recoverable error — go to pairing screen.
+      // Skip code 1000 (intentional close, e.g. unpair) — handled elsewhere.
+      setScreen('pairing');
+    }
   }, []);
 
   // WebSocket connection
@@ -73,28 +91,14 @@ function AppInner() {
     onMessage: onWsMessage,
     onConnect: onWsConnect,
     onDisconnect: onWsDisconnect,
-    onAuthError: (error) => {
-      Alert.alert('Authentication Failed', error, [
-        { text: 'Re-pair', onPress: () => handleUnpair() },
-        { text: 'Retry', onPress: () => connect() },
-      ]);
+    onAuthError: () => {
+      // Auth failed — connection will close, onWsDisconnect navigates to pairing.
+      // No alert needed — user just sees the scan button again.
     },
   });
 
-  // On launch, check if already paired
-  useEffect(() => {
-    const checkPairing = async () => {
-      const paired = await isPaired();
-      if (paired) {
-        // Already paired — connect automatically
-        setScreen('dashboard');
-        connect();
-      } else {
-        setScreen('pairing');
-      }
-    };
-    checkPairing();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Keep sendRef in sync so onWsMessage can call send() without circular deps
+  sendRef.current = send;
 
   // QR code scanning
   const handleScanPress = async () => {
@@ -116,7 +120,7 @@ function AppInner() {
 
     const qrData = parseQRCode(data);
     if (qrData) {
-      handlePair(qrData);
+      handleQRScanned(qrData);
     } else {
       Alert.alert('Invalid QR Code', 'This doesn\'t look like a Mobile Agent pairing code.');
       scannedRef.current = false;
@@ -124,14 +128,22 @@ function AppInner() {
     }
   };
 
-  const handlePair = async (qrData: QRPairingData) => {
+  const handleQRScanned = async (qrData: QRPairingData) => {
+    // Go back to pairing screen — it shows "Connecting..." while status is 'connecting'.
+    // onWsConnect will navigate to dashboard when the connection succeeds.
     setScreen('pairing');
-    try {
-      await pair(qrData);
-      // pair() will trigger onConnect → setScreen('dashboard')
-    } catch {
-      Alert.alert('Pairing Failed', 'Could not connect to server. Make sure the server is running.');
+
+    // Check if already paired with this server (same public key).
+    // If so, just update the URL and reconnect — don't consume the pairing token.
+    const storedServerPub = await getStoredServerPublicKey();
+    if (storedServerPub && storedServerPub === qrData.serverPublicKey) {
+      await updateServerUrl(qrData.url);
+      connect();
+    } else {
+      pair(qrData);
     }
+    // Success: onWsConnect → dashboard
+    // Failure: onWsDisconnect → stays on pairing, status resets, button reappears
   };
 
   const handleUnpair = async () => {
@@ -181,18 +193,6 @@ function AppInner() {
 
   // --- Screen rendering ---
 
-  // Loading screen (briefly while checking pairing status)
-  if (screen === 'loading') {
-    return (
-      <View style={styles.container}>
-        <StatusBar style="light" />
-        <View style={styles.centered}>
-          <ActivityIndicator color="#fff" size="large" />
-        </View>
-      </View>
-    );
-  }
-
   // QR Scanner
   if (screen === 'scanner') {
     return (
@@ -220,18 +220,20 @@ function AppInner() {
     );
   }
 
-  // Pairing screen (initial setup or re-pairing)
+  // Pairing screen
   if (screen === 'pairing') {
+    const isConnecting = connectionStatus === 'connecting' || authStatus === 'authenticating';
+
     return (
       <SafeAreaView style={styles.container}>
         <StatusBar style="light" />
         <View style={styles.pairingContainer}>
           <Text style={styles.pairingTitle}>Mobile Agent</Text>
           <Text style={styles.pairingSubtitle}>
-            Pair with your computer to control coding agents remotely
+            Control coding agents remotely from your phone
           </Text>
 
-          {authStatus === 'authenticating' ? (
+          {isConnecting ? (
             <View style={styles.pairingLoading}>
               <ActivityIndicator color="#fff" size="small" />
               <Text style={styles.pairingLoadingText}>Connecting...</Text>
@@ -256,16 +258,18 @@ function AppInner() {
   // Dashboard
   if (screen === 'dashboard') {
     return (
-      <SafeAreaView style={styles.container}>
+      <View style={styles.container}>
         <StatusBar style="light" />
+        <SafeAreaView style={styles.safeTop} />
         <Dashboard
           connectionStatus={connectionStatus}
           onSelectAgent={handleSelectAgent}
           onCreateAgent={handleCreateAgent}
           onDestroyAgent={handleDestroyAgent}
+          onSendMessage={handleSendMessage}
           onOpenSettings={handleUnpair}
         />
-      </SafeAreaView>
+      </View>
     );
   }
 
