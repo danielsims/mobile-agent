@@ -77,6 +77,7 @@ export interface AgentState {
   lastOutput: string;
   draftText: string;
   createdAt: number;
+  autoApprove: boolean;
 }
 
 // --- App State ---
@@ -98,7 +99,7 @@ export type AgentAction =
   | { type: 'SET_MESSAGES'; agentId: string; messages: AgentMessage[] }
   | { type: 'ADD_PERMISSION'; agentId: string; permission: PermissionRequest }
   | { type: 'REMOVE_PERMISSION'; agentId: string; requestId: string }
-  | { type: 'SET_SESSION_INFO'; agentId: string; sessionId?: string; model?: string; tools?: string[]; sessionName?: string; status?: AgentStatus; cwd?: string; gitBranch?: string; projectName?: string }
+  | { type: 'SET_SESSION_INFO'; agentId: string; sessionId?: string; model?: string; tools?: string[]; sessionName?: string; status?: AgentStatus; cwd?: string; gitBranch?: string; projectName?: string; autoApprove?: boolean }
   | { type: 'UPDATE_COST'; agentId: string; totalCost: number; outputTokens: number; contextUsedPercent: number }
   | { type: 'SET_PERMISSIONS'; agentId: string; permissions: PermissionRequest[] }
   | { type: 'SET_DRAFT'; agentId: string; text: string }
@@ -123,6 +124,7 @@ export interface AgentSnapshot {
   lastOutput: string;
   pendingPermissions: PermissionRequest[];
   createdAt: number;
+  autoApprove?: boolean;
 }
 
 // --- Project/Worktree Types ---
@@ -184,6 +186,7 @@ export interface ServerMessage {
   cwd?: string;
   gitBranch?: string;
   projectName?: string;
+  autoApprove?: boolean;
 
   // agentHistory
   messages?: AgentMessage[];

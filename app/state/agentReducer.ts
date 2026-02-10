@@ -36,6 +36,7 @@ function snapshotToAgentState(snapshot: AgentSnapshot): AgentState {
     lastOutput: snapshot.lastOutput || '',
     draftText: '',
     createdAt: snapshot.createdAt,
+    autoApprove: snapshot.autoApprove || false,
   };
 }
 
@@ -99,6 +100,7 @@ export function agentReducer(state: AppState, action: AgentAction): AppState {
             outputTokens: snapshot.outputTokens,
             lastOutput: snapshot.lastOutput || existing.lastOutput,
             pendingPermissions: mergedPerms,
+            autoApprove: snapshot.autoApprove || false,
           });
         } else {
           newAgents.set(snapshot.id, snapshotToAgentState(snapshot));
@@ -190,6 +192,7 @@ export function agentReducer(state: AppState, action: AgentAction): AppState {
         ...(action.cwd !== undefined && { cwd: action.cwd }),
         ...(action.gitBranch !== undefined && { gitBranch: action.gitBranch }),
         ...(action.projectName !== undefined && { projectName: action.projectName }),
+        ...(action.autoApprove !== undefined && { autoApprove: action.autoApprove }),
       }));
     }
 

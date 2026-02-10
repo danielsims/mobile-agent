@@ -390,6 +390,10 @@ export class Bridge {
         this._handleRespondPermission(ws, msg, deviceId);
         break;
 
+      case 'setAutoApprove':
+        this._handleSetAutoApprove(ws, msg, deviceId);
+        break;
+
       case 'getHistory':
         this._handleGetHistory(ws, msg);
         break;
@@ -521,6 +525,38 @@ export class Bridge {
     if (!success) {
       this._sendTo(ws, 'error', { error: 'Permission request not found or already handled.' });
     }
+  }
+
+  _handleSetAutoApprove(ws, msg, deviceId) {
+    const session = this.agents.get(msg.agentId);
+    if (!session) {
+      this._sendTo(ws, 'error', { error: 'Agent not found.' });
+      return;
+    }
+
+    const enabled = !!msg.enabled;
+    session.autoApprove = enabled;
+
+    // Tell the CLI to change its own permission mode
+    session.setPermissionMode(enabled ? 'bypassPermissions' : 'default');
+
+    logAudit('auto_approve_changed', {
+      agentId: msg.agentId.slice(0, 8),
+      deviceId,
+      enabled,
+    });
+
+    // If enabling and there are pending permissions, approve them all now
+    if (enabled && session.pendingPermissions.size > 0) {
+      for (const [requestId] of session.pendingPermissions) {
+        session.respondToPermission(requestId, 'allow');
+      }
+    }
+
+    this._broadcastToMobile('agentUpdated', {
+      agentId: msg.agentId,
+      autoApprove: enabled,
+    });
   }
 
   _handleGetHistory(ws, msg) {

@@ -237,6 +237,11 @@ function AppInner() {
     dispatch({ type: 'REMOVE_PERMISSION', agentId, requestId });
   };
 
+  const handleSetAutoApprove = (agentId: string, enabled: boolean) => {
+    send('setAutoApprove', { agentId, enabled });
+    dispatch({ type: 'SET_SESSION_INFO', agentId, autoApprove: enabled });
+  };
+
   const handleBackToDashboard = () => {
     setSelectedAgentId(null);
     dispatch({ type: 'SET_ACTIVE_AGENT', agentId: null });
@@ -357,6 +362,7 @@ function AppInner() {
               onBack={handleBackToDashboard}
               onSendMessage={handleSendMessage}
               onRespondPermission={handleRespondPermission}
+              onSetAutoApprove={handleSetAutoApprove}
               onResetPingTimer={resetPingTimer}
             />
           </View>

@@ -44,6 +44,7 @@ export class AgentSession {
     this.outputTokens = 0;
     this.lastOutput = '';
     this.createdAt = Date.now();
+    this.autoApprove = false;
 
     this._process = null;
     this._cliSocket = null;
@@ -495,6 +496,23 @@ export class AgentSession {
     return true;
   }
 
+  /**
+   * Change the CLI's permission mode at runtime.
+   * 'bypassPermissions' = auto-approve all tools, 'default' = prompt for each.
+   */
+  setPermissionMode(mode) {
+    const requestId = `req_perm_${uuidv4().slice(0, 8)}`;
+    this._sendToCliSocket({
+      type: 'control_request',
+      request_id: requestId,
+      request: {
+        subtype: 'set_permission_mode',
+        mode,
+      },
+    });
+    console.log(`[Agent ${this.id.slice(0, 8)}] Permission mode -> ${mode}`);
+  }
+
   _sendToCliSocket(msg) {
     if (!this._cliSocket || this._cliSocket.readyState !== 1) return;
     this._cliSocket.send(JSON.stringify(msg) + '\n');
@@ -517,6 +535,7 @@ export class AgentSession {
       lastOutput: this.lastOutput,
       pendingPermissions: Array.from(this.pendingPermissions.values()),
       createdAt: this.createdAt,
+      autoApprove: this.autoApprove,
     };
   }
 

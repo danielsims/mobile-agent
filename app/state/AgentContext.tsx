@@ -78,7 +78,7 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
           if (msg.status) {
             dispatch({ type: 'UPDATE_AGENT_STATUS', agentId: msg.agentId, status: msg.status });
           }
-          if (msg.model || msg.tools || msg.sessionId || msg.sessionName || msg.cwd || msg.gitBranch || msg.projectName) {
+          if (msg.model || msg.tools || msg.sessionId || msg.sessionName || msg.cwd || msg.gitBranch || msg.projectName || msg.autoApprove !== undefined) {
             dispatch({
               type: 'SET_SESSION_INFO',
               agentId: msg.agentId,
@@ -89,6 +89,7 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
               ...(msg.cwd !== undefined && { cwd: msg.cwd }),
               ...(msg.gitBranch !== undefined && { gitBranch: msg.gitBranch }),
               ...(msg.projectName !== undefined && { projectName: msg.projectName }),
+              ...(msg.autoApprove !== undefined && { autoApprove: msg.autoApprove }),
             });
           }
         }

@@ -11,6 +11,7 @@ import {
   PanResponder,
   Animated,
   Dimensions,
+  ScrollView,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
@@ -36,6 +37,7 @@ interface AgentDetailScreenProps {
   onBack: () => void;
   onSendMessage: (agentId: string, text: string) => void;
   onRespondPermission: (agentId: string, requestId: string, behavior: 'allow' | 'deny') => void;
+  onSetAutoApprove?: (agentId: string, enabled: boolean) => void;
   onResetPingTimer: () => void;
 }
 
@@ -62,6 +64,36 @@ function formatModelName(model: string | null, type: AgentType): string {
   return model;
 }
 
+// Diff view for Edit tool permissions — shows old_string/new_string as red/green lines
+function PermissionDiffView({ filePath, oldStr, newStr }: { filePath?: string; oldStr: string; newStr: string }) {
+  const oldLines = oldStr.split('\n');
+  const newLines = newStr.split('\n');
+
+  return (
+    <View>
+      {filePath && (
+        <Text style={styles.diffHeader} numberOfLines={1}>{filePath}</Text>
+      )}
+      {oldLines.map((line, i) => (
+        <View key={`r${i}`} style={styles.diffLineRemoved}>
+          <Text style={styles.diffPrefix}>-</Text>
+          <Text style={styles.diffTextRemoved}>{line}</Text>
+        </View>
+      ))}
+      {newLines.map((line, i) => (
+        <View key={`a${i}`} style={styles.diffLineAdded}>
+          <Text style={styles.diffPrefix}>+</Text>
+          <Text style={styles.diffTextAdded}>{line}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+function isEditWithDiff(toolName: string, toolInput: Record<string, unknown>): boolean {
+  return toolName === 'Edit' && typeof toolInput.old_string === 'string' && typeof toolInput.new_string === 'string';
+}
+
 // Individual permission prompt for structured tool data
 function PermissionCard({
   permission,
@@ -86,16 +118,28 @@ function PermissionCard({
     onDeny();
   };
 
+  const showDiff = isEditWithDiff(permission.toolName, permission.toolInput);
+
   return (
     <View style={styles.permissionCard}>
       <Text style={styles.permissionTitle}>Permission Required</Text>
       <Text style={styles.permissionToolName}>{permission.toolName}</Text>
       {Object.keys(permission.toolInput).length > 0 && (
         <View style={styles.permissionInput}>
-          <CodeBlock
-            code={JSON.stringify(permission.toolInput, null, 2)}
-            language="json"
-          />
+          {showDiff ? (
+            <ScrollView style={styles.diffScroll} nestedScrollEnabled>
+              <PermissionDiffView
+                filePath={typeof permission.toolInput.file_path === 'string' ? permission.toolInput.file_path : undefined}
+                oldStr={permission.toolInput.old_string as string}
+                newStr={permission.toolInput.new_string as string}
+              />
+            </ScrollView>
+          ) : (
+            <CodeBlock
+              code={JSON.stringify(permission.toolInput, null, 2)}
+              language="json"
+            />
+          )}
         </View>
       )}
       <View style={styles.permissionButtons}>
@@ -142,6 +186,7 @@ export function AgentDetailScreen({
   onBack,
   onSendMessage,
   onRespondPermission,
+  onSetAutoApprove,
   onResetPingTimer,
 }: AgentDetailScreenProps) {
   const agent = useAgent(agentId);
@@ -340,6 +385,36 @@ export function AgentDetailScreen({
             </Text>
             <Text style={styles.headerSubtitle} numberOfLines={1}>{modelDisplayName}</Text>
           </View>
+
+          {/* Ask / Auto permission toggle */}
+          {agent.status !== 'exited' && (
+            <View style={styles.modeToggle}>
+              <TouchableOpacity
+                style={[styles.modeOption, !agent.autoApprove && styles.modeOptionActive]}
+                onPress={() => {
+                  if (agent.autoApprove && onSetAutoApprove) {
+                    if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    onSetAutoApprove(agentId, false);
+                  }
+                }}
+                activeOpacity={0.7}
+              >
+                <Text style={[styles.modeText, !agent.autoApprove && styles.modeTextActive]}>Ask</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modeOption, agent.autoApprove && styles.modeOptionAuto]}
+                onPress={() => {
+                  if (!agent.autoApprove && onSetAutoApprove) {
+                    if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    onSetAutoApprove(agentId, true);
+                  }
+                }}
+                activeOpacity={0.7}
+              >
+                <Text style={[styles.modeText, agent.autoApprove && styles.modeTextAuto]}>Auto</Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
 
         {/* Stats bar */}
@@ -461,6 +536,35 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
+  // Ask/Auto toggle
+  modeToggle: {
+    flexDirection: 'row',
+    backgroundColor: '#1a1a1a',
+    borderRadius: 8,
+    padding: 2,
+  },
+  modeOption: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+  },
+  modeOptionActive: {
+    backgroundColor: '#2a2a2a',
+  },
+  modeOptionAuto: {
+    backgroundColor: 'rgba(245,158,11,0.2)',
+  },
+  modeText: {
+    color: '#555',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  modeTextActive: {
+    color: '#ccc',
+  },
+  modeTextAuto: {
+    color: '#f59e0b',
+  },
   // Stats bar
   statsBar: {
     flexDirection: 'row',
@@ -571,6 +675,52 @@ const styles = StyleSheet.create({
     color: '#000',
     fontWeight: '600',
     fontSize: 14,
+  },
+  // Diff view
+  diffScroll: {
+    maxHeight: 300,
+    borderRadius: 6,
+    backgroundColor: '#0f0f0f',
+    padding: 8,
+  },
+  diffHeader: {
+    color: '#666',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginBottom: 8,
+  },
+  diffLineRemoved: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(239,68,68,0.08)',
+    paddingVertical: 1,
+    paddingHorizontal: 4,
+  },
+  diffLineAdded: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(34,197,94,0.08)',
+    paddingVertical: 1,
+    paddingHorizontal: 4,
+  },
+  diffPrefix: {
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 16,
+    width: 14,
+    color: '#888',
+  },
+  diffTextRemoved: {
+    color: '#ef4444',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 16,
+    flex: 1,
+  },
+  diffTextAdded: {
+    color: '#22c55e',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 16,
+    flex: 1,
   },
   // Back chevron
   arrowContainer: {
