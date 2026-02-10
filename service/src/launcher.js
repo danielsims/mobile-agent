@@ -7,9 +7,6 @@ import { hasDevices, logAudit, PAIRING_TOKEN_TTL_MS } from './auth.js';
 
 const PORT = parseInt(process.env.PORT, 10) || 3001;
 
-// Auto-refresh buffer: regenerate QR 10 seconds before token expires
-const AUTO_REFRESH_MS = PAIRING_TOKEN_TTL_MS - 10_000;
-
 async function startTunnel() {
   return new Promise((resolve, reject) => {
     console.log('Starting Cloudflare tunnel...');
@@ -49,7 +46,7 @@ function showPairingQR(pairingInfo) {
   console.log(`  Token:  ${pairingInfo.pairingToken.slice(0, 8)}... (expires in ${ttlMin} min)`);
   console.log('');
   console.log('  Scan this QR code with the Mobile Agent app to pair.');
-  console.log('  QR auto-refreshes when the token expires.');
+  console.log('  Press [q] to refresh the QR code.');
   console.log('');
   console.log('\u2550'.repeat(60));
   console.log('');
@@ -60,8 +57,6 @@ async function main() {
   await bridge.start();
 
   let tunnelUrl = null;
-  let autoRefreshTimer = null;
-
   try {
     tunnelUrl = await startTunnel();
     logAudit('server_started', { port: PORT, tunnel: tunnelUrl });
@@ -72,17 +67,9 @@ async function main() {
     tunnelUrl = `ws://127.0.0.1:${PORT}`;
   }
 
-  // Show QR and start auto-refresh cycle
   function refreshQR() {
-    if (autoRefreshTimer) clearTimeout(autoRefreshTimer);
     const pairingInfo = bridge.getPairingInfo(tunnelUrl);
     showPairingQR(pairingInfo);
-
-    // Auto-refresh before the token expires
-    autoRefreshTimer = setTimeout(() => {
-      console.log('  Pairing token expired — generating fresh QR code...');
-      refreshQR();
-    }, AUTO_REFRESH_MS);
   }
 
   refreshQR();
@@ -106,7 +93,7 @@ async function main() {
         shutdown();
         return;
       }
-      // 'q' or 'Q' — regenerate QR (also resets auto-refresh timer)
+      // 'q' or 'Q' — regenerate QR with fresh pairing token
       if (key[0] === 113 || key[0] === 81) {
         refreshQR();
       }
@@ -116,7 +103,6 @@ async function main() {
   // Graceful shutdown
   const shutdown = () => {
     console.log('\nShutting down...');
-    if (autoRefreshTimer) clearTimeout(autoRefreshTimer);
     logAudit('server_shutdown', {});
     bridge.shutdown();
     process.exit(0);

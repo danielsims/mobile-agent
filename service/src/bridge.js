@@ -12,6 +12,7 @@ import {
   hasDevices,
   logAudit,
 } from './auth.js';
+import { loadSessions, getSavedSessions, saveSession, removeSession } from './sessions.js';
 
 const MAX_CONCURRENT_AGENTS = 10;
 const IDLE_TIMEOUT_MS = 30 * 60_000; // 30 minutes
@@ -34,8 +35,9 @@ export class Bridge {
    * Returns a promise that resolves when the server is listening.
    */
   start() {
-    // Initialize auth keys
+    // Initialize auth keys and load saved sessions
     const { publicKeyRaw } = initializeKeys();
+    loadSessions();
     console.log(`Server public key: ${publicKeyRaw.toString('hex').slice(0, 16)}...`);
 
     return new Promise((resolve) => {
@@ -52,6 +54,7 @@ export class Bridge {
 
       this.httpServer.listen(this.port, '127.0.0.1', () => {
         console.log(`Bridge listening on 127.0.0.1:${this.port}`);
+        this._restoreSavedSessions();
         resolve();
       });
     });
@@ -261,6 +264,71 @@ export class Bridge {
     this._resetIdleTimer(ws);
   }
 
+  // --- Agent lifecycle helpers ---
+
+  /**
+   * Set up the broadcast callback for an agent session.
+   * Handles broadcasting to mobile clients AND persisting session state.
+   */
+  _setupAgentBroadcast(session) {
+    session.setOnBroadcast((id, type, data) => {
+      this._broadcastToMobile(type, data);
+
+      // Persist when sessionId arrives (from system/init or result)
+      if (type === 'agentUpdated' && data.sessionId) {
+        saveSession(id, {
+          sessionId: data.sessionId,
+          type: session.type,
+          sessionName: session.sessionName,
+          createdAt: session.createdAt,
+        });
+      }
+
+      // Persist sessionName updates
+      if (type === 'agentUpdated' && data.sessionName) {
+        const saved = getSavedSessions();
+        if (saved[id]) {
+          saveSession(id, { ...saved[id], sessionName: data.sessionName });
+        }
+      }
+    });
+  }
+
+  /**
+   * Restore previously saved agent sessions on startup.
+   * Spawns Claude processes with --resume for each saved session.
+   */
+  _restoreSavedSessions() {
+    const saved = getSavedSessions();
+    const entries = Object.entries(saved);
+
+    if (entries.length === 0) return;
+
+    console.log(`Restoring ${entries.length} saved agent session(s)...`);
+
+    for (const [agentId, info] of entries) {
+      if (!info.sessionId) {
+        removeSession(agentId);
+        continue;
+      }
+
+      const session = new AgentSession(agentId, info.type || 'claude');
+      session.sessionId = info.sessionId;
+      session.sessionName = info.sessionName || 'Restored Agent';
+      session.createdAt = info.createdAt || Date.now();
+
+      this._setupAgentBroadcast(session);
+      this.agents.set(agentId, session);
+      session.spawn(this.port, info.sessionId);
+
+      logAudit('agent_restored', {
+        agentId: agentId.slice(0, 8),
+        sessionId: info.sessionId.slice(0, 8),
+        type: info.type,
+      });
+    }
+  }
+
   // --- Mobile message handlers ---
 
   _handleMobileMessage(ws, msg, deviceId, ip) {
@@ -315,10 +383,7 @@ export class Bridge {
     const type = msg.agentType || 'claude';
     const session = new AgentSession(agentId, type);
 
-    session.setOnBroadcast((id, type, data) => {
-      this._broadcastToMobile(type, data);
-    });
-
+    this._setupAgentBroadcast(session);
     this.agents.set(agentId, session);
     logAudit('agent_created', { agentId: agentId.slice(0, 8), type, deviceId });
 
@@ -338,6 +403,7 @@ export class Bridge {
     logAudit('agent_destroyed', { agentId: msg.agentId.slice(0, 8), deviceId });
     session.destroy();
     this.agents.delete(msg.agentId);
+    removeSession(msg.agentId);
     this._broadcastToMobile('agentDestroyed', { agentId: msg.agentId });
   }
 

@@ -67,8 +67,10 @@ export class AgentSession {
   /**
    * Spawn the Claude CLI with --sdk-url. The CLI connects TO our server
    * and waits for prompts over WebSocket. No --print/-p needed.
+   * @param {number} serverPort
+   * @param {string|null} resumeSessionId - If provided, passes --resume to restore a previous session
    */
-  spawn(serverPort) {
+  spawn(serverPort, resumeSessionId = null) {
     const sdkUrl = `ws://127.0.0.1:${serverPort}/ws/cli/${this.id}`;
 
     // --sdk-url makes the CLI connect as a WebSocket client to our server.
@@ -81,7 +83,11 @@ export class AgentSession {
       '--verbose',
     ];
 
-    console.log(`[Agent ${this.id.slice(0, 8)}] Spawning: ${CLAUDE_PATH} --sdk-url ws://.../${this.id.slice(0, 8)}...`);
+    if (resumeSessionId) {
+      args.push('--resume', resumeSessionId);
+    }
+
+    console.log(`[Agent ${this.id.slice(0, 8)}] Spawning: ${CLAUDE_PATH} ${resumeSessionId ? `--resume ${resumeSessionId.slice(0, 8)}...` : '--sdk-url'} ws://.../${this.id.slice(0, 8)}...`);
 
     this._process = spawn(CLAUDE_PATH, args, {
       cwd: process.env.HOME,
