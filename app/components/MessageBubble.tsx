@@ -1,10 +1,10 @@
-import React from 'react';
-import { View, Text, StyleSheet, Platform, Linking } from 'react-native';
-import { Message } from '../types';
+import React, { useState } from 'react';
+import { View, Text, StyleSheet, Platform, Linking, TouchableOpacity } from 'react-native';
+import type { AgentMessage, ContentBlock } from '../state/types';
 import { CodeBlock } from './CodeBlock';
 
 interface MessageBubbleProps {
-  message: Message;
+  message: AgentMessage;
 }
 
 // URL regex pattern
@@ -17,47 +17,34 @@ function parseTextWithLinks(text: string, baseKey: number): React.ReactNode[] {
   let match;
   let key = baseKey;
 
-  // Reset regex
   urlRegex.lastIndex = 0;
-
   while ((match = urlRegex.exec(text)) !== null) {
-    // Text before URL
     if (match.index > lastIndex) {
       parts.push(
         <Text key={key++} style={styles.text}>
           {text.slice(lastIndex, match.index)}
-        </Text>
+        </Text>,
       );
     }
-
-    // URL - make it clickable
     const url = match[1];
     parts.push(
-      <Text
-        key={key++}
-        style={styles.link}
-        onPress={() => Linking.openURL(url)}
-      >
+      <Text key={key++} style={styles.link} onPress={() => Linking.openURL(url)}>
         {url}
-      </Text>
+      </Text>,
     );
-
     lastIndex = match.index + match[0].length;
   }
-
-  // Remaining text
   if (lastIndex < text.length) {
     parts.push(
       <Text key={key++} style={styles.text}>
         {text.slice(lastIndex)}
-      </Text>
+      </Text>,
     );
   }
-
   return parts;
 }
 
-// Parse content for code blocks and links
+// Parse markdown-ish content with code blocks and links
 function parseContent(content: string): React.ReactNode[] {
   const codeBlockRegex = /```(\w+)?\n([\s\S]*?)```/g;
   const parts: React.ReactNode[] = [];
@@ -66,38 +53,23 @@ function parseContent(content: string): React.ReactNode[] {
   let key = 0;
 
   while ((match = codeBlockRegex.exec(content)) !== null) {
-    // Text before code block (with link parsing)
     if (match.index > lastIndex) {
       const text = content.slice(lastIndex, match.index).trim();
       if (text) {
         const textParts = parseTextWithLinks(text, key);
-        parts.push(
-          <Text key={key++} style={styles.text}>
-            {textParts}
-          </Text>
-        );
+        parts.push(<Text key={key++} style={styles.text}>{textParts}</Text>);
         key += textParts.length;
       }
     }
-
-    // Code block
-    parts.push(
-      <CodeBlock key={key++} language={match[1]} code={match[2].trim()} />
-    );
-
+    parts.push(<CodeBlock key={key++} language={match[1]} code={match[2].trim()} />);
     lastIndex = match.index + match[0].length;
   }
 
-  // Remaining text (with link parsing)
   if (lastIndex < content.length) {
     const text = content.slice(lastIndex).trim();
     if (text) {
       const textParts = parseTextWithLinks(text, key);
-      parts.push(
-        <Text key={key++} style={styles.text}>
-          {textParts}
-        </Text>
-      );
+      parts.push(<Text key={key++} style={styles.text}>{textParts}</Text>);
     }
   }
 
@@ -109,45 +81,100 @@ function parseContent(content: string): React.ReactNode[] {
   return parts;
 }
 
+// Render a single ContentBlock
+function ContentBlockView({ block, index }: { block: ContentBlock; index: number }) {
+  const [expanded, setExpanded] = useState(false);
+
+  switch (block.type) {
+    case 'text':
+      return <View key={index}>{parseContent(block.text)}</View>;
+
+    case 'tool_use':
+      return (
+        <TouchableOpacity
+          key={index}
+          style={styles.toolUseContainer}
+          onPress={() => setExpanded(!expanded)}
+          activeOpacity={0.7}
+        >
+          <View style={styles.toolUseHeader}>
+            <Text style={styles.toolUseName}>{block.name}</Text>
+            <Text style={[styles.toolUseChevron, !expanded && styles.toolUseChevronDown]}>{'\u2303'}</Text>
+          </View>
+          {expanded && (
+            <CodeBlock code={JSON.stringify(block.input, null, 2)} language="json" />
+          )}
+        </TouchableOpacity>
+      );
+
+    case 'tool_result':
+      return (
+        <View key={index} style={styles.toolResultContainer}>
+          <Text style={styles.toolResultText}>
+            {typeof block.content === 'string' ? block.content : JSON.stringify(block.content)}
+          </Text>
+        </View>
+      );
+
+    case 'thinking':
+      return (
+        <TouchableOpacity
+          key={index}
+          style={styles.thinkingContainer}
+          onPress={() => setExpanded(!expanded)}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.thinkingLabel}>
+            Thinking {expanded ? '\u25B4' : '\u25BE'}
+          </Text>
+          {expanded && <Text style={styles.thinkingText}>{block.text}</Text>}
+        </TouchableOpacity>
+      );
+
+    default:
+      return null;
+  }
+}
+
 export function MessageBubble({ message }: MessageBubbleProps) {
   const isUser = message.type === 'user';
   const isSystem = message.type === 'system';
-  const isTool = message.type === 'tool';
 
   if (isSystem) {
     return (
       <View style={styles.systemContainer}>
-        <Text style={styles.systemText}>{message.content}</Text>
+        <Text style={styles.systemText}>
+          {typeof message.content === 'string' ? message.content : ''}
+        </Text>
       </View>
     );
   }
 
-  if (isTool) {
+  // Content can be string (streaming) or ContentBlock[] (structured)
+  const renderContent = () => {
+    if (typeof message.content === 'string') {
+      if (isUser) {
+        return <Text style={styles.userText}>{message.content}</Text>;
+      }
+      return <View style={styles.bubble}>{parseContent(message.content)}</View>;
+    }
+
+    // ContentBlock array
     return (
-      <View style={styles.toolContainer}>
-        <Text style={styles.toolName}>{message.toolName || 'Tool'}</Text>
-        {message.toolInput && (
-          <CodeBlock code={message.toolInput} language="json" />
-        )}
-        {message.content && (
-          <Text style={styles.toolResult}>{message.content}</Text>
-        )}
+      <View style={styles.bubble}>
+        {message.content.map((block, i) => (
+          <ContentBlockView key={i} block={block} index={i} />
+        ))}
       </View>
     );
-  }
+  };
 
   return (
     <View style={styles.messageContainer}>
       <Text style={[styles.sender, isUser && styles.senderUser]}>
-        {isUser ? 'You' : 'Claude'}
+        {isUser ? 'You' : 'Assistant'}
       </Text>
-      {isUser ? (
-        <Text style={styles.userText}>{message.content}</Text>
-      ) : (
-        <View style={styles.bubble}>
-          {parseContent(message.content)}
-        </View>
-      )}
+      {renderContent()}
     </View>
   );
 }
@@ -165,9 +192,7 @@ const styles = StyleSheet.create({
   senderUser: {
     color: '#888',
   },
-  bubble: {
-    // No background, just the content
-  },
+  bubble: {},
   userText: {
     color: '#e5e5e5',
     fontSize: 15,
@@ -193,20 +218,63 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontStyle: 'italic',
   },
-  toolContainer: {
-    marginBottom: 16,
+  // Tool use blocks
+  toolUseContainer: {
+    backgroundColor: '#141414',
+    borderRadius: 8,
+    padding: 12,
+    marginVertical: 4,
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
   },
-  toolName: {
+  toolUseHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  toolUseName: {
+    color: '#e5e5e5',
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  toolUseChevron: {
     color: '#888',
+    fontSize: 16,
+  },
+  toolUseChevronDown: {
+    transform: [{ rotate: '180deg' }],
+  },
+  // Tool result blocks
+  toolResultContainer: {
+    marginVertical: 4,
+    paddingLeft: 10,
+    borderLeftWidth: 2,
+    borderLeftColor: '#2a2a2a',
+  },
+  toolResultText: {
+    color: '#666',
+    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 18,
+  },
+  // Thinking blocks
+  thinkingContainer: {
+    backgroundColor: 'rgba(139,92,246,0.06)',
+    borderRadius: 6,
+    padding: 10,
+    marginVertical: 4,
+    borderLeftWidth: 2,
+    borderLeftColor: '#8b5cf6',
+  },
+  thinkingLabel: {
+    color: '#8b5cf6',
     fontSize: 12,
     fontWeight: '500',
-    marginBottom: 8,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
-  toolResult: {
-    color: '#666',
+  thinkingText: {
+    color: '#a78bfa',
     fontSize: 13,
-    marginTop: 8,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 20,
+    marginTop: 6,
   },
 });

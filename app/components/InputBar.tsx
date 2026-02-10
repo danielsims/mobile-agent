@@ -26,8 +26,6 @@ interface InputBarProps {
   onDraftChange?: (text: string) => void;
 }
 
-const KEYBOARD_OVERLAP = 40;
-
 // Throttle activity notifications to avoid excessive pings
 const ACTIVITY_THROTTLE = 5000;
 
@@ -109,10 +107,7 @@ export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', on
     <BlurView
       intensity={80}
       tint="dark"
-      style={[
-        styles.blurContainer,
-        keyboardVisible && styles.blurContainerKeyboard,
-      ]}
+      style={styles.blurContainer}
     >
       <View style={styles.content}>
         <View style={styles.inputWrapper}>
@@ -128,7 +123,8 @@ export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', on
             multiline
             editable={!disabled}
             autoCapitalize="sentences"
-            autoCorrect
+            autoCorrect={false}
+            autoComplete="off"
             keyboardAppearance="dark"
           />
         </View>
@@ -145,7 +141,6 @@ export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', on
         </TouchableOpacity>
       </View>
 
-      {keyboardVisible && <View style={styles.keyboardFill} />}
       {!keyboardVisible && Platform.OS === 'ios' && <View style={styles.safeAreaFill} />}
     </BlurView>
   );
@@ -165,10 +160,6 @@ const styles = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: 'rgba(255,255,255,0.1)',
   },
-  blurContainerKeyboard: {
-    marginBottom: -KEYBOARD_OVERLAP,
-    paddingBottom: 10,
-  },
   content: {
     flexDirection: 'row',
     alignItems: 'flex-end',
@@ -176,10 +167,6 @@ const styles = StyleSheet.create({
     paddingTop: 8,
     paddingBottom: 6,
     gap: 10,
-  },
-  keyboardFill: {
-    height: KEYBOARD_OVERLAP,
-    backgroundColor: 'transparent',
   },
   safeAreaFill: {
     height: 34,

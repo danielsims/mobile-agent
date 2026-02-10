@@ -34,7 +34,8 @@
         {
           "cameraPermission": "Allow Mobile Agent to scan QR codes"
         }
-      ]
+      ],
+      "expo-secure-store"
     ]
   }
 }
