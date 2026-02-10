@@ -7,6 +7,7 @@ import { createServer } from 'node:http';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import qrcode from 'qrcode-terminal';
+import pty from '@lydell/node-pty';
 
 const PORT = process.env.PORT || 3001;
 const AUTH_TOKEN = uuidv4();
@@ -191,6 +192,7 @@ function output(text) {
 // Store the last tool use for permission handling
 let lastToolUse = null;
 let lastBroadcastToolId = null; // Prevent duplicate tool broadcasts
+let claudeProc = null; // Reference to Claude process for stdin
 
 function handleClaudeMessage(msg) {
   switch (msg.type) {
@@ -298,9 +300,10 @@ function runClaude(prompt, options = {}) {
   return new Promise((resolve) => {
     const args = ['-p', '--verbose', '--output-format', 'stream-json'];
 
-    // Always skip permissions at CLI level to prevent hanging
-    // Our mobile app handles permission display/notification
-    args.push('--dangerously-skip-permissions');
+    // Only skip permissions in auto mode - in confirm mode we use PTY for real prompts
+    if (permissionMode === 'auto') {
+      args.push('--dangerously-skip-permissions');
+    }
 
     if (sessionId) {
       args.push('--resume', sessionId);
@@ -310,35 +313,72 @@ function runClaude(prompt, options = {}) {
 
     console.log('Running Claude:', args.join(' ').slice(0, 200) + (args.join(' ').length > 200 ? '...' : ''));
 
-    const proc = spawn(CLAUDE_PATH, args, {
+    // Use PTY for proper terminal emulation (needed for permission prompts)
+    const proc = pty.spawn(CLAUDE_PATH, args, {
+      name: 'xterm-256color',
+      cols: 120,
+      rows: 30,
       cwd: process.env.HOME,
-      env: { ...process.env },
-      stdio: ['ignore', 'pipe', 'pipe']
+      env: process.env,
     });
 
-    proc.stdout.on('data', (data) => {
-      const text = data.toString();
-      const lines = text.split('\n').filter(l => l.trim());
+    claudeProc = proc;
+    let dataBuffer = '';
+
+    proc.onData((data) => {
+      dataBuffer += data;
+
+      // Process complete lines
+      const lines = dataBuffer.split('\n');
+      dataBuffer = lines.pop() || ''; // Keep incomplete line in buffer
+
       for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        // Remove ANSI escape codes for processing
+        const cleanLine = trimmed.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r/g, '');
+
+        // Try to parse as JSON (stream-json output)
         try {
-          const msg = JSON.parse(line);
+          const msg = JSON.parse(cleanLine);
           handleClaudeMessage(msg);
-        } catch (e) {}
+        } catch (e) {
+          // Not JSON - check for permission prompts
+          if (cleanLine.length > 0) {
+            console.log('[Claude TTY]:', cleanLine.slice(0, 100));
+          }
+
+          // Detect permission prompts
+          if (cleanLine.includes('Allow') || cleanLine.includes('permission') ||
+              cleanLine.includes('(y/n)') || cleanLine.includes('[Y/n]') ||
+              cleanLine.includes('yes/no') || cleanLine.includes('Do you want')) {
+            console.log('[Permission prompt detected]');
+
+            const toolName = lastToolUse?.name || 'Unknown';
+            pendingPermission = {
+              toolName: toolName,
+              toolInput: lastToolUse?.input || {},
+              description: cleanLine,
+            };
+            broadcast('permission', {
+              id: lastToolUse?.id || Date.now().toString(),
+              toolName: toolName,
+              description: cleanLine,
+            });
+            terminalOutput(`\n[Permission Required: ${toolName}]\n`);
+          }
+        }
       }
     });
 
-    proc.stderr.on('data', (data) => {
-      // Log stderr for debugging
-      const text = data.toString().trim();
-      if (text) console.log('Claude stderr:', text);
-    });
-
-    proc.on('close', (code) => {
-      console.log('Claude exited:', code);
+    proc.onExit(({ exitCode }) => {
+      console.log('Claude exited:', exitCode);
       isProcessing = false;
+      claudeProc = null;
       output('\n');
-      broadcast('done', { code });
-      resolve(code);
+      broadcast('done', { code: exitCode });
+      resolve(exitCode);
     });
   });
 }
@@ -375,42 +415,22 @@ async function sendUserMessage(text, options = {}) {
 }
 
 async function handlePermissionResponse(action) {
-  isProcessing = false;
-
   if (action === 'yes' || action === 'always') {
-    if (pendingPermission) {
-      console.log('Permission granted for:', pendingPermission.toolName);
-
-      // Build an explicit follow-up that tells Claude exactly what to execute
-      let followUpPrompt;
-      const toolName = pendingPermission.toolName;
-      const toolInput = pendingPermission.toolInput || {};
-
-      if (toolName === 'Write') {
-        const filePath = toolInput.file_path || 'the file';
-        const content = toolInput.content || '';
-        // Be very explicit about what to write
-        followUpPrompt = `Permission granted. Please write the file now. Use the Write tool with file_path="${filePath}" and the same content you intended to write.`;
-      } else if (toolName === 'Edit') {
-        const filePath = toolInput.file_path || 'the file';
-        followUpPrompt = `Permission granted. Please edit ${filePath} now using the Edit tool with the same changes you intended.`;
-      } else if (toolName === 'Bash') {
-        const command = toolInput.command || 'the command';
-        followUpPrompt = `Permission granted. Please run the Bash command now: ${command}`;
-      } else {
-        followUpPrompt = `Permission granted. Please proceed with ${toolName} using the same parameters you intended.`;
-      }
-
+    if (claudeProc) {
+      console.log('Sending permission approval to Claude');
+      claudeProc.write('y\n');
       pendingPermission = null;
-      // Keep lastPermissionToolId set to prevent re-broadcast during retry
-
-      // Resume session with explicit instruction
-      await sendUserMessage(followUpPrompt, { skipPermissions: true, isPermissionRetry: true });
+      // Don't broadcast done - Claude is still running
     } else {
-      console.log('No pending permission to approve');
+      console.log('No Claude process to approve');
+      pendingPermission = null;
       broadcast('done', { code: 0 });
     }
   } else {
+    if (claudeProc) {
+      console.log('Sending permission denial to Claude');
+      claudeProc.write('n\n');
+    }
     output('[Permission denied]\n');
     pendingPermission = null;
     lastPermissionToolId = null;
@@ -495,6 +515,7 @@ wss.on('connection', (ws, req) => {
           lastPermissionToolId = null;
           lastToolUse = null;
           lastBroadcastToolId = null;
+          claudeProc = null;
           broadcast('reset', {});
           terminalOutput('[Session reset]\n');
           break;
