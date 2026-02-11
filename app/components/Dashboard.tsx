@@ -401,7 +401,7 @@ export function Dashboard({
 
   // Voice input overlay
   const voiceOverlay = voiceAgentId && voiceAgent ? (
-    <View style={styles.voiceOverlay}>
+    <View style={[styles.voiceOverlay, keyboardHeight > 0 && { bottom: keyboardHeight - 40 }]}>
       <View style={styles.inlineContainer}>
         <View style={styles.inlineHeader}>
           <Text style={styles.inlineLabel} numberOfLines={1}>
