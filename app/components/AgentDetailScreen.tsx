@@ -2,6 +2,7 @@ import React, { useCallback, useState, useEffect, useMemo, useRef } from 'react'
 import {
   View,
   Text,
+  TextInput,
   Image,
   TouchableOpacity,
   StyleSheet,
@@ -22,6 +23,8 @@ import { KeyboardScrollView } from './KeyboardScrollView';
 import { MessageBubble, buildToolResultMap } from './MessageBubble';
 import { InputBar } from './InputBar';
 import { CodeBlock } from './CodeBlock';
+import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
+import { useSettings } from '../state/SettingsContext';
 
 // Claude logo SVG path (shared with AgentCard)
 const CLAUDE_LOGO_PATH = 'M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z';
@@ -292,6 +295,55 @@ export function AgentDetailScreen({
     dispatch({ type: 'SET_DRAFT', agentId, text });
   }, [agentId, dispatch]);
 
+  // Voice input
+  const [voiceOpen, setVoiceOpen] = useState(false);
+  const [voiceText, setVoiceText] = useState('');
+  const { settings } = useSettings();
+  const {
+    transcript,
+    isListening,
+    start: startListening,
+    stop: stopListening,
+    abort: abortListening,
+    clear: clearTranscript,
+  } = useSpeechRecognition();
+
+  // Sync speech recognition transcript into editable text
+  useEffect(() => {
+    if (transcript) {
+      setVoiceText(transcript);
+    }
+  }, [transcript]);
+
+  const handleVoiceOpen = useCallback(async () => {
+    Keyboard.dismiss();
+    setVoiceOpen(true);
+    setVoiceText('');
+    clearTranscript();
+    const started = await startListening();
+    if (!started) {
+      setVoiceOpen(false);
+    }
+  }, [startListening, clearTranscript]);
+
+  const handleVoiceSend = useCallback(() => {
+    const trimmed = voiceText.trim();
+    if (!trimmed) return;
+    stopListening();
+    onSendMessage(agentId, trimmed);
+    clearTranscript();
+    setVoiceText('');
+    setVoiceOpen(false);
+  }, [voiceText, stopListening, onSendMessage, agentId, clearTranscript]);
+
+  const handleVoiceDismiss = useCallback(() => {
+    abortListening();
+    setVoiceText('');
+    setVoiceOpen(false);
+  }, [abortListening]);
+
+  const canSendVoice = voiceText.trim().length > 0 && connectionStatus === 'connected';
+
   // Match agent to a project (for icon and name)
   const matchedProject = useMemo(() => {
     if (!projects?.length || !agent) return null;
@@ -464,14 +516,63 @@ export function AgentDetailScreen({
             ))}
           </KeyboardScrollView>
 
-          <InputBar
-            onSend={handleSend}
-            disabled={isDisabled || permissions.length > 0}
-            placeholder={agent.status === 'running' ? 'Agent is working...' : 'Ask anything...'}
-            onActivity={onResetPingTimer}
-            initialValue={agent.draftText}
-            onDraftChange={handleDraftChange}
-          />
+          {voiceOpen ? (
+            <View style={[styles.voiceOverlay, keyboardHeight === 0 && styles.voiceOverlaySafeArea]}>
+              <View style={styles.voiceHeader}>
+                <Text style={styles.voiceLabel} numberOfLines={1}>
+                  Send to: {agent.projectName ? (
+                    <>
+                      <Text style={settings.colorfulGitLabels ? styles.voiceProjectName : undefined}>{agent.projectName}</Text>
+                      {agent.gitBranch ? <Text style={settings.colorfulGitLabels ? styles.voiceGitText : undefined}> git:(<Text style={settings.colorfulGitLabels ? styles.voiceBranchName : undefined}>{agent.gitBranch}</Text>)</Text> : null}
+                    </>
+                  ) : agent.sessionName}
+                </Text>
+                <TouchableOpacity onPress={handleVoiceDismiss} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <Text style={styles.voiceCancelText}>Cancel</Text>
+                </TouchableOpacity>
+              </View>
+              <View style={styles.voiceTranscriptArea}>
+                <TextInput
+                  style={styles.voiceTranscriptInput}
+                  value={voiceText}
+                  onChangeText={setVoiceText}
+                  placeholder={isListening ? 'Listening...' : 'Starting...'}
+                  placeholderTextColor="#555"
+                  multiline
+                  autoCorrect={false}
+                  spellCheck={false}
+                  keyboardAppearance="dark"
+                />
+              </View>
+              <View style={styles.voiceBottomRow}>
+                <View style={styles.voiceListeningIndicator}>
+                  <View style={[styles.voiceListeningDot, isListening && styles.voiceListeningDotActive]} />
+                  <Text style={styles.voiceListeningStatusText}>{isListening ? 'Listening' : 'Stopped'}</Text>
+                </View>
+                <TouchableOpacity
+                  style={[styles.voiceSendBtn, canSendVoice && styles.voiceSendBtnActive]}
+                  onPress={handleVoiceSend}
+                  disabled={!canSendVoice}
+                  activeOpacity={0.7}
+                >
+                  <View style={styles.voiceSendIcon}>
+                    <View style={[styles.voiceArrowStem, { backgroundColor: canSendVoice ? '#000' : '#555' }]} />
+                    <View style={[styles.voiceArrowHead, { borderBottomColor: canSendVoice ? '#000' : '#555' }]} />
+                  </View>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ) : (
+            <InputBar
+              onSend={handleSend}
+              onVoice={handleVoiceOpen}
+              disabled={isDisabled || permissions.length > 0}
+              placeholder={agent.status === 'running' ? 'Agent is working...' : 'Ask anything...'}
+              onActivity={onResetPingTimer}
+              initialValue={agent.draftText}
+              onDraftChange={handleDraftChange}
+            />
+          )}
         </View>
       </Animated.View>
     </View>
@@ -737,5 +838,119 @@ const styles = StyleSheet.create({
     borderColor: '#888',
     transform: [{ rotate: '45deg' }],
     marginLeft: 3,
+  },
+  // Voice overlay
+  voiceOverlay: {
+    backgroundColor: '#0a0a0a',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255,255,255,0.1)',
+  },
+  voiceOverlaySafeArea: {
+    paddingBottom: 34,
+  },
+  voiceHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255,255,255,0.06)',
+  },
+  voiceLabel: {
+    color: '#888',
+    fontSize: 13,
+    flex: 1,
+    marginRight: 12,
+  },
+  voiceProjectName: {
+    color: '#17c6b2',
+    fontWeight: '500',
+  },
+  voiceGitText: {
+    color: '#5fa2f9',
+    fontWeight: '500',
+  },
+  voiceBranchName: {
+    color: '#ec605f',
+    fontWeight: '500',
+  },
+  voiceCancelText: {
+    color: '#ef4444',
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  voiceTranscriptArea: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    minHeight: 60,
+  },
+  voiceTranscriptInput: {
+    color: '#fafafa',
+    fontSize: 15,
+    lineHeight: 22,
+    minHeight: 40,
+    maxHeight: 120,
+    padding: 0,
+  },
+  voiceBottomRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingBottom: 8,
+  },
+  voiceListeningIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  voiceListeningDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#4b5563',
+  },
+  voiceListeningDotActive: {
+    backgroundColor: '#ef4444',
+  },
+  voiceListeningStatusText: {
+    color: '#777',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  voiceSendBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  voiceSendBtnActive: {
+    backgroundColor: '#fff',
+  },
+  voiceSendIcon: {
+    width: 18,
+    height: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  voiceArrowStem: {
+    width: 2.5,
+    height: 10,
+    borderRadius: 1,
+    marginTop: 4,
+  },
+  voiceArrowHead: {
+    position: 'absolute',
+    top: 0,
+    width: 0,
+    height: 0,
+    borderLeftWidth: 5,
+    borderRightWidth: 5,
+    borderBottomWidth: 6,
+    borderLeftColor: 'transparent',
+    borderRightColor: 'transparent',
   },
 });

@@ -35,7 +35,14 @@
           "cameraPermission": "Allow Mobile Agent to scan QR codes"
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Allow Mobile Agent to use the microphone for voice input",
+          "speechRecognitionPermission": "Allow Mobile Agent to use speech recognition for voice input"
+        }
+      ]
     ]
   }
 }

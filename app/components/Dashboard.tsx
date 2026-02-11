@@ -21,6 +21,7 @@ import { useSettings } from '../state/SettingsContext';
 import type { AgentState, Project } from '../state/types';
 import type { ConnectionStatus } from '../types';
 import { AgentCard } from './AgentCard';
+import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 
 // --- User avatar with status badge ---
 
@@ -107,6 +108,8 @@ export function Dashboard({
   const { settings } = useSettings();
   const [chatAgentId, setChatAgentId] = useState<string | null>(null);
   const [chatText, setChatText] = useState('');
+  const [voiceAgentId, setVoiceAgentId] = useState<string | null>(null);
+  const [voiceText, setVoiceText] = useState('');
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [currentPage, setCurrentPage] = useState(0);
   const [contentHeight, setContentHeight] = useState(0);
@@ -131,6 +134,23 @@ export function Dashboard({
   const totalPages = Math.max(pages.length, 1);
 
   const chatAgent = chatAgentId ? state.agents.get(chatAgentId) : null;
+  const voiceAgent = voiceAgentId ? state.agents.get(voiceAgentId) : null;
+
+  const {
+    transcript,
+    isListening,
+    start: startListening,
+    stop: stopListening,
+    abort: abortListening,
+    clear: clearTranscript,
+  } = useSpeechRecognition();
+
+  // Sync speech recognition transcript into editable text
+  useEffect(() => {
+    if (transcript) {
+      setVoiceText(transcript);
+    }
+  }, [transcript]);
 
   // Restore saved page on mount
   useEffect(() => {
@@ -224,10 +244,15 @@ export function Dashboard({
   };
 
   const handleChatOpen = useCallback((agentId: string) => {
+    // Close voice overlay if open
+    if (voiceAgentId) {
+      abortListening();
+      setVoiceAgentId(null);
+    }
     setChatAgentId(agentId);
     setChatText('');
     setTimeout(() => inlineInputRef.current?.focus(), 100);
-  }, []);
+  }, [voiceAgentId, abortListening]);
 
   const handleChatSend = useCallback(() => {
     const trimmed = chatText.trim();
@@ -249,7 +274,51 @@ export function Dashboard({
     Keyboard.dismiss();
   }, []);
 
+  // --- Voice handlers ---
+
+  const handleVoiceOpen = useCallback(async (agentId: string) => {
+    // Close keyboard chat if open
+    if (chatAgentId) {
+      setChatAgentId(null);
+      setChatText('');
+      Keyboard.dismiss();
+    }
+
+    setVoiceAgentId(agentId);
+    setVoiceText('');
+    clearTranscript();
+
+    const started = await startListening();
+    if (!started) {
+      setVoiceAgentId(null);
+      Alert.alert('Speech Recognition', 'Could not start speech recognition. Check permissions in Settings.');
+    }
+  }, [chatAgentId, clearTranscript, startListening]);
+
+  const handleVoiceSend = useCallback(() => {
+    const trimmed = voiceText.trim();
+    if (!trimmed || !voiceAgentId) return;
+
+    if (Platform.OS === 'ios') {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    }
+
+    stopListening();
+    onSendMessage(voiceAgentId, trimmed);
+    setVoiceAgentId(null);
+    setVoiceText('');
+    clearTranscript();
+  }, [voiceAgentId, voiceText, onSendMessage, stopListening, clearTranscript]);
+
+  const handleVoiceDismiss = useCallback(() => {
+    abortListening();
+    setVoiceAgentId(null);
+    setVoiceText('');
+    clearTranscript();
+  }, [abortListening, clearTranscript]);
+
   const canSend = chatText.trim().length > 0 && connectionStatus === 'connected';
+  const canSendVoice = voiceText.trim().length > 0 && connectionStatus === 'connected';
 
   // Inline chat overlay
   const inlineInput = chatAgentId && chatAgent ? (
@@ -304,6 +373,67 @@ export function Dashboard({
     </View>
   ) : null;
 
+  // Voice input overlay
+  const voiceOverlay = voiceAgentId && voiceAgent ? (
+    <View style={styles.voiceOverlay}>
+      <View style={styles.inlineContainer}>
+        <View style={styles.inlineHeader}>
+          <Text style={styles.inlineLabel} numberOfLines={1}>
+            Send to: {voiceAgent.projectName ? (
+              <>
+                <Text style={settings.colorfulGitLabels ? styles.inlineProjectName : undefined}>{voiceAgent.projectName}</Text>
+                {voiceAgent.gitBranch ? <Text style={settings.colorfulGitLabels ? styles.inlineGit : undefined}> git:(<Text style={settings.colorfulGitLabels ? styles.inlineBranchName : undefined}>{voiceAgent.gitBranch}</Text>)</Text> : null}
+              </>
+            ) : voiceAgent.sessionName}
+          </Text>
+          <TouchableOpacity
+            onPress={handleVoiceDismiss}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Text style={styles.inlineDismiss}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.voiceTranscriptArea}>
+          <TextInput
+            style={styles.voiceTranscriptInput}
+            value={voiceText}
+            onChangeText={setVoiceText}
+            placeholder={isListening ? 'Listening...' : 'Starting...'}
+            placeholderTextColor="#555"
+            multiline
+            autoCorrect={false}
+            spellCheck={false}
+            keyboardAppearance="dark"
+          />
+        </View>
+
+        <View style={styles.voiceBottomRow}>
+          <View style={styles.voiceListeningIndicator}>
+            <View style={[
+              styles.voiceListeningDot,
+              isListening && styles.voiceListeningDotActive,
+            ]} />
+            <Text style={styles.voiceListeningText}>
+              {isListening ? 'Listening' : 'Stopped'}
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={[styles.inlineSendBtn, canSendVoice && styles.inlineSendBtnActive]}
+            onPress={handleVoiceSend}
+            disabled={!canSendVoice}
+            activeOpacity={0.7}
+          >
+            <View style={styles.inlineSendIcon}>
+              <View style={[styles.arrowStem, { backgroundColor: canSendVoice ? '#000' : '#555' }]} />
+              <View style={[styles.arrowHead, { borderBottomColor: canSendVoice ? '#000' : '#555' }]} />
+            </View>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </View>
+  ) : null;
+
   return (
     <View style={styles.container}>
       {agents.length === 0 ? (
@@ -333,6 +463,7 @@ export function Dashboard({
                     onLongPress={() => handleLongPress(agent)}
                     onDestroy={() => onDestroyAgent(agent.id)}
                     onChat={() => handleChatOpen(agent.id)}
+                    onVoice={() => handleVoiceOpen(agent.id)}
                   />
                 ))}
               </View>
@@ -350,6 +481,7 @@ export function Dashboard({
       />
 
       {inlineInput}
+      {voiceOverlay}
     </View>
   );
 }
@@ -397,8 +529,9 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 16,
-    paddingTop: 10,
-    paddingBottom: 4,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255,255,255,0.06)',
   },
   inlineLabel: {
     color: '#777',
@@ -433,17 +566,13 @@ const styles = StyleSheet.create({
   },
   inlineInputWrapper: {
     flex: 1,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderRadius: 22,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.12)',
   },
   inlineInput: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
+    paddingHorizontal: 4,
+    paddingVertical: 12,
     color: '#fafafa',
-    fontSize: 15,
-    minHeight: 40,
+    fontSize: 16,
+    minHeight: 44,
   },
   inlineSendBtn: {
     width: 34,
@@ -478,6 +607,54 @@ const styles = StyleSheet.create({
     borderBottomWidth: 5.5,
     borderLeftColor: 'transparent',
     borderRightColor: 'transparent',
+  },
+  // Voice overlay
+  voiceOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingBottom: 40,
+    backgroundColor: '#0a0a0a',
+  },
+  voiceTranscriptArea: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    minHeight: 60,
+  },
+  voiceTranscriptInput: {
+    color: '#fafafa',
+    fontSize: 15,
+    lineHeight: 22,
+    minHeight: 40,
+    maxHeight: 120,
+    padding: 0,
+  },
+  voiceBottomRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingBottom: 8,
+  },
+  voiceListeningIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  voiceListeningDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#4b5563',
+  },
+  voiceListeningDotActive: {
+    backgroundColor: '#ef4444',
+  },
+  voiceListeningText: {
+    color: '#777',
+    fontSize: 12,
+    fontWeight: '500',
   },
 });
 

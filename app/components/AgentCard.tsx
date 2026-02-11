@@ -11,7 +11,7 @@ import {
   Alert,
   type ViewStyle,
 } from 'react-native';
-import Svg, { Path } from 'react-native-svg';
+import Svg, { Path, Rect, Line } from 'react-native-svg';
 import { useSettings } from '../state/SettingsContext';
 import type { AgentState, AgentStatus, AgentType, AgentMessage, ContentBlock, Project } from '../state/types';
 
@@ -24,6 +24,7 @@ interface AgentCardProps {
   onLongPress: () => void;
   onDestroy?: () => void;
   onChat?: () => void;
+  onVoice?: () => void;
   layout?: CardLayout;
 }
 
@@ -176,7 +177,45 @@ function ChevronRight({ size = 12, color = '#555' }: { size?: number; color?: st
   );
 }
 
-export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, onChat, layout = 'grid' }: AgentCardProps) {
+// Keyboard icon for text message button
+function KeyboardIcon({ size = 14, color = '#666' }: { size?: number; color?: string }) {
+  return (
+    <Svg width={size} height={size * 0.75} viewBox="0 0 24 18" fill="none">
+      <Rect x={1} y={1} width={22} height={16} rx={2} stroke={color} strokeWidth={1.5} fill="none" />
+      <Rect x={4} y={4} width={2} height={2} rx={0.5} fill={color} />
+      <Rect x={8} y={4} width={2} height={2} rx={0.5} fill={color} />
+      <Rect x={12} y={4} width={2} height={2} rx={0.5} fill={color} />
+      <Rect x={16} y={4} width={4} height={2} rx={0.5} fill={color} />
+      <Rect x={4} y={8} width={2} height={2} rx={0.5} fill={color} />
+      <Rect x={8} y={8} width={2} height={2} rx={0.5} fill={color} />
+      <Rect x={12} y={8} width={2} height={2} rx={0.5} fill={color} />
+      <Rect x={16} y={8} width={4} height={2} rx={0.5} fill={color} />
+      <Rect x={6} y={12} width={12} height={2} rx={0.5} fill={color} />
+    </Svg>
+  );
+}
+
+// Microphone icon for voice input button
+function MicIcon({ size = 14, color = '#666' }: { size?: number; color?: string }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M12 2a3.5 3.5 0 00-3.5 3.5v5a3.5 3.5 0 007 0v-5A3.5 3.5 0 0012 2z"
+        fill={color}
+      />
+      <Path
+        d="M19 10v1a7 7 0 01-14 0v-1"
+        stroke={color}
+        strokeWidth={1.8}
+        strokeLinecap="round"
+      />
+      <Line x1={12} y1={18} x2={12} y2={22} stroke={color} strokeWidth={1.8} strokeLinecap="round" />
+      <Line x1={9} y1={22} x2={15} y2={22} stroke={color} strokeWidth={1.8} strokeLinecap="round" />
+    </Svg>
+  );
+}
+
+export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, onChat, onVoice, layout = 'grid' }: AgentCardProps) {
   const isFull = layout === 'full' || layout === 'page';
   const scrollRef = useRef<ScrollView>(null);
   const [bodyHeight, setBodyHeight] = useState(0);
@@ -371,12 +410,20 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
       </View>
       <View style={styles.footerRight}>
         <TouchableOpacity
-          style={styles.openButton}
+          style={styles.iconButton}
+          onPress={() => onVoice?.()}
+          activeOpacity={0.6}
+          hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+        >
+          <MicIcon size={16} color="#666" />
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.iconButton}
           onPress={() => onChat ? onChat() : onPress()}
           activeOpacity={0.6}
           hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
         >
-          <Text style={styles.openButtonText}>Message</Text>
+          <KeyboardIcon size={16} color="#666" />
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.openButton}
@@ -543,14 +590,23 @@ const styles = StyleSheet.create({
   cwdBranchName: {
     color: '#ec605f',
   },
+  // Icon buttons (keyboard, mic)
+  iconButton: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+  },
   // Open button
   openButton: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 2,
-    paddingVertical: 4,
-    paddingHorizontal: 8,
-    borderRadius: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
     backgroundColor: 'rgba(255,255,255,0.04)',
   },
   openButtonText: {

@@ -9,6 +9,7 @@ import {
   LayoutAnimation,
   UIManager,
 } from 'react-native';
+import Svg, { Path, Line } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
 
 // Enable LayoutAnimation on Android
@@ -18,6 +19,7 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
 
 interface InputBarProps {
   onSend: (text: string) => void;
+  onVoice?: () => void;
   disabled?: boolean;
   placeholder?: string;
   onActivity?: () => void;
@@ -29,7 +31,7 @@ interface InputBarProps {
 // Throttle activity notifications to avoid excessive pings
 const ACTIVITY_THROTTLE = 5000;
 
-export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', onActivity, initialValue = '', onDraftChange, autoFocus }: InputBarProps) {
+export function InputBar({ onSend, onVoice, disabled, placeholder = 'Ask anything...', onActivity, initialValue = '', onDraftChange, autoFocus }: InputBarProps) {
   const [text, setText] = useState(initialValue);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const inputRef = useRef<TextInput>(null);
@@ -136,6 +138,16 @@ export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', on
           />
         </View>
 
+        {onVoice && (
+          <TouchableOpacity
+            style={styles.micBtn}
+            onPress={onVoice}
+            activeOpacity={0.7}
+          >
+            <MicIcon size={20} color="#888" />
+          </TouchableOpacity>
+        )}
+
         <TouchableOpacity
           style={[styles.sendBtn, canSend && styles.sendBtnActive]}
           onPress={handleSend}
@@ -150,6 +162,25 @@ export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', on
 
       {!keyboardVisible && Platform.OS === 'ios' && <View style={styles.safeAreaFill} />}
     </View>
+  );
+}
+
+function MicIcon({ size = 20, color = '#888' }: { size?: number; color?: string }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M12 2a3.5 3.5 0 00-3.5 3.5v5a3.5 3.5 0 007 0v-5A3.5 3.5 0 0012 2z"
+        fill={color}
+      />
+      <Path
+        d="M19 10v1a7 7 0 01-14 0v-1"
+        stroke={color}
+        strokeWidth={1.8}
+        strokeLinecap="round"
+      />
+      <Line x1={12} y1={18} x2={12} y2={22} stroke={color} strokeWidth={1.8} strokeLinecap="round" />
+      <Line x1={9} y1={22} x2={15} y2={22} stroke={color} strokeWidth={1.8} strokeLinecap="round" />
+    </Svg>
   );
 }
 
@@ -181,19 +212,23 @@ const styles = StyleSheet.create({
   },
   inputWrapper: {
     flex: 1,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderRadius: 22,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.12)',
   },
   input: {
-    paddingHorizontal: 18,
+    paddingHorizontal: 4,
     paddingVertical: 12,
     paddingTop: 12,
     color: '#fafafa',
     fontSize: 16,
     maxHeight: 120,
     minHeight: 44,
+  },
+  micBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
   },
   sendBtn: {
     width: 36,
@@ -202,6 +237,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.15)',
     alignItems: 'center',
     justifyContent: 'center',
+    marginBottom: 4,
   },
   sendBtnActive: {
     backgroundColor: '#fff',
