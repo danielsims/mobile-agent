@@ -16,6 +16,7 @@ import {
 import Svg, { Path, Circle } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { GlassView, isLiquidGlassAvailable } from 'expo-glass-effect';
 import { useAgentState } from '../state/AgentContext';
 import { useSettings } from '../state/SettingsContext';
 import type { AgentState, Project } from '../state/types';
@@ -25,19 +26,26 @@ import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 
 // --- User avatar with status badge ---
 
-const AVATAR_SIZE = 32;
-const BADGE_SIZE = 10;
+const AVATAR_SIZE = 36;
+const BADGE_SIZE = 12;
 
-function UserAvatar({ connected, onPress }: { connected: boolean; onPress: () => void }) {
+function UserAvatar({ connected, onPress, glass }: { connected: boolean; onPress: () => void; glass?: boolean }) {
+  const handlePress = () => {
+    if (Platform.OS === 'ios') {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+    onPress();
+  };
+
   return (
-    <TouchableOpacity onPress={onPress} activeOpacity={0.7} style={pillStyles.avatarWrap}>
-      <View style={pillStyles.avatar}>
-        <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
-          <Circle cx={12} cy={8} r={4} stroke="#fff" strokeWidth={1.8} />
-          <Path d="M4 20c0-3.3 3.6-6 8-6s8 2.7 8 6" stroke="#fff" strokeWidth={1.8} strokeLinecap="round" />
+    <TouchableOpacity onPress={handlePress} activeOpacity={0.7} style={pillStyles.avatarWrap}>
+      <View style={glass ? pillStyles.avatarGlass : pillStyles.avatar}>
+        <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
+          <Circle cx={12} cy={8} r={4} stroke={glass ? '#374151' : '#fff'} strokeWidth={1.8} />
+          <Path d="M4 20c0-3.3 3.6-6 8-6s8 2.7 8 6" stroke={glass ? '#374151' : '#fff'} strokeWidth={1.8} strokeLinecap="round" />
         </Svg>
       </View>
-      <View style={[pillStyles.badge, connected ? pillStyles.badgeGreen : pillStyles.badgeRed]} />
+      <View style={[pillStyles.badge, connected ? pillStyles.badgeGreen : pillStyles.badgeRed, glass && pillStyles.badgeGlass]} />
     </TouchableOpacity>
   );
 }
@@ -68,27 +76,45 @@ interface BottomPillNavProps {
 
 function BottomPillNav({ currentPage, totalPages, connectionStatus, onOpenSettings, onCreateAgent }: BottomPillNavProps) {
   const isConnected = connectionStatus === 'connected';
+  const useGlass = isLiquidGlassAvailable();
+
+  const pillContent = (
+    <>
+      <UserAvatar connected={isConnected} onPress={onOpenSettings} glass={useGlass} />
+
+      {totalPages > 1 && (
+        <View style={pillStyles.dotsRow}>
+          {Array.from({ length: totalPages }, (_, i) => (
+            <View
+              key={i}
+              style={[pillStyles.dot, i === currentPage && (useGlass ? pillStyles.dotActiveGlass : pillStyles.dotActive)]}
+            />
+          ))}
+        </View>
+      )}
+
+      <TouchableOpacity onPress={() => {
+        if (Platform.OS === 'ios') {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        }
+        onCreateAgent();
+      }} style={useGlass ? pillStyles.addBtnGlass : pillStyles.addBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+        <Text style={useGlass ? pillStyles.addTextGlass : pillStyles.addText}>+</Text>
+      </TouchableOpacity>
+    </>
+  );
 
   return (
     <View style={pillStyles.wrapper}>
-      <View style={pillStyles.pill}>
-        <UserAvatar connected={isConnected} onPress={onOpenSettings} />
-
-        {totalPages > 1 && (
-          <View style={pillStyles.dotsRow}>
-            {Array.from({ length: totalPages }, (_, i) => (
-              <View
-                key={i}
-                style={[pillStyles.dot, i === currentPage && pillStyles.dotActive]}
-              />
-            ))}
-          </View>
-        )}
-
-        <TouchableOpacity onPress={onCreateAgent} style={pillStyles.addBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-          <Text style={pillStyles.addText}>+</Text>
-        </TouchableOpacity>
-      </View>
+      {useGlass ? (
+        <GlassView style={pillStyles.pillGlass}>
+          {pillContent}
+        </GlassView>
+      ) : (
+        <View style={pillStyles.pill}>
+          {pillContent}
+        </View>
+      )}
     </View>
   );
 }
@@ -674,6 +700,16 @@ const pillStyles = StyleSheet.create({
     paddingVertical: 4,
     gap: 12,
   },
+  pillGlass: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 100,
+    paddingLeft: 4,
+    paddingRight: 6,
+    paddingVertical: 4,
+    gap: 12,
+    overflow: 'hidden',
+  },
   avatarWrap: {
     width: AVATAR_SIZE,
     height: AVATAR_SIZE,
@@ -687,6 +723,14 @@ const pillStyles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  avatarGlass: {
+    width: AVATAR_SIZE,
+    height: AVATAR_SIZE,
+    borderRadius: AVATAR_SIZE / 2,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   badge: {
     position: 'absolute',
     top: -1,
@@ -694,8 +738,11 @@ const pillStyles = StyleSheet.create({
     width: BADGE_SIZE,
     height: BADGE_SIZE,
     borderRadius: BADGE_SIZE / 2,
-    borderWidth: 2,
-    borderColor: '#ffffff',
+    borderWidth: 3,
+    borderColor: '#151515',
+  },
+  badgeGlass: {
+    borderColor: '#1a1a1a',
   },
   badgeGreen: {
     backgroundColor: '#22c55e',
@@ -712,22 +759,42 @@ const pillStyles = StyleSheet.create({
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: '#d1d5db',
+    backgroundColor: '#374151',
+    opacity: 1,
   },
   dotActive: {
-    backgroundColor: '#374151',
+    backgroundColor: '#fff',
+    opacity: 1,
+  },
+  dotActiveGlass: {
+    backgroundColor: '#fff',
+    opacity: 1,
   },
   addBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: AVATAR_SIZE,
+    height: AVATAR_SIZE,
+    borderRadius: AVATAR_SIZE / 2,
     backgroundColor: '#f3f4f6',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  addBtnGlass: {
+    width: AVATAR_SIZE,
+    height: AVATAR_SIZE,
+    borderRadius: AVATAR_SIZE / 2,
+    backgroundColor: '#fff',
     alignItems: 'center',
     justifyContent: 'center',
   },
   addText: {
     color: '#374151',
-    fontSize: 18,
+    fontSize: 22,
+    fontWeight: '400',
+    marginTop: -1,
+  },
+  addTextGlass: {
+    color: '#374151',
+    fontSize: 22,
     fontWeight: '400',
     marginTop: -1,
   },

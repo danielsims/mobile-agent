@@ -12,6 +12,7 @@ import {
   type ViewStyle,
 } from 'react-native';
 import Svg, { Path, Rect, Line } from 'react-native-svg';
+import { GlassView, isLiquidGlassAvailable } from 'expo-glass-effect';
 import { useSettings } from '../state/SettingsContext';
 import type { AgentState, AgentStatus, AgentType, AgentMessage, ContentBlock, Project } from '../state/types';
 
@@ -247,7 +248,8 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
     }
   }, [isFull, terminalContent]);
 
-  const cardStyle: ViewStyle[] = [styles.card];
+  const useGlass = isLiquidGlassAvailable();
+  const cardStyle: ViewStyle[] = [useGlass ? styles.cardGlass : styles.card];
   if (layout === 'page') {
     cardStyle.push(styles.cardPage);
   } else if (isFull) {
@@ -411,19 +413,19 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
       <View style={styles.footerRight}>
         <TouchableOpacity
           style={styles.iconButton}
-          onPress={() => onVoice?.()}
-          activeOpacity={0.6}
-          hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
-        >
-          <MicIcon size={16} color="#666" />
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.iconButton}
           onPress={() => onChat ? onChat() : onPress()}
           activeOpacity={0.6}
           hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
         >
           <KeyboardIcon size={16} color="#666" />
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.iconButton}
+          onPress={() => onVoice?.()}
+          activeOpacity={0.6}
+          hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+        >
+          <MicIcon size={16} color="#666" />
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.openButton}
@@ -438,22 +440,24 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
     </View>
   );
 
+  const CardContainer = useGlass ? GlassView : View;
+
   // Full mode: no gesture wrappers around ScrollView — scrolling is reliable.
   if (isFull) {
     return (
-      <View style={cardStyle}>
+      <CardContainer style={cardStyle}>
         {headerContent}
         {permissionBanner}
 
         <View style={styles.body} onLayout={handleBodyLayout}>{bodyContent}</View>
         {footerContent}
-      </View>
+      </CardContainer>
     );
   }
 
   // Grid mode: header + body tappable (no scrolling), footer separate for message button
   return (
-    <View style={cardStyle}>
+    <CardContainer style={cardStyle}>
       <TouchableOpacity style={styles.cardTappable} onPress={onPress} onLongPress={onLongPress} activeOpacity={0.7} delayLongPress={500}>
         {headerContent}
         {permissionBanner}
@@ -461,7 +465,7 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
         <View style={styles.body}>{bodyContent}</View>
       </TouchableOpacity>
       {footerContent}
-    </View>
+    </CardContainer>
   );
 }
 
@@ -502,6 +506,15 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     borderWidth: 1,
     borderColor: '#1f1f1f',
+    padding: 12,
+    margin: 4,
+    justifyContent: 'space-between',
+    overflow: 'hidden',
+  },
+  cardGlass: {
+    flex: 1,
+    minHeight: 180,
+    borderRadius: 14,
     padding: 12,
     margin: 4,
     justifyContent: 'space-between',

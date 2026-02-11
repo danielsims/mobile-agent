@@ -8,3 +8,4 @@ export { KeyboardScrollView } from './KeyboardScrollView';
 export { MessageBubble } from './MessageBubble';
 export { PermissionPrompt } from './PermissionPrompt';
 export { SettingsScreen } from './SettingsScreen';
+export { ShimmerText } from './ShimmerText';

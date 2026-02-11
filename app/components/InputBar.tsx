@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import Svg, { Path, Line } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
+import { ShimmerText } from './ShimmerText';
 
 // Enable LayoutAnimation on Android
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -26,12 +27,13 @@ interface InputBarProps {
   initialValue?: string;
   onDraftChange?: (text: string) => void;
   autoFocus?: boolean;
+  shimmer?: boolean;
 }
 
 // Throttle activity notifications to avoid excessive pings
 const ACTIVITY_THROTTLE = 5000;
 
-export function InputBar({ onSend, onVoice, disabled, placeholder = 'Ask anything...', onActivity, initialValue = '', onDraftChange, autoFocus }: InputBarProps) {
+export function InputBar({ onSend, onVoice, disabled, placeholder = 'Ask anything...', onActivity, initialValue = '', onDraftChange, autoFocus, shimmer }: InputBarProps) {
   const [text, setText] = useState(initialValue);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const inputRef = useRef<TextInput>(null);
@@ -136,6 +138,11 @@ export function InputBar({ onSend, onVoice, disabled, placeholder = 'Ask anythin
             autoComplete="off"
             keyboardAppearance="dark"
           />
+          {shimmer && !text && (
+            <View style={styles.shimmerOverlay} pointerEvents="none">
+              <ShimmerText text={placeholder} style={styles.shimmerText} />
+            </View>
+          )}
         </View>
 
         {onVoice && (
@@ -212,6 +219,7 @@ const styles = StyleSheet.create({
   },
   inputWrapper: {
     flex: 1,
+    position: 'relative',
   },
   input: {
     paddingHorizontal: 4,
@@ -221,6 +229,20 @@ const styles = StyleSheet.create({
     fontSize: 16,
     maxHeight: 120,
     minHeight: 44,
+  },
+  shimmerOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingHorizontal: 4,
+    paddingTop: 12,
+    backgroundColor: '#0a0a0a',
+  },
+  shimmerText: {
+    fontSize: 16,
+    color: '#999',
   },
   micBtn: {
     width: 36,

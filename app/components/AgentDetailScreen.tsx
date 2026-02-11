@@ -568,6 +568,7 @@ export function AgentDetailScreen({
               onVoice={handleVoiceOpen}
               disabled={isDisabled || permissions.length > 0}
               placeholder={agent.status === 'running' ? 'Agent is working...' : 'Ask anything...'}
+              shimmer={agent.status === 'running'}
               onActivity={onResetPingTimer}
               initialValue={agent.draftText}
               onDraftChange={handleDraftChange}
