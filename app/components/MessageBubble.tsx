@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { View, Text, ScrollView, StyleSheet, Platform, TouchableOpacity } from 'react-native';
-import { MaterialIcons } from '@expo/vector-icons';
 import { StreamdownRN } from 'streamdown-rn';
 import type { AgentMessage, ContentBlock } from '../state/types';
 import { ShimmerText } from './ShimmerText';
@@ -211,12 +210,9 @@ function ContentBlockView({
             ) : (
               <Text style={styles.thinkingLabelStatic}>Thinking</Text>
             )}
-            <MaterialIcons
-              name="expand-more"
-              size={16}
-              color="#6f6f6f"
-              style={[styles.thinkingChevron, expanded && styles.thinkingChevronOpen]}
-            />
+            <View style={[styles.thinkingChevron, expanded && styles.thinkingChevronOpen]}>
+              <View style={styles.thinkingChevronArrow} />
+            </View>
           </TouchableOpacity>
           {expanded && <Text style={styles.thinkingText}>{block.text}</Text>}
         </View>
@@ -490,12 +486,25 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   thinkingChevron: {
+    width: 14,
+    height: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
     marginLeft: 2,
     marginRight: -1,
     marginTop: 1,
   },
   thinkingChevronOpen: {
     transform: [{ rotate: '180deg' }],
+  },
+  thinkingChevronArrow: {
+    width: 6,
+    height: 6,
+    borderRightWidth: 1.5,
+    borderBottomWidth: 1.5,
+    borderColor: '#6f6f6f',
+    transform: [{ rotate: '45deg' }],
+    marginTop: -2,
   },
   thinkingText: {
     color: '#9a9a9a',

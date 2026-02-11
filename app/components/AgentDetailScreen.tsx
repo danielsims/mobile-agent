@@ -37,6 +37,7 @@ const SWIPE_THRESHOLD = SCREEN_WIDTH * 0.25;
 const EDGE_WIDTH = 30; // pixels from left edge to start recognizing swipe
 
 type DetailTab = 'chat' | 'git' | 'artifacts';
+const DETAIL_TABS: DetailTab[] = ['chat', 'git', 'artifacts'];
 
 interface AgentDetailScreenProps {
   agentId: string;
@@ -60,12 +61,6 @@ function formatCost(cost: number): string {
   if (cost === 0) return '$0.00';
   if (cost < 0.01) return '<$0.01';
   return `$${cost.toFixed(2)}`;
-}
-
-function formatTokens(tokens: number): string {
-  if (tokens === 0) return '0';
-  if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}k`;
-  return String(tokens);
 }
 
 function formatModelName(model: string | null, type: AgentType): string {
@@ -222,7 +217,6 @@ export function AgentDetailScreen({
   const tabScrollRef = useRef<ScrollView>(null);
   const INITIAL_MESSAGE_WINDOW = 30;
   const [messageWindow, setMessageWindow] = useState(INITIAL_MESSAGE_WINDOW);
-  const TABS: DetailTab[] = ['chat', 'git', 'artifacts'];
 
   // Swipe-from-left-edge to go back (only on Chat tab)
   const swipeX = useRef(new Animated.Value(0)).current;
@@ -410,21 +404,21 @@ export function AgentDetailScreen({
     if (tab !== activeTab) {
       if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       setActiveTab(tab);
-      const idx = TABS.indexOf(tab);
+      const idx = DETAIL_TABS.indexOf(tab);
       tabScrollRef.current?.scrollTo({ x: idx * SCREEN_WIDTH, animated: true });
     }
-  }, [activeTab, TABS]);
+  }, [activeTab]);
 
   // Sync tab state from horizontal scroll (swipe between tabs)
   const handleTabScroll = useCallback((event: import('react-native').NativeSyntheticEvent<import('react-native').NativeScrollEvent>) => {
     const offsetX = event.nativeEvent.contentOffset.x;
     const page = Math.round(offsetX / SCREEN_WIDTH);
-    const tab = TABS[page];
+    const tab = DETAIL_TABS[page];
     if (tab && tab !== activeTab) {
       if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       setActiveTab(tab);
     }
-  }, [activeTab, TABS]);
+  }, [activeTab]);
 
   // Count artifact URLs for badge
   const artifactCount = useMemo(() => {
@@ -435,18 +429,21 @@ export function AgentDetailScreen({
       if (typeof val === 'string') return val;
       if (val == null || typeof val === 'boolean' || typeof val === 'number') return '';
       if (Array.isArray(val)) return val.map(stringifyVal).join('\n');
-      if (typeof val === 'object') return Object.values(val!).map(stringifyVal).join('\n');
+      if (typeof val === 'object') return Object.values(val as Record<string, unknown>).map(stringifyVal).join('\n');
       return '';
     };
     for (const msg of agent.messages) {
       let text = '';
       if (typeof msg.content === 'string') text = msg.content;
       else if (Array.isArray(msg.content)) {
-        for (const b of msg.content as any[]) {
-          if (b.type === 'text' && 'text' in b) text += b.text + '\n';
-          else if (b.type === 'thinking' && 'text' in b) text += b.text + '\n';
-          else if (b.type === 'tool_use' && 'input' in b) text += stringifyVal(b.input) + '\n';
-          else if (b.type === 'tool_result') text += stringifyVal(b.content) + '\n';
+        for (const block of msg.content) {
+          if (block.type === 'text' || block.type === 'thinking') {
+            text += block.text + '\n';
+          } else if (block.type === 'tool_use') {
+            text += stringifyVal(block.input) + '\n';
+          } else if (block.type === 'tool_result') {
+            text += stringifyVal(block.content) + '\n';
+          }
         }
       }
       const matches = text.match(urlRegex);
@@ -745,7 +742,6 @@ export function AgentDetailScreen({
             {/* Git tab */}
             <View style={styles.tabPage}>
               <GitTabContent
-                agentId={agentId}
                 agentStatus={agent.status}
                 gitStatus={gitStatus}
                 gitDiff={gitDiff}

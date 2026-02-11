@@ -181,6 +181,7 @@ export interface ServerMessage {
 
   // assistantMessage
   content?: ContentBlock[];
+  results?: Array<{ toolUseId: string; content: string | unknown }>;
 
   // permissionRequest
   requestId?: string;
@@ -224,6 +225,7 @@ export interface ServerMessage {
   worktrees?: Worktree[];
 
   // gitStatus
+  branch?: string;
   files?: Array<{ file: string; status: string }>;
   ahead?: number;
   behind?: number;

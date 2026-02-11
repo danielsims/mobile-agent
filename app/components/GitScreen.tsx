@@ -296,6 +296,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
 
   // Slide in from the LEFT
   const swipeX = useRef(new Animated.Value(-SCREEN_WIDTH)).current;
+  const didRequestInitialStatuses = useRef(false);
 
   useEffect(() => {
     Animated.timing(swipeX, {
@@ -307,13 +308,16 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
 
   // Request git status for all agents on mount
   useEffect(() => {
+    if (didRequestInitialStatuses.current) return;
+    didRequestInitialStatuses.current = true;
+
     const agents = Array.from(state.agents.values());
     for (const agent of agents) {
       if (agent.cwd || agent.gitBranch) {
         onRequestGitStatus(agent.id);
       }
     }
-  }, []); // Only on mount
+  }, [onRequestGitStatus, state.agents]);
 
   // Swipe from right edge to dismiss (slide back left)
   // Use capture phase so the ScrollView doesn't steal the touch

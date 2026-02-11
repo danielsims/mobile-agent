@@ -96,11 +96,12 @@ function AppInner() {
     }
 
     if (msg.type === 'modelList' && msg.agentType) {
+      const agentType = msg.agentType;
       setModelsByType(prev => ({
         ...prev,
-        [msg.agentType!]: msg.models || [],
+        [agentType]: msg.models || [],
       }));
-      setModelsLoadingType(prev => (prev === msg.agentType ? null : prev));
+      setModelsLoadingType(prev => (prev === agentType ? null : prev));
     }
 
     // Worktree created — update projects list with new worktrees
@@ -112,23 +113,24 @@ function AppInner() {
 
     // Git status response
     if (msg.type === 'gitStatus' && msg.agentId) {
+      const agentId = msg.agentId;
       const gitData: GitStatusData = {
-        branch: (msg as any).branch || '',
-        ahead: (msg as any).ahead || 0,
-        behind: (msg as any).behind || 0,
-        files: (msg as any).files || [],
+        branch: msg.branch || '',
+        ahead: msg.ahead || 0,
+        behind: msg.behind || 0,
+        files: msg.files || [],
       };
       setGitStatus(gitData);
       setGitLoading(false);
       // Also update the git overview map (for GitScreen)
       setGitDataMap(prev => {
         const next = new Map(prev);
-        next.set(msg.agentId!, gitData);
+        next.set(agentId, gitData);
         return next;
       });
       setGitLoadingAgents(prev => {
         const next = new Set(prev);
-        next.delete(msg.agentId!);
+        next.delete(agentId);
         return next;
       });
     }
@@ -141,14 +143,15 @@ function AppInner() {
 
     // Git log response
     if (msg.type === 'gitLog' && msg.projectPath) {
+      const projectPath = msg.projectPath;
       setGitLogMap(prev => {
         const next = new Map(prev);
-        next.set(msg.projectPath!, msg.commits || []);
+        next.set(projectPath, msg.commits || []);
         return next;
       });
       setGitLogLoading(prev => {
         const next = new Set(prev);
-        next.delete(msg.projectPath!);
+        next.delete(projectPath);
         return next;
       });
     }

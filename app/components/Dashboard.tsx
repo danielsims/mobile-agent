@@ -69,7 +69,7 @@ function BottomPillNav({ currentPage, totalPages, connectionStatus, onOpenSettin
           <>
             <TouchableOpacity onPress={() => {
               if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-              onOpenGit!();
+              if (onOpenGit) onOpenGit();
             }} style={pillStyles.sideSection} activeOpacity={0.7}>
               <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
                 <Path d="M6 3v12M18 9a3 3 0 100-6 3 3 0 000 6zM6 21a3 3 0 100-6 3 3 0 000 6zM18 9a9 9 0 01-9 9"
