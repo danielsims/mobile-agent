@@ -420,13 +420,22 @@ export function AgentDetailScreen({
     if (!agent) return 0;
     const urlRegex = /https?:\/\/[^\s<>)"'\]*_`~]+/g;
     const seen = new Set<string>();
+    const stringifyVal = (val: unknown): string => {
+      if (typeof val === 'string') return val;
+      if (val == null || typeof val === 'boolean' || typeof val === 'number') return '';
+      if (Array.isArray(val)) return val.map(stringifyVal).join('\n');
+      if (typeof val === 'object') return Object.values(val!).map(stringifyVal).join('\n');
+      return '';
+    };
     for (const msg of agent.messages) {
       let text = '';
       if (typeof msg.content === 'string') text = msg.content;
       else if (Array.isArray(msg.content)) {
         for (const b of msg.content as any[]) {
           if (b.type === 'text' && 'text' in b) text += b.text + '\n';
-          else if (b.type === 'tool_result' && typeof b.content === 'string') text += b.content + '\n';
+          else if (b.type === 'thinking' && 'text' in b) text += b.text + '\n';
+          else if (b.type === 'tool_use' && 'input' in b) text += stringifyVal(b.input) + '\n';
+          else if (b.type === 'tool_result') text += stringifyVal(b.content) + '\n';
         }
       }
       const matches = text.match(urlRegex);

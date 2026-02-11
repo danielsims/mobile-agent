@@ -60,11 +60,21 @@ function cleanUrl(raw: string): string | null {
   }
 }
 
+function stringifyValue(val: unknown): string {
+  if (typeof val === 'string') return val;
+  if (val == null || typeof val === 'boolean' || typeof val === 'number') return '';
+  if (Array.isArray(val)) return val.map(stringifyValue).join('\n');
+  if (typeof val === 'object') return Object.values(val).map(stringifyValue).join('\n');
+  return '';
+}
+
 function extractTextFromBlocks(blocks: ContentBlock[]): string {
   const parts: string[] = [];
   for (const b of blocks) {
     if (b.type === 'text' && 'text' in b) parts.push(b.text);
-    else if (b.type === 'tool_result' && typeof b.content === 'string') parts.push(b.content);
+    else if (b.type === 'thinking' && 'text' in b) parts.push(b.text);
+    else if (b.type === 'tool_use' && 'input' in b) parts.push(stringifyValue(b.input));
+    else if (b.type === 'tool_result') parts.push(stringifyValue(b.content));
   }
   return parts.join('\n');
 }
