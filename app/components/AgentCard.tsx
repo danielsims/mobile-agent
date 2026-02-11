@@ -86,23 +86,48 @@ function formatModelName(model: string | null, type: AgentType): string {
   return model;
 }
 
-// Extract displayable text from a message
 function extractMessageText(msg: AgentMessage): string {
-  if (typeof msg.content === 'string') return msg.content;
-  return (msg.content as ContentBlock[])
-    .map(block => {
-      if (block.type === 'text') return block.text;
-      if (block.type === 'tool_use') return `> ${block.name}`;
-      return '';
-    })
-    .filter(Boolean)
-    .join('\n');
+  if (msg.type === 'user') {
+    const text = typeof msg.content === 'string' ? msg.content : '';
+    return text ? '❯ You\n' + text : '';
+  }
+  if (msg.type === 'assistant') {
+    let text = '';
+    if (typeof msg.content === 'string') {
+      text = msg.content;
+    } else if (Array.isArray(msg.content)) {
+      text = (msg.content as ContentBlock[])
+        .filter((b): b is { type: 'text'; text: string } => b.type === 'text' && 'text' in b)
+        .map(b => b.text)
+        .join('\n');
+    }
+    return text ? '❯ Assistant\n' + text : '';
+  }
+  return '';
 }
 
-function getPreviewLines(text: string, maxLines = 4): string {
-  if (!text) return '';
-  const lines = text.split('\n').filter(l => l.trim());
-  return lines.slice(-maxLines).join('\n');
+interface PreviewLine {
+  text: string;
+  isHeader: boolean;
+}
+
+const CARD_MESSAGE_WINDOW = 30;
+
+function buildTerminalPreview(messages: AgentMessage[], maxMessages: number): PreviewLine[] {
+  const startIdx = Math.max(0, messages.length - maxMessages);
+  const lines: PreviewLine[] = [];
+  for (let i = startIdx; i < messages.length; i++) {
+    const text = extractMessageText(messages[i]);
+    if (!text) continue;
+    const msgLines = text.split('\n').filter(l => l.trim());
+    for (let idx = 0; idx < msgLines.length; idx++) {
+      lines.push({
+        text: msgLines[idx],
+        isHeader: idx === 0 && msgLines[idx].startsWith('❯ '),
+      });
+    }
+  }
+  return lines;
 }
 
 // Animated pulsing dot for active statuses
@@ -230,23 +255,18 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
     [agent.model, agent.type],
   );
 
-  // Build terminal content from messages
-  const terminalContent = useMemo(() => {
-    if (isFull && agent.messages.length > 0) {
-      return agent.messages
-        .map(msg => extractMessageText(msg))
-        .filter(Boolean)
-        .join('\n');
-    }
-    return getPreviewLines(agent.lastOutput, 4);
-  }, [isFull, agent.messages, agent.lastOutput]);
+  // Build terminal content preview from the same messages array the detail screen uses.
+  // Single source of truth — last N messages, no content truncation.
+  const terminalLines = useMemo(() => {
+    return buildTerminalPreview(agent.messages, isFull ? CARD_MESSAGE_WINDOW : 4);
+  }, [isFull, agent.messages]);
 
   // Auto-scroll to bottom when content changes
   useEffect(() => {
     if (isFull && scrollRef.current) {
       scrollRef.current.scrollToEnd({ animated: false });
     }
-  }, [isFull, terminalContent]);
+  }, [isFull, terminalLines]);
 
   const useGlass = isLiquidGlassAvailable();
   const cardStyle: ViewStyle[] = [useGlass ? styles.cardGlass : styles.card];
@@ -331,7 +351,18 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
     if (h > 0 && h !== bodyHeight) setBodyHeight(h);
   }, [bodyHeight]);
 
-  const bodyContent = terminalContent ? (
+  const terminalTextElement = terminalLines.length > 0 ? (
+    <Text style={[styles.previewText, isFull && styles.previewTextFull]}>
+      {terminalLines.map((line, i) => (
+        <Text key={i}>
+          {i > 0 ? '\n' : ''}
+          <Text style={line.isHeader ? styles.previewHeader : undefined}>{line.text}</Text>
+        </Text>
+      ))}
+    </Text>
+  ) : null;
+
+  const bodyContent = terminalTextElement ? (
     isFull ? (
       <ScrollView
         ref={scrollRef}
@@ -339,13 +370,16 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
         showsVerticalScrollIndicator={false}
         nestedScrollEnabled
       >
-        <Text style={[styles.previewText, styles.previewTextFull]}>
-          {terminalContent}
-        </Text>
+        {terminalTextElement}
       </ScrollView>
     ) : (
       <Text style={styles.previewText} numberOfLines={4}>
-        {terminalContent}
+        {terminalLines.map((line, i) => (
+          <Text key={i}>
+            {i > 0 ? '\n' : ''}
+            <Text style={line.isHeader ? styles.previewHeader : undefined}>{line.text}</Text>
+          </Text>
+        ))}
       </Text>
     )
   ) : (
@@ -665,6 +699,10 @@ const styles = StyleSheet.create({
   previewTextFull: {
     fontSize: 11,
     lineHeight: 17,
+  },
+  previewHeader: {
+    color: '#e5e5e5',
+    fontWeight: '600',
   },
   emptyText: {
     color: '#3a3a3a',

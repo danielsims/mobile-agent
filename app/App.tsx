@@ -55,14 +55,13 @@ function AppInner() {
   const onWsMessage = useCallback((msg: import('./state/types').ServerMessage) => {
     handleServerMessageRef.current(msg);
 
-    // On initial connect, load cached messages first, then fetch from server only if needed
+    // On initial connect, load from cache then request history from server.
+    // The agentHistory handler skips processing if cache already has data,
+    // so the server request is only processed on cold start.
     if (msg.type === 'connected' && msg.agents) {
       for (const agent of msg.agents) {
-        loadCachedMessagesRef.current(agent.id).then((hadCache) => {
-          if (!hadCache) {
-            sendRef.current('getHistory', { agentId: agent.id });
-          }
-        });
+        loadCachedMessagesRef.current(agent.id);
+        sendRef.current('getHistory', { agentId: agent.id });
       }
       sendRef.current('listProjects');
     }
