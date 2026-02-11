@@ -1,7 +1,11 @@
+export { AgentCard } from './AgentCard';
+export { AgentDetailScreen } from './AgentDetailScreen';
 export { CodeBlock } from './CodeBlock';
+export { CreateAgentModal } from './CreateAgentModal';
+export { Dashboard } from './Dashboard';
 export { InputBar } from './InputBar';
 export { KeyboardScrollView } from './KeyboardScrollView';
 export { MessageBubble } from './MessageBubble';
 export { PermissionPrompt } from './PermissionPrompt';
-export { SessionList } from './SessionList';
-export { Settings } from './Settings';
+export { SettingsScreen } from './SettingsScreen';
+export { ShimmerText } from './ShimmerText';

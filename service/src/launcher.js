@@ -1,592 +1,68 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { WebSocketServer } from 'ws';
-import { v4 as uuidv4 } from 'uuid';
-import { createServer } from 'node:http';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import qrcode from 'qrcode-terminal';
-import pty from '@lydell/node-pty';
+import { Bridge } from './bridge.js';
+import { hasDevices, logAudit, PAIRING_TOKEN_TTL_MS } from './auth.js';
+import { loadProjects, registerProject, unregisterProject, getProjects } from './projects.js';
 
-const PORT = process.env.PORT || 3001;
-const AUTH_TOKEN = uuidv4();
+// --- CLI Subcommands (handled before starting the server) ---
 
-function findClaude() {
-  const paths = [
-    process.env.CLAUDE_PATH,
-    `${process.env.HOME}/.local/bin/claude`,
-    '/usr/local/bin/claude',
-  ].filter(Boolean);
-  for (const p of paths) {
-    if (existsSync(p)) return p;
+const subcommand = process.argv[2];
+
+if (subcommand === 'register') {
+  const targetPath = process.argv[3];
+  if (!targetPath) {
+    console.error('Usage: mobile-agent register <path-to-repo> [name]');
+    process.exit(1);
   }
-  return 'claude';
-}
-
-const CLAUDE_PATH = findClaude();
-console.log(`Claude: ${CLAUDE_PATH}`);
-
-const CLAUDE_PROJECTS_DIR = join(process.env.HOME, '.claude', 'projects');
-
-// Load message history for a specific session
-function loadSessionHistory(targetSessionId) {
-  const messages = [];
-
+  loadProjects();
   try {
-    if (!existsSync(CLAUDE_PROJECTS_DIR)) return messages;
-
-    const projectDirs = readdirSync(CLAUDE_PROJECTS_DIR);
-
-    for (const projectDir of projectDirs) {
-      const projectPath = join(CLAUDE_PROJECTS_DIR, projectDir);
-
-      // Session files are directly in the project directory, not in a sessions subfolder
-      const sessionFile = join(projectPath, `${targetSessionId}.jsonl`);
-
-      if (existsSync(sessionFile)) {
-        console.log(`Found session file: ${sessionFile}`);
-        const content = readFileSync(sessionFile, 'utf-8');
-        const lines = content.split('\n').filter(l => l.trim());
-
-        for (const line of lines) {
-          try {
-            const entry = JSON.parse(line);
-
-            // Parse user messages - content is a string
-            if (entry.type === 'user') {
-              const text = entry.message?.content || '';
-              if (text && typeof text === 'string') {
-                messages.push({ type: 'user', content: text });
-              }
-            }
-
-            // Parse assistant messages - content is an array of blocks
-            if (entry.type === 'assistant') {
-              let text = '';
-              let toolCalls = [];
-
-              if (entry.message?.content && Array.isArray(entry.message.content)) {
-                for (const block of entry.message.content) {
-                  if (block.type === 'text') {
-                    text += block.text || '';
-                  } else if (block.type === 'tool_use') {
-                    toolCalls.push({
-                      name: block.name,
-                      input: block.input,
-                    });
-                  }
-                }
-              }
-
-              if (text) {
-                messages.push({ type: 'assistant', content: text });
-              }
-
-              for (const tool of toolCalls) {
-                messages.push({
-                  type: 'tool',
-                  toolName: tool.name,
-                  toolInput: JSON.stringify(tool.input, null, 2),
-                });
-              }
-            }
-          } catch (e) {
-            // Skip malformed lines
-          }
-        }
-
-        console.log(`Loaded ${messages.length} messages from session`);
-        break; // Found the session file
-      }
-    }
+    const result = registerProject(targetPath, process.argv[4]);
+    console.log(`Registered project: ${result.name} (${result.path}) [${result.id}]`);
   } catch (e) {
-    console.error('Error loading session history:', e.message);
+    console.error(`Failed: ${e.message}`);
+    process.exit(1);
   }
-
-  return messages;
+  process.exit(0);
 }
 
-// Load all sessions from Claude's storage
-function loadSessions() {
-  const sessions = [];
-
-  try {
-    if (!existsSync(CLAUDE_PROJECTS_DIR)) {
-      return sessions;
-    }
-
-    const projectDirs = readdirSync(CLAUDE_PROJECTS_DIR);
-
-    for (const projectDir of projectDirs) {
-      const indexPath = join(CLAUDE_PROJECTS_DIR, projectDir, 'sessions-index.json');
-
-      if (existsSync(indexPath)) {
-        try {
-          const indexData = JSON.parse(readFileSync(indexPath, 'utf-8'));
-
-          for (const entry of indexData.entries || []) {
-            sessions.push({
-              id: entry.sessionId,
-              name: entry.firstPrompt?.slice(0, 60) || 'Untitled',
-              projectPath: entry.projectPath,
-              messageCount: entry.messageCount,
-              modified: entry.modified,
-              created: entry.created,
-            });
-          }
-        } catch (e) {
-          // Skip invalid index files
-        }
-      }
-    }
-
-    // Sort by modified date, newest first
-    sessions.sort((a, b) => new Date(b.modified) - new Date(a.modified));
-
-  } catch (e) {
-    console.error('Error loading sessions:', e.message);
+if (subcommand === 'unregister') {
+  const projectId = process.argv[3];
+  if (!projectId) {
+    console.error('Usage: mobile-agent unregister <project-id>');
+    process.exit(1);
   }
-
-  return sessions;
+  loadProjects();
+  const removed = unregisterProject(projectId);
+  console.log(removed ? 'Project unregistered.' : 'Project not found.');
+  process.exit(0);
 }
 
-// State
-const clients = new Set();
-let outputBuffer = [];
-let sessionId = null;
-let sessionName = 'New Chat';
-let lastContent = '';
-let isProcessing = false;
-// Permission mode controls UI display only - CLI always skips permissions
-// 'auto' = silent, 'confirm' = show tool notifications
-
-// Permission mode: 'auto' (skip all) or 'confirm' (ask user)
-let permissionMode = process.env.PERMISSION_MODE || 'confirm';
-
-// Track pending permission details
-let pendingPermission = null;  // { toolName, toolInput, description }
-let lastPermissionToolId = null;  // Prevent duplicate broadcasts for same tool
-
-function broadcast(type, data = {}) {
-  const msg = JSON.stringify({ type, ...data, ts: Date.now() });
-  clients.forEach(c => {
-    if (c.readyState === 1) c.send(msg);
-  });
-}
-
-function terminalOutput(text) {
-  process.stdout.write(text);
-}
-
-function mobileOutput(text) {
-  outputBuffer.push(text);
-  broadcast('output', { data: text });
-}
-
-function output(text) {
-  terminalOutput(text);
-  mobileOutput(text);
-}
-
-// Store the last tool use for permission handling
-let lastToolUse = null;
-let lastBroadcastToolId = null; // Prevent duplicate tool broadcasts
-let claudeProc = null; // Reference to Claude process for stdin
-
-function handleClaudeMessage(msg) {
-  switch (msg.type) {
-    case 'system':
-      if (msg.session_id) {
-        sessionId = msg.session_id;
-        terminalOutput(`[Session: ${sessionId.slice(0, 8)}...]\n`);
-        broadcast('session', { sessionId, name: sessionName });
-      }
-      break;
-
-    case 'assistant':
-      if (msg.message?.content) {
-        for (const block of msg.message.content) {
-          if (block.type === 'text' && block.text) {
-            const delta = block.text.slice(lastContent.length);
-            lastContent = block.text;
-            if (delta) output(delta);
-          } else if (block.type === 'tool_use') {
-            lastContent = '';
-            // Store tool use for potential permission handling
-            lastToolUse = {
-              id: block.id,
-              name: block.name,
-              input: block.input,
-            };
-
-            // Only broadcast if this is a new tool (not a retry of the same one)
-            const isDuplicateTool = block.id === lastBroadcastToolId;
-            if (!isDuplicateTool) {
-              lastBroadcastToolId = block.id;
-              terminalOutput(`\n[Tool: ${block.name}]\n`);
-              broadcast('tool', {
-                id: block.id,
-                name: block.name,
-                input: block.input ? JSON.stringify(block.input, null, 2) : null,
-              });
-              if (block.input) {
-                const inputStr = JSON.stringify(block.input, null, 2);
-                terminalOutput(inputStr.slice(0, 500) + '\n');
-              }
-            }
-          }
-        }
-      }
-      break;
-
-    case 'user':
-      lastContent = '';
-      if (msg.message?.content) {
-        for (const block of msg.message.content) {
-          if (block.type === 'tool_result') {
-            const content = typeof block.content === 'string' ? block.content : '';
-
-            // Check for various permission-related messages
-            const needsPermission = content.includes('requested permission') ||
-                                    content.includes("haven't granted") ||
-                                    content.includes('User did not grant permission') ||
-                                    content.includes('permission to run') ||
-                                    content.includes('requires permission') ||
-                                    content.includes('needs permission') ||
-                                    content.includes('approve this');
-
-            // Debug logging
-            if (content) {
-              console.log(`[Tool Result] mode=${permissionMode}, needsPermission=${needsPermission}, content preview: ${content.slice(0, 100)}`);
-            }
-
-            // Use tool_use_id to prevent duplicate broadcasts for the same tool
-            const toolId = block.tool_use_id || lastToolUse?.id;
-            const isDuplicate = toolId && toolId === lastPermissionToolId;
-
-            // In confirm mode, show permission-related messages (informational only)
-            if (permissionMode === 'confirm' && needsPermission && !isDuplicate) {
-              // Permission needed - store details for retry
-              lastPermissionToolId = toolId;
-              pendingPermission = {
-                toolName: lastToolUse?.name || 'Unknown',
-                toolInput: lastToolUse?.input || {},
-                description: content,
-              };
-              broadcast('permission', {
-                id: toolId,
-                toolName: pendingPermission.toolName,
-                description: content,
-              });
-              terminalOutput(`\n[Permission Required for ${pendingPermission.toolName}]\n`);
-            } else if (!needsPermission) {
-              const truncated = content.length > 500 ? content.slice(0, 500) + '...' : content;
-              broadcast('toolResult', { content: truncated });
-            }
-          }
-        }
-      }
-      break;
-
-    case 'result':
-      lastContent = '';
-      if (msg.session_id) sessionId = msg.session_id;
-      break;
-  }
-}
-
-function runClaude(prompt, options = {}) {
-  return new Promise((resolve) => {
-    const args = ['-p', '--verbose', '--output-format', 'stream-json'];
-
-    // Only skip permissions in auto mode - in confirm mode we use PTY for real prompts
-    if (permissionMode === 'auto') {
-      args.push('--dangerously-skip-permissions');
-    }
-
-    if (sessionId) {
-      args.push('--resume', sessionId);
-    }
-
-    args.push(prompt);
-
-    console.log('Running Claude:', args.join(' ').slice(0, 200) + (args.join(' ').length > 200 ? '...' : ''));
-
-    // Use PTY for proper terminal emulation (needed for permission prompts)
-    const proc = pty.spawn(CLAUDE_PATH, args, {
-      name: 'xterm-256color',
-      cols: 120,
-      rows: 30,
-      cwd: process.env.HOME,
-      env: process.env,
-    });
-
-    claudeProc = proc;
-    let dataBuffer = '';
-
-    proc.onData((data) => {
-      dataBuffer += data;
-
-      // Process complete lines
-      const lines = dataBuffer.split('\n');
-      dataBuffer = lines.pop() || ''; // Keep incomplete line in buffer
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-
-        // Remove ANSI escape codes for processing
-        const cleanLine = trimmed.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r/g, '');
-
-        // Try to parse as JSON (stream-json output)
-        try {
-          const msg = JSON.parse(cleanLine);
-          handleClaudeMessage(msg);
-        } catch (e) {
-          // Not JSON - check for permission prompts
-          if (cleanLine.length > 0) {
-            console.log('[Claude TTY]:', cleanLine.slice(0, 100));
-          }
-
-          // Detect permission prompts
-          if (cleanLine.includes('Allow') || cleanLine.includes('permission') ||
-              cleanLine.includes('(y/n)') || cleanLine.includes('[Y/n]') ||
-              cleanLine.includes('yes/no') || cleanLine.includes('Do you want')) {
-            console.log('[Permission prompt detected]');
-
-            const toolName = lastToolUse?.name || 'Unknown';
-            pendingPermission = {
-              toolName: toolName,
-              toolInput: lastToolUse?.input || {},
-              description: cleanLine,
-            };
-            broadcast('permission', {
-              id: lastToolUse?.id || Date.now().toString(),
-              toolName: toolName,
-              description: cleanLine,
-            });
-            terminalOutput(`\n[Permission Required: ${toolName}]\n`);
-          }
-        }
-      }
-    });
-
-    proc.onExit(({ exitCode }) => {
-      console.log('Claude exited:', exitCode);
-      isProcessing = false;
-      claudeProc = null;
-      output('\n');
-      broadcast('done', { code: exitCode });
-      resolve(exitCode);
-    });
-  });
-}
-
-async function sendUserMessage(text, options = {}) {
-  const { skipPermissions = false, isPermissionRetry = false } = options;
-
-  if (isProcessing) {
-    console.log('Already processing, ignoring message');
-    return;
-  }
-
-  isProcessing = true;
-
-  // Reset permission state for new messages (not retries)
-  if (!isPermissionRetry) {
-    pendingPermission = null;
-    lastPermissionToolId = null;
-    lastToolUse = null;
-    lastBroadcastToolId = null;
-  }
-
-  terminalOutput(`\n> ${text}\n\n`);
-
-  if (!isPermissionRetry) {
-    broadcast('userMessage', { content: text });
-  }
-
-  if (!sessionName || sessionName === 'New Chat') {
-    sessionName = text.slice(0, 50) + (text.length > 50 ? '...' : '');
-  }
-
-  await runClaude(text, { skipPermissions });
-}
-
-async function handlePermissionResponse(action) {
-  if (action === 'yes' || action === 'always') {
-    if (claudeProc) {
-      console.log('Sending permission approval to Claude');
-      claudeProc.write('y\n');
-      pendingPermission = null;
-      // Don't broadcast done - Claude is still running
-    } else {
-      console.log('No Claude process to approve');
-      pendingPermission = null;
-      broadcast('done', { code: 0 });
-    }
+if (subcommand === 'projects') {
+  loadProjects();
+  const all = getProjects();
+  const entries = Object.entries(all);
+  if (entries.length === 0) {
+    console.log('No registered projects.');
   } else {
-    if (claudeProc) {
-      console.log('Sending permission denial to Claude');
-      claudeProc.write('n\n');
+    console.log('Registered projects:');
+    for (const [id, p] of entries) {
+      console.log(`  ${id}  ${p.name}  ${p.path}`);
     }
-    output('[Permission denied]\n');
-    pendingPermission = null;
-    lastPermissionToolId = null;
-    broadcast('done', { code: 0 });
   }
+  process.exit(0);
 }
 
-// HTTP server
-const httpServer = createServer((req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  if (req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', sessionId }));
-  } else {
-    res.writeHead(404);
-    res.end();
-  }
-});
+// --- Server ---
 
-// WebSocket server
-const wss = new WebSocketServer({ server: httpServer });
+const PORT = parseInt(process.env.PORT, 10) || 3001;
 
-wss.on('connection', (ws, req) => {
-  const url = new URL(req.url, `http://localhost:${PORT}`);
-  const token = url.searchParams.get('token');
-
-  if (token !== AUTH_TOKEN) {
-    ws.close(4001, 'Invalid token');
-    return;
-  }
-
-  console.log('Client connected');
-  clients.add(ws);
-
-  ws.send(JSON.stringify({
-    type: 'connected',
-    sessionId,
-    sessionName,
-    permissionMode,
-    ts: Date.now()
-  }));
-
-  // If there's an existing session, send the history
-  if (sessionId) {
-    const history = loadSessionHistory(sessionId);
-    if (history.length > 0) {
-      console.log(`Sending ${history.length} history messages to reconnected client`);
-      ws.send(JSON.stringify({
-        type: 'history',
-        messages: history,
-        ts: Date.now()
-      }));
-    }
-  }
-
-  ws.on('message', async (raw) => {
-    try {
-      const msg = JSON.parse(raw.toString());
-
-      switch (msg.type) {
-        case 'input':
-          if (msg.text) {
-            await sendUserMessage(msg.text);
-          }
-          break;
-
-        case 'permission':
-          console.log(`Permission response: ${msg.action}`);
-          await handlePermissionResponse(msg.action);
-          break;
-
-        case 'ping':
-          ws.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
-          break;
-
-        case 'reset':
-          sessionId = null;
-          sessionName = 'New Chat';
-          outputBuffer = [];
-          lastContent = '';
-          pendingPermission = null;
-          lastPermissionToolId = null;
-          lastToolUse = null;
-          lastBroadcastToolId = null;
-          claudeProc = null;
-          broadcast('reset', {});
-          terminalOutput('[Session reset]\n');
-          break;
-
-        case 'setPermissionMode':
-          if (msg.mode === 'auto' || msg.mode === 'confirm') {
-            permissionMode = msg.mode;
-            broadcast('permissionMode', { mode: permissionMode });
-            terminalOutput(`[Permission mode: ${permissionMode}]\n`);
-          }
-          break;
-
-        case 'getPermissionMode':
-          ws.send(JSON.stringify({ type: 'permissionMode', mode: permissionMode, ts: Date.now() }));
-          break;
-
-        case 'getSessions':
-          console.log('Loading sessions...');
-          const sessions = loadSessions();
-          console.log(`Found ${sessions.length} sessions`);
-          ws.send(JSON.stringify({ type: 'sessions', sessions, ts: Date.now() }));
-          break;
-
-        case 'resumeSession':
-          if (msg.sessionId) {
-            console.log(`Resuming session: ${msg.sessionId}`);
-            sessionId = msg.sessionId;
-            sessionName = msg.name || 'Resumed Chat';
-            outputBuffer = [];
-            lastContent = '';
-            pendingPermission = null;
-            lastPermissionToolId = null;
-            lastToolUse = null;
-            lastBroadcastToolId = null;
-
-            // Load and send message history
-            const history = loadSessionHistory(msg.sessionId);
-            console.log(`Loaded ${history.length} messages from history`);
-
-            broadcast('session', { sessionId, name: sessionName });
-
-            // Send history to the requesting client
-            if (history.length > 0) {
-              ws.send(JSON.stringify({
-                type: 'history',
-                messages: history,
-                ts: Date.now()
-              }));
-            }
-
-            terminalOutput(`[Resumed session: ${sessionId.slice(0, 8)}...]\n`);
-          }
-          break;
-      }
-    } catch (e) {
-      console.error('Parse error:', e.message);
-    }
-  });
-
-  ws.on('close', () => {
-    console.log('Client disconnected');
-    clients.delete(ws);
-  });
-});
-
-// Tunnel
 async function startTunnel() {
   return new Promise((resolve, reject) => {
-    console.log('Starting tunnel...');
-    const tunnel = spawn('cloudflared', ['tunnel', '--url', `http://localhost:${PORT}`], {
-      stdio: ['ignore', 'pipe', 'pipe']
+    console.log('Starting Cloudflare tunnel...');
+    const tunnel = spawn('cloudflared', ['tunnel', '--url', `http://127.0.0.1:${PORT}`], {
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
 
     let found = false;
@@ -601,45 +77,103 @@ async function startTunnel() {
     tunnel.stdout.on('data', handler);
     tunnel.stderr.on('data', handler);
     tunnel.on('error', (e) => reject(e));
-    setTimeout(() => { if (!found) reject(new Error('Tunnel timeout')); }, 30000);
+    setTimeout(() => { if (!found) reject(new Error('Tunnel timeout (30s)')); }, 30000);
   });
 }
 
-function showQR(url) {
-  const data = JSON.stringify({ url, token: AUTH_TOKEN });
+function showPairingQR(pairingInfo) {
+  const data = JSON.stringify(pairingInfo);
+  const ttlMin = Math.round(PAIRING_TOKEN_TTL_MS / 60_000);
   console.log('');
-  console.log('═'.repeat(60));
-  console.log('  Claude Mobile - Ready');
-  console.log('═'.repeat(60));
+  console.log('\u2550'.repeat(60));
+  console.log('  Mobile Agent - Pairing Mode');
+  console.log('\u2550'.repeat(60));
   console.log('');
   qrcode.generate(data, { small: true }, (code) => {
     console.log(code.split('\n').map(l => '  ' + l).join('\n'));
   });
   console.log('');
-  console.log(`  URL:   ${url}`);
-  console.log(`  Token: ${AUTH_TOKEN}`);
+  console.log(`  Tunnel: ${pairingInfo.url}`);
+  console.log(`  Token:  ${pairingInfo.pairingToken.slice(0, 8)}... (expires in ${ttlMin} min)`);
   console.log('');
-  console.log('═'.repeat(60));
+  console.log('  Scan this QR code with the Mobile Agent app to pair.');
+  console.log('  Press [q] to refresh the QR code.');
+  console.log('');
+  console.log('\u2550'.repeat(60));
   console.log('');
 }
 
 async function main() {
-  httpServer.listen(PORT, async () => {
-    console.log(`Server on port ${PORT}`);
-    try {
-      const url = await startTunnel();
-      showQR(url);
-    } catch (e) {
-      console.error('Tunnel failed:', e.message);
-    }
-  });
+  const bridge = new Bridge(PORT);
+  await bridge.start();
+
+  let tunnelUrl = null;
+  try {
+    tunnelUrl = await startTunnel();
+    logAudit('server_started', { port: PORT, tunnel: tunnelUrl });
+  } catch (e) {
+    console.error('Tunnel failed:', e.message);
+    console.log('Server is running on localhost only (no remote access).');
+    logAudit('tunnel_failed', { error: e.message });
+    tunnelUrl = `ws://127.0.0.1:${PORT}`;
+  }
+
+  let refreshTimer = null;
+
+  function refreshQR() {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    const pairingInfo = bridge.getPairingInfo(tunnelUrl);
+    showPairingQR(pairingInfo);
+    // Auto-refresh 30s before the token expires so there's always a valid QR
+    refreshTimer = setTimeout(refreshQR, PAIRING_TOKEN_TTL_MS - 30_000);
+  }
+
+  // Auto-refresh QR after any pairing attempt (token is consumed/expired)
+  bridge.onPairingAttempt = () => {
+    refreshQR();
+  };
+
+  refreshQR();
+
+  if (hasDevices()) {
+    console.log('  Previously paired devices detected.');
+    console.log('  They will need to re-pair if the tunnel URL changed.');
+    console.log('');
+  }
+
+  // Press 'q' to show a fresh QR code (new pairing token)
+  console.log('  Press [q] to generate a fresh QR code.');
+  console.log('');
+
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.on('data', (key) => {
+      // Ctrl-C
+      if (key[0] === 3) {
+        shutdown();
+        return;
+      }
+      // 'q' or 'Q' — regenerate QR with fresh pairing token
+      if (key[0] === 113 || key[0] === 81) {
+        refreshQR();
+      }
+    });
+  }
+
+  // Graceful shutdown
+  const shutdown = () => {
+    console.log('\nShutting down...');
+    logAudit('server_shutdown', {});
+    bridge.shutdown();
+    process.exit(0);
+  };
+
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
 
-process.on('SIGINT', () => {
-  console.log('\nBye!');
-  wss.close();
-  httpServer.close();
-  process.exit(0);
+main().catch((e) => {
+  console.error('Fatal:', e);
+  process.exit(1);
 });
-
-main();

@@ -20,19 +20,29 @@ interface KeyboardScrollViewProps {
   contentContainerStyle?: ViewStyle;
 }
 
+const NEAR_BOTTOM_THRESHOLD = 120;
+
 export function KeyboardScrollView({
   children,
   style,
   contentContainerStyle,
 }: KeyboardScrollViewProps) {
   const scrollRef = useRef<ScrollView>(null);
-  const isUserScrolling = useRef(false);
+  const isNearBottom = useRef(true);
+  const layoutHeight = useRef(0);
+  const contentHeightRef = useRef(0);
+  const scrollOffset = useRef(0);
 
   const scrollToEnd = useCallback(() => {
-    // Small delay to ensure content has rendered
     setTimeout(() => {
       scrollRef.current?.scrollToEnd({ animated: true });
     }, 100);
+  }, []);
+
+  // Update near-bottom tracking on every scroll
+  const updateNearBottom = useCallback(() => {
+    const distFromBottom = contentHeightRef.current - layoutHeight.current - scrollOffset.current;
+    isNearBottom.current = distFromBottom < NEAR_BOTTOM_THRESHOLD;
   }, []);
 
   // Keyboard listeners - auto scroll when keyboard opens
@@ -41,10 +51,8 @@ export function KeyboardScrollView({
     const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
 
     const showListener = Keyboard.addListener(showEvent, () => {
-      // Animate layout change
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-
-      if (!isUserScrolling.current) {
+      if (isNearBottom.current) {
         scrollToEnd();
       }
     });
@@ -59,30 +67,33 @@ export function KeyboardScrollView({
     };
   }, [scrollToEnd]);
 
-  // Auto-scroll when content changes (unless user is scrolling)
+  // Only auto-scroll when near the bottom (new messages, not card expand mid-scroll)
   const handleContentSizeChange = useCallback(
-    (_w: number, _h: number) => {
-      if (!isUserScrolling.current) {
+    (_w: number, h: number) => {
+      contentHeightRef.current = h;
+      if (isNearBottom.current) {
         scrollToEnd();
       }
     },
     [scrollToEnd]
   );
 
-  const handleScrollBeginDrag = useCallback(() => {
-    isUserScrolling.current = true;
-  }, []);
+  const handleScroll = useCallback(
+    (e: { nativeEvent: { contentOffset: { y: number }; contentSize: { height: number }; layoutMeasurement: { height: number } } }) => {
+      scrollOffset.current = e.nativeEvent.contentOffset.y;
+      layoutHeight.current = e.nativeEvent.layoutMeasurement.height;
+      contentHeightRef.current = e.nativeEvent.contentSize.height;
+      updateNearBottom();
+    },
+    [updateNearBottom],
+  );
 
-  const handleScrollEndDrag = useCallback(() => {
-    // Reset after a short delay
-    setTimeout(() => {
-      isUserScrolling.current = false;
-    }, 500);
-  }, []);
-
-  const handleMomentumScrollEnd = useCallback(() => {
-    isUserScrolling.current = false;
-  }, []);
+  const handleLayout = useCallback(
+    (e: { nativeEvent: { layout: { height: number } } }) => {
+      layoutHeight.current = e.nativeEvent.layout.height;
+    },
+    [],
+  );
 
   return (
     <ScrollView
@@ -90,9 +101,8 @@ export function KeyboardScrollView({
       style={[styles.scrollView, style]}
       contentContainerStyle={[styles.contentContainer, contentContainerStyle]}
       onContentSizeChange={handleContentSizeChange}
-      onScrollBeginDrag={handleScrollBeginDrag}
-      onScrollEndDrag={handleScrollEndDrag}
-      onMomentumScrollEnd={handleMomentumScrollEnd}
+      onScroll={handleScroll}
+      onLayout={handleLayout}
       keyboardShouldPersistTaps="handled"
       keyboardDismissMode="interactive"
       scrollEventThrottle={16}

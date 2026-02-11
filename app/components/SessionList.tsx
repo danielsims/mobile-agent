@@ -7,7 +7,15 @@ import {
   StyleSheet,
   ActivityIndicator,
 } from 'react-native';
-import { Session } from '../types';
+// Legacy component — not used in the multi-agent UI.
+// Kept for reference but will be removed in cleanup.
+interface Session {
+  id: string;
+  name?: string;
+  messageCount?: number;
+  modified?: string;
+  projectPath?: string;
+}
 
 interface SessionListProps {
   sessions: Session[];

@@ -9,8 +9,9 @@ import {
   LayoutAnimation,
   UIManager,
 } from 'react-native';
-import { BlurView } from 'expo-blur';
+import Svg, { Path, Line } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
+import { ShimmerText } from './ShimmerText';
 
 // Enable LayoutAnimation on Android
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -19,19 +20,20 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
 
 interface InputBarProps {
   onSend: (text: string) => void;
+  onVoice?: () => void;
   disabled?: boolean;
   placeholder?: string;
   onActivity?: () => void;
   initialValue?: string;
   onDraftChange?: (text: string) => void;
+  autoFocus?: boolean;
+  shimmer?: boolean;
 }
-
-const KEYBOARD_OVERLAP = 40;
 
 // Throttle activity notifications to avoid excessive pings
 const ACTIVITY_THROTTLE = 5000;
 
-export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', onActivity, initialValue = '', onDraftChange }: InputBarProps) {
+export function InputBar({ onSend, onVoice, disabled, placeholder = 'Ask anything...', onActivity, initialValue = '', onDraftChange, autoFocus, shimmer }: InputBarProps) {
   const [text, setText] = useState(initialValue);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const inputRef = useRef<TextInput>(null);
@@ -43,6 +45,16 @@ export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', on
       setText(initialValue);
     }
   }, [initialValue]);
+
+  // Auto-focus the input when requested (e.g., inline chat on dashboard)
+  useEffect(() => {
+    if (autoFocus) {
+      // Short delay to let the layout settle before focusing
+      const timer = setTimeout(() => inputRef.current?.focus(), 100);
+      return () => clearTimeout(timer);
+    }
+    return undefined;
+  }, [autoFocus]);
 
   useEffect(() => {
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
@@ -106,14 +118,7 @@ export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', on
   const canSend = text.trim().length > 0 && !disabled;
 
   return (
-    <BlurView
-      intensity={80}
-      tint="dark"
-      style={[
-        styles.blurContainer,
-        keyboardVisible && styles.blurContainerKeyboard,
-      ]}
-    >
+    <View style={styles.container}>
       <View style={styles.content}>
         <View style={styles.inputWrapper}>
           <TextInput
@@ -128,10 +133,27 @@ export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', on
             multiline
             editable={!disabled}
             autoCapitalize="sentences"
-            autoCorrect
+            autoCorrect={false}
+            spellCheck={false}
+            autoComplete="off"
             keyboardAppearance="dark"
           />
+          {shimmer && !text && (
+            <View style={styles.shimmerOverlay} pointerEvents="none">
+              <ShimmerText text={placeholder} style={styles.shimmerText} />
+            </View>
+          )}
         </View>
+
+        {onVoice && (
+          <TouchableOpacity
+            style={styles.micBtn}
+            onPress={onVoice}
+            activeOpacity={0.7}
+          >
+            <MicIcon size={20} color="#888" />
+          </TouchableOpacity>
+        )}
 
         <TouchableOpacity
           style={[styles.sendBtn, canSend && styles.sendBtnActive]}
@@ -145,9 +167,27 @@ export function InputBar({ onSend, disabled, placeholder = 'Ask anything...', on
         </TouchableOpacity>
       </View>
 
-      {keyboardVisible && <View style={styles.keyboardFill} />}
       {!keyboardVisible && Platform.OS === 'ios' && <View style={styles.safeAreaFill} />}
-    </BlurView>
+    </View>
+  );
+}
+
+function MicIcon({ size = 20, color = '#888' }: { size?: number; color?: string }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M12 2a3.5 3.5 0 00-3.5 3.5v5a3.5 3.5 0 007 0v-5A3.5 3.5 0 0012 2z"
+        fill={color}
+      />
+      <Path
+        d="M19 10v1a7 7 0 01-14 0v-1"
+        stroke={color}
+        strokeWidth={1.8}
+        strokeLinecap="round"
+      />
+      <Line x1={12} y1={18} x2={12} y2={22} stroke={color} strokeWidth={1.8} strokeLinecap="round" />
+      <Line x1={9} y1={22} x2={15} y2={22} stroke={color} strokeWidth={1.8} strokeLinecap="round" />
+    </Svg>
   );
 }
 
@@ -161,13 +201,10 @@ function ArrowUpIcon({ color }: { color: string }) {
 }
 
 const styles = StyleSheet.create({
-  blurContainer: {
+  container: {
+    backgroundColor: '#0a0a0a',
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: 'rgba(255,255,255,0.1)',
-  },
-  blurContainerKeyboard: {
-    marginBottom: -KEYBOARD_OVERLAP,
-    paddingBottom: 10,
   },
   content: {
     flexDirection: 'row',
@@ -177,28 +214,43 @@ const styles = StyleSheet.create({
     paddingBottom: 6,
     gap: 10,
   },
-  keyboardFill: {
-    height: KEYBOARD_OVERLAP,
-    backgroundColor: 'transparent',
-  },
   safeAreaFill: {
     height: 34,
   },
   inputWrapper: {
     flex: 1,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderRadius: 22,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.12)',
+    position: 'relative',
   },
   input: {
-    paddingHorizontal: 18,
+    paddingHorizontal: 4,
     paddingVertical: 12,
     paddingTop: 12,
     color: '#fafafa',
     fontSize: 16,
     maxHeight: 120,
     minHeight: 44,
+  },
+  shimmerOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingHorizontal: 4,
+    paddingTop: 12,
+    backgroundColor: '#0a0a0a',
+  },
+  shimmerText: {
+    fontSize: 16,
+    color: '#999',
+  },
+  micBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
   },
   sendBtn: {
     width: 36,
@@ -207,6 +259,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.15)',
     alignItems: 'center',
     justifyContent: 'center',
+    marginBottom: 4,
   },
   sendBtnActive: {
     backgroundColor: '#fff',

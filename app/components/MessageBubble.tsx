@@ -1,153 +1,258 @@
-import React from 'react';
-import { View, Text, StyleSheet, Platform, Linking } from 'react-native';
-import { Message } from '../types';
-import { CodeBlock } from './CodeBlock';
+import React, { useState } from 'react';
+import { View, Text, ScrollView, StyleSheet, Platform, TouchableOpacity } from 'react-native';
+import { StreamdownRN } from 'streamdown-rn';
+import type { AgentMessage, ContentBlock } from '../state/types';
 
 interface MessageBubbleProps {
-  message: Message;
+  message: AgentMessage;
+  toolResultMap?: Map<string, string>;
 }
 
-// URL regex pattern
-const urlRegex = /(https?:\/\/[^\s<>"\])}]+)/g;
+// Extract markdown string from content blocks
+function blocksToMarkdown(blocks: ContentBlock[]): string {
+  return blocks
+    .filter(b => b.type === 'text')
+    .map(b => b.text)
+    .join('\n\n');
+}
 
-// Parse text for URLs and make them clickable
-function parseTextWithLinks(text: string, baseKey: number): React.ReactNode[] {
-  const parts: React.ReactNode[] = [];
-  let lastIndex = 0;
-  let match;
-  let key = baseKey;
+// Format tool name: "Read" → "Read", "Bash" → "Bash", "mcp__ide__getDiagnostics" → "getDiagnostics"
+function formatToolName(name: string): string {
+  if (name.includes('__')) {
+    const parts = name.split('__');
+    return parts[parts.length - 1];
+  }
+  return name;
+}
 
-  // Reset regex
-  urlRegex.lastIndex = 0;
+// Minimal tool icon — two horizontal bars (terminal/code style)
+function ToolIcon({ size = 11, color = '#666' }: { size?: number; color?: string }) {
+  const barH = Math.max(1.5, size * 0.15);
+  return (
+    <View style={{ width: size, height: size, justifyContent: 'center', gap: size * 0.22 }}>
+      <View style={{ width: size * 0.55, height: barH, backgroundColor: color, borderRadius: barH / 2 }} />
+      <View style={{ width: size * 0.85, height: barH, backgroundColor: color, borderRadius: barH / 2 }} />
+    </View>
+  );
+}
 
-  while ((match = urlRegex.exec(text)) !== null) {
-    // Text before URL
-    if (match.index > lastIndex) {
-      parts.push(
-        <Text key={key++} style={styles.text}>
-          {text.slice(lastIndex, match.index)}
-        </Text>
-      );
+// Extract a short description from tool input for the card header.
+// Checks common field names across tools (Bash, Read, Write, Grep, Glob, Task, etc.)
+function extractToolDescription(input: Record<string, unknown>): string | null {
+  const candidates = ['description', 'file_path', 'command', 'pattern', 'query', 'url', 'prompt', 'subject'];
+  for (const key of candidates) {
+    const val = input[key];
+    if (typeof val === 'string' && val.length > 0) {
+      // Trim to a reasonable header length
+      return val.length > 80 ? val.slice(0, 80) + '...' : val;
     }
-
-    // URL - make it clickable
-    const url = match[1];
-    parts.push(
-      <Text
-        key={key++}
-        style={styles.link}
-        onPress={() => Linking.openURL(url)}
-      >
-        {url}
-      </Text>
-    );
-
-    lastIndex = match.index + match[0].length;
   }
-
-  // Remaining text
-  if (lastIndex < text.length) {
-    parts.push(
-      <Text key={key++} style={styles.text}>
-        {text.slice(lastIndex)}
-      </Text>
-    );
-  }
-
-  return parts;
+  return null;
 }
 
-// Parse content for code blocks and links
-function parseContent(content: string): React.ReactNode[] {
-  const codeBlockRegex = /```(\w+)?\n([\s\S]*?)```/g;
-  const parts: React.ReactNode[] = [];
-  let lastIndex = 0;
-  let match;
-  let key = 0;
+// Diff view for Edit tool — shows old_string/new_string as red/green lines
+function DiffView({ filePath, oldStr, newStr }: { filePath?: string; oldStr: string; newStr: string }) {
+  const oldLines = oldStr.split('\n');
+  const newLines = newStr.split('\n');
 
-  while ((match = codeBlockRegex.exec(content)) !== null) {
-    // Text before code block (with link parsing)
-    if (match.index > lastIndex) {
-      const text = content.slice(lastIndex, match.index).trim();
-      if (text) {
-        const textParts = parseTextWithLinks(text, key);
-        parts.push(
-          <Text key={key++} style={styles.text}>
-            {textParts}
-          </Text>
-        );
-        key += textParts.length;
+  return (
+    <View>
+      {filePath && (
+        <Text style={styles.diffHeader} numberOfLines={1}>{filePath}</Text>
+      )}
+      {oldLines.map((line, i) => (
+        <View key={`r${i}`} style={styles.diffLineRemoved}>
+          <Text style={styles.diffPrefixRemoved}>-</Text>
+          <Text style={styles.diffTextRemoved}>{line}</Text>
+        </View>
+      ))}
+      {newLines.map((line, i) => (
+        <View key={`a${i}`} style={styles.diffLineAdded}>
+          <Text style={styles.diffPrefixAdded}>+</Text>
+          <Text style={styles.diffTextAdded}>{line}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+// Check if a tool_use block is an Edit with old_string/new_string
+function isEditWithDiff(name: string, input: Record<string, unknown>): boolean {
+  return name === 'Edit' && typeof input.old_string === 'string' && typeof input.new_string === 'string';
+}
+
+// Collapsible tool invocation card
+function ToolUseCard({ block, result }: { block: ContentBlock & { type: 'tool_use' }; result?: string | null }) {
+  const [expanded, setExpanded] = useState(false);
+  const fallbackName = formatToolName(block.name);
+  const title = extractToolDescription(block.input) || fallbackName;
+
+  return (
+    <View style={styles.toolCard}>
+      <TouchableOpacity
+        style={styles.toolHeader}
+        onPress={() => setExpanded(!expanded)}
+        activeOpacity={0.7}
+      >
+        <View style={styles.toolHeaderLeft}>
+          <ToolIcon size={11} color="#666" />
+          <Text style={styles.toolName} numberOfLines={1}>{title}</Text>
+          <View style={styles.toolBadge}>
+            <View style={styles.toolBadgeDot} />
+            <Text style={styles.toolBadgeText}>Completed</Text>
+          </View>
+        </View>
+        <View style={[styles.toolChevronBox, expanded && styles.toolChevronBoxOpen]}>
+          <View style={styles.toolChevronArrow} />
+        </View>
+      </TouchableOpacity>
+
+      {expanded && (
+        <View style={styles.toolBody}>
+          {isEditWithDiff(block.name, block.input) ? (
+            <>
+              <Text style={styles.toolSectionLabel}>DIFF</Text>
+              <ScrollView style={styles.toolCodeScroll} nestedScrollEnabled>
+                <View style={styles.toolCodeBlock}>
+                  <DiffView
+                    filePath={typeof block.input.file_path === 'string' ? block.input.file_path : undefined}
+                    oldStr={block.input.old_string as string}
+                    newStr={block.input.new_string as string}
+                  />
+                </View>
+              </ScrollView>
+            </>
+          ) : (
+            <>
+              <Text style={styles.toolSectionLabel}>INPUT</Text>
+              <ScrollView style={styles.toolCodeScroll} nestedScrollEnabled>
+                <View style={styles.toolCodeBlock}>
+                  <Text style={styles.toolCodeText}>
+                    {JSON.stringify(block.input, null, 2)}
+                  </Text>
+                </View>
+              </ScrollView>
+            </>
+          )}
+          {result != null && (
+            <>
+              <Text style={[styles.toolSectionLabel, { marginTop: 10 }]}>OUTPUT</Text>
+              <ScrollView style={styles.toolCodeScroll} nestedScrollEnabled>
+                <View style={styles.toolCodeBlock}>
+                  <Text style={styles.toolCodeText}>
+                    {result}
+                  </Text>
+                </View>
+              </ScrollView>
+            </>
+          )}
+        </View>
+      )}
+    </View>
+  );
+}
+
+// Build a map from tool_use id → tool_result content string across all messages
+export function buildToolResultMap(messages: AgentMessage[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const msg of messages) {
+    if (typeof msg.content === 'string') continue;
+    for (const b of msg.content) {
+      if (b.type === 'tool_result') {
+        const content = typeof b.content === 'string' ? b.content : JSON.stringify(b.content);
+        map.set(b.toolUseId, content);
       }
     }
-
-    // Code block
-    parts.push(
-      <CodeBlock key={key++} language={match[1]} code={match[2].trim()} />
-    );
-
-    lastIndex = match.index + match[0].length;
   }
-
-  // Remaining text (with link parsing)
-  if (lastIndex < content.length) {
-    const text = content.slice(lastIndex).trim();
-    if (text) {
-      const textParts = parseTextWithLinks(text, key);
-      parts.push(
-        <Text key={key++} style={styles.text}>
-          {textParts}
-        </Text>
-      );
-    }
-  }
-
-  if (parts.length === 0) {
-    const textParts = parseTextWithLinks(content, 0);
-    return [<Text key={0} style={styles.text}>{textParts}</Text>];
-  }
-
-  return parts;
+  return map;
 }
 
-export function MessageBubble({ message }: MessageBubbleProps) {
+// Render a single ContentBlock (tool_result handled inline with tool_use)
+function ContentBlockView({ block, resultMap }: { block: ContentBlock; resultMap?: Map<string, string> }) {
+  const [expanded, setExpanded] = useState(false);
+
+  switch (block.type) {
+    case 'text':
+      return null; // Text blocks are rendered together via StreamdownRN
+
+    case 'tool_use': {
+      const result = resultMap?.get(block.id) ?? null;
+      return <ToolUseCard block={block as ContentBlock & { type: 'tool_use' }} result={result} />;
+    }
+
+    case 'tool_result':
+      return null; // Rendered inline within the matching ToolUseCard
+
+    case 'thinking':
+      return (
+        <TouchableOpacity
+          style={styles.thinkingContainer}
+          onPress={() => setExpanded(!expanded)}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.thinkingLabel}>
+            Thinking {expanded ? '\u25B4' : '\u25BE'}
+          </Text>
+          {expanded && <Text style={styles.thinkingText}>{block.text}</Text>}
+        </TouchableOpacity>
+      );
+
+    default:
+      return null;
+  }
+}
+
+export function MessageBubble({ message, toolResultMap }: MessageBubbleProps) {
   const isUser = message.type === 'user';
   const isSystem = message.type === 'system';
-  const isTool = message.type === 'tool';
 
   if (isSystem) {
     return (
       <View style={styles.systemContainer}>
-        <Text style={styles.systemText}>{message.content}</Text>
+        <Text style={styles.systemText}>
+          {typeof message.content === 'string' ? message.content : ''}
+        </Text>
       </View>
     );
   }
 
-  if (isTool) {
+  // Content can be string (streaming) or ContentBlock[] (structured)
+  const renderContent = () => {
+    if (typeof message.content === 'string') {
+      if (isUser) {
+        return <Text style={styles.userText}>{message.content}</Text>;
+      }
+      // Assistant streaming text — render as markdown
+      return (
+        <View style={styles.bubble}>
+          <StreamdownRN theme="dark">{message.content}</StreamdownRN>
+        </View>
+      );
+    }
+
+    // ContentBlock array — render text blocks as unified markdown,
+    // non-text blocks (tool_use, thinking) as custom components
+    const textMarkdown = blocksToMarkdown(message.content);
+    const nonTextBlocks = message.content.filter(b => b.type !== 'text' && b.type !== 'tool_result');
+
     return (
-      <View style={styles.toolContainer}>
-        <Text style={styles.toolName}>{message.toolName || 'Tool'}</Text>
-        {message.toolInput && (
-          <CodeBlock code={message.toolInput} language="json" />
+      <View style={styles.bubble}>
+        {textMarkdown.length > 0 && (
+          <StreamdownRN theme="dark">{textMarkdown}</StreamdownRN>
         )}
-        {message.content && (
-          <Text style={styles.toolResult}>{message.content}</Text>
-        )}
+        {nonTextBlocks.map((block, i) => (
+          <ContentBlockView key={i} block={block} resultMap={toolResultMap} />
+        ))}
       </View>
     );
-  }
+  };
 
   return (
     <View style={styles.messageContainer}>
       <Text style={[styles.sender, isUser && styles.senderUser]}>
-        {isUser ? 'You' : 'Claude'}
+        {isUser ? 'You' : 'Assistant'}
       </Text>
-      {isUser ? (
-        <Text style={styles.userText}>{message.content}</Text>
-      ) : (
-        <View style={styles.bubble}>
-          {parseContent(message.content)}
-        </View>
-      )}
+      {renderContent()}
     </View>
   );
 }
@@ -165,24 +270,11 @@ const styles = StyleSheet.create({
   senderUser: {
     color: '#888',
   },
-  bubble: {
-    // No background, just the content
-  },
+  bubble: {},
   userText: {
     color: '#e5e5e5',
     fontSize: 15,
     lineHeight: 22,
-  },
-  text: {
-    color: '#e5e5e5',
-    fontSize: 15,
-    lineHeight: 22,
-  },
-  link: {
-    color: '#60a5fa',
-    fontSize: 15,
-    lineHeight: 22,
-    textDecorationLine: 'underline',
   },
   systemContainer: {
     alignItems: 'center',
@@ -193,20 +285,166 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontStyle: 'italic',
   },
-  toolContainer: {
-    marginBottom: 16,
+
+  // --- Tool use card ---
+  toolCard: {
+    borderWidth: 1,
+    borderColor: '#252525',
+    borderRadius: 8,
+    marginVertical: 6,
+    overflow: 'hidden',
+  },
+  toolHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+  toolHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
   },
   toolName: {
+    color: '#ccc',
+    fontSize: 13,
+    fontWeight: '500',
+    flexShrink: 1,
+  },
+  toolBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(34,197,94,0.1)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    gap: 5,
+  },
+  toolBadgeDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+    backgroundColor: '#22c55e',
+  },
+  toolBadgeText: {
+    color: '#22c55e',
+    fontSize: 10,
+    fontWeight: '500',
+  },
+  toolChevronBox: {
+    width: 20,
+    height: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  toolChevronBoxOpen: {
+    transform: [{ rotate: '180deg' }],
+  },
+  toolChevronArrow: {
+    width: 7,
+    height: 7,
+    borderRightWidth: 1.5,
+    borderBottomWidth: 1.5,
+    borderColor: '#555',
+    transform: [{ rotate: '45deg' }],
+    marginTop: -3,
+  },
+  toolBody: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#252525',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  toolSectionLabel: {
+    color: '#555',
+    fontSize: 10,
+    fontWeight: '600',
+    letterSpacing: 1,
+    marginBottom: 8,
+  },
+  toolCodeScroll: {
+    maxHeight: 500,
+  },
+  toolCodeBlock: {
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    borderRadius: 6,
+    padding: 10,
+  },
+  toolCodeText: {
     color: '#888',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 16,
+  },
+
+  // --- Diff view ---
+  diffHeader: {
+    color: '#666',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginBottom: 8,
+  },
+  diffLineRemoved: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(239,68,68,0.08)',
+    paddingVertical: 1,
+    paddingHorizontal: 4,
+  },
+  diffLineAdded: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(34,197,94,0.08)',
+    paddingVertical: 1,
+    paddingHorizontal: 4,
+  },
+  diffPrefixRemoved: {
+    color: '#ef4444',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 16,
+    width: 14,
+  },
+  diffPrefixAdded: {
+    color: '#22c55e',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 16,
+    width: 14,
+  },
+  diffTextRemoved: {
+    color: '#ef4444',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 16,
+    flex: 1,
+  },
+  diffTextAdded: {
+    color: '#22c55e',
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 16,
+    flex: 1,
+  },
+
+  // --- Thinking ---
+  thinkingContainer: {
+    backgroundColor: 'rgba(139,92,246,0.06)',
+    borderRadius: 6,
+    padding: 10,
+    marginVertical: 4,
+    borderLeftWidth: 2,
+    borderLeftColor: '#8b5cf6',
+  },
+  thinkingLabel: {
+    color: '#8b5cf6',
     fontSize: 12,
     fontWeight: '500',
-    marginBottom: 8,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
-  toolResult: {
-    color: '#666',
+  thinkingText: {
+    color: '#a78bfa',
     fontSize: 13,
-    marginTop: 8,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 20,
+    marginTop: 6,
   },
 });

@@ -1,193 +1,386 @@
 import { useRef, useCallback, useState } from 'react';
-import { ConnectionStatus, ServerMessage } from '../types';
+import type { ConnectionStatus, ServerMessage } from '../types';
+import { buildAuthMessage, buildPairMessage, getWebSocketUrl, type QRPairingData } from '../utils/auth';
 
 // Ping interval to keep connection alive (45 seconds - below typical 60s timeout)
-const PING_INTERVAL = 45000;
+const PING_INTERVAL = 45_000;
 
 // Auto-reconnect settings
-const RECONNECT_DELAY = 2000; // Initial delay before reconnecting
-const MAX_RECONNECT_DELAY = 30000; // Max delay between reconnect attempts
+const RECONNECT_DELAY = 2_000;
+const MAX_RECONNECT_DELAY = 30_000;
 const MAX_RECONNECT_ATTEMPTS = 10;
+
+// Timeout for pairing/auth to complete before giving up
+const AUTH_TIMEOUT_MS = 15_000;
+
+export type AuthStatus = 'none' | 'authenticating' | 'authenticated' | 'failed';
 
 interface UseWebSocketOptions {
   onMessage: (msg: ServerMessage) => void;
   onConnect: () => void;
-  onDisconnect: (code: number) => void;
+  onDisconnect: (code: number, willReconnect: boolean) => void;
+  onAuthError?: (error: string) => void;
 }
 
-export function useWebSocket({ onMessage, onConnect, onDisconnect }: UseWebSocketOptions) {
+export function useWebSocket({ onMessage, onConnect, onDisconnect, onAuthError }: UseWebSocketOptions) {
   const ws = useRef<WebSocket | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>('disconnected');
+  const [authStatus, setAuthStatus] = useState<AuthStatus>('none');
 
-  // Store credentials for auto-reconnect
-  const credentialsRef = useRef<{ url: string; token: string } | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectAttemptsRef = useRef(0);
-  const autoReconnectEnabledRef = useRef(true); // Disable after explicit disconnect
+  const autoReconnectRef = useRef(true);
+  const isAuthenticatedRef = useRef(false);
+  // Generation counter — incremented on each connect/pair call.
+  // If a connect() resumes after an async gap and finds its generation is stale,
+  // it means pair() (or another connect) started in the meantime, so it aborts.
+  const generationRef = useRef(0);
 
-  // Send a ping to keep the connection alive
   const sendPing = useCallback(() => {
-    if (ws.current?.readyState === WebSocket.OPEN) {
+    if (ws.current?.readyState === WebSocket.OPEN && isAuthenticatedRef.current) {
       ws.current.send(JSON.stringify({ type: 'ping' }));
     }
   }, []);
 
-  // Reset the ping timer (call this when user is active/typing)
   const resetPingTimer = useCallback(() => {
     if (pingIntervalRef.current) {
       clearInterval(pingIntervalRef.current);
     }
-    if (ws.current?.readyState === WebSocket.OPEN) {
-      // Send an immediate ping when user is active
+    if (ws.current?.readyState === WebSocket.OPEN && isAuthenticatedRef.current) {
       sendPing();
-      // Then continue regular interval
       pingIntervalRef.current = setInterval(sendPing, PING_INTERVAL);
     }
   }, [sendPing]);
 
-  const connect = useCallback((serverUrl: string, authToken: string, isReconnect = false) => {
-    if (!serverUrl || !authToken) return;
-
-    // Store credentials for reconnection
-    credentialsRef.current = { url: serverUrl, token: authToken };
-    autoReconnectEnabledRef.current = true; // Enable auto-reconnect on manual connect
-
-    // Reset reconnect attempts on fresh connect
-    if (!isReconnect) {
-      reconnectAttemptsRef.current = 0;
-    }
-
-    // Clear any pending reconnect
+  const cleanupTimers = useCallback(() => {
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
     }
-
-    // Clear any existing ping interval
     if (pingIntervalRef.current) {
       clearInterval(pingIntervalRef.current);
       pingIntervalRef.current = null;
     }
+  }, []);
 
+  /**
+   * Connect using stored credentials (Ed25519 signed challenge).
+   * This is the normal auth flow after initial pairing.
+   */
+  const connect = useCallback(async (isReconnect = false) => {
+    const myGen = ++generationRef.current;
+
+    const wsUrl = await getWebSocketUrl();
+    // After the async gap, check if a newer connect/pair call started
+    if (myGen !== generationRef.current) return;
+    if (!wsUrl) return;
+
+    // Only auto-reconnect on reconnects (mid-session drops), not initial connects
+    autoReconnectRef.current = isReconnect;
+    if (!isReconnect) {
+      reconnectAttemptsRef.current = 0;
+    }
+
+    // Close any existing connection before opening a new one
+    if (ws.current) {
+      const oldWs = ws.current;
+      ws.current = null;
+      oldWs.onclose = null;
+      oldWs.onmessage = null;
+      oldWs.onerror = null;
+      try { oldWs.close(); } catch {}
+    }
+
+    cleanupTimers();
     setStatus('connecting');
-
-    let wsUrl = serverUrl.trim()
-      .replace(/^https:\/\//, 'wss://')
-      .replace(/^http:\/\//, 'ws://');
-    if (!wsUrl.startsWith('ws')) wsUrl = `wss://${wsUrl}`;
-    wsUrl = `${wsUrl}?token=${encodeURIComponent(authToken.trim())}`;
+    isAuthenticatedRef.current = false;
+    setAuthStatus('none');
 
     try {
+      // Connect to /ws/mobile — no auth in URL
       ws.current = new WebSocket(wsUrl);
 
-      ws.current.onopen = () => {
-        setStatus('connected');
-        // Reset reconnect attempts on successful connection
-        reconnectAttemptsRef.current = 0;
-        // Start ping interval to keep connection alive
-        pingIntervalRef.current = setInterval(sendPing, PING_INTERVAL);
-        onConnect();
+      // Timeout — if auth doesn't complete, don't hang silently
+      const connectTimeout = setTimeout(() => {
+        if (!isAuthenticatedRef.current && ws.current) {
+          console.warn('[useWebSocket] Auth timed out after', AUTH_TIMEOUT_MS, 'ms');
+          ws.current.close();
+        }
+      }, AUTH_TIMEOUT_MS);
+
+      ws.current.onopen = async () => {
+        // WebSocket is open — now authenticate with signed challenge
+        setAuthStatus('authenticating');
+
+        const authMsg = await buildAuthMessage();
+        if (!authMsg || ws.current?.readyState !== WebSocket.OPEN) {
+          clearTimeout(connectTimeout);
+          setAuthStatus('failed');
+          ws.current?.close();
+          return;
+        }
+
+        ws.current.send(JSON.stringify(authMsg));
       };
 
       ws.current.onmessage = (event) => {
+        let msg: ServerMessage;
         try {
-          const msg = JSON.parse(event.data) as ServerMessage;
-          onMessage(msg);
+          msg = JSON.parse(event.data);
         } catch {
-          // Invalid JSON, ignore
+          return;
+        }
+
+        // Handle auth errors before we're authenticated
+        if (!isAuthenticatedRef.current) {
+          if (msg.type === 'authError') {
+            clearTimeout(connectTimeout);
+            setAuthStatus('failed');
+            autoReconnectRef.current = false; // Don't retry bad auth
+            onAuthError?.(msg.error || 'Authentication failed');
+            ws.current?.close();
+            return;
+          }
+
+          // First successful message means we're authenticated
+          // The server sends 'connected' with agent snapshots after auth succeeds
+          if (msg.type === 'connected') {
+            clearTimeout(connectTimeout);
+            isAuthenticatedRef.current = true;
+            autoReconnectRef.current = true; // Enable reconnect for mid-session drops
+            setAuthStatus('authenticated');
+            setStatus('connected');
+            reconnectAttemptsRef.current = 0;
+            // Send an immediate ping to keep tunnel alive, then start interval
+            sendPing();
+            pingIntervalRef.current = setInterval(sendPing, PING_INTERVAL);
+            onConnect();
+          }
+        }
+
+        // Forward all messages (including the initial 'connected') to the handler
+        if (isAuthenticatedRef.current) {
+          onMessage(msg);
         }
       };
 
       ws.current.onerror = () => {
-        // Don't call onDisconnect here - onclose will be called
+        // onclose will fire after this
       };
 
       ws.current.onclose = (event) => {
+        clearTimeout(connectTimeout);
         ws.current = null;
-        // Clear ping interval
+        isAuthenticatedRef.current = false;
+
         if (pingIntervalRef.current) {
           clearInterval(pingIntervalRef.current);
           pingIntervalRef.current = null;
         }
 
-        // Don't auto-reconnect on auth failure or explicit disconnect
-        const shouldAutoReconnect =
-          autoReconnectEnabledRef.current &&
-          event.code !== 4001 && // Auth failure
+        // Don't auto-reconnect on auth failure, explicit disconnect, or superseded connection
+        const shouldReconnect =
+          autoReconnectRef.current &&
           event.code !== 1000 && // Normal closure
-          credentialsRef.current &&
+          event.code !== 4001 && // Auth failure
+          event.code !== 4008 && // Auth timeout
+          event.code !== 4010 && // Superseded by new connection
           reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS;
 
-        if (shouldAutoReconnect) {
-          setStatus('connecting'); // Show as reconnecting
+        if (shouldReconnect) {
+          setStatus('connecting');
           const delay = Math.min(
             RECONNECT_DELAY * Math.pow(1.5, reconnectAttemptsRef.current),
-            MAX_RECONNECT_DELAY
+            MAX_RECONNECT_DELAY,
           );
-          // Auto-reconnecting with exponential backoff
           reconnectAttemptsRef.current++;
           reconnectTimeoutRef.current = setTimeout(() => {
-            if (credentialsRef.current) {
-              connect(credentialsRef.current.url, credentialsRef.current.token, true);
-            }
+            connect(true);
           }, delay);
         } else {
           setStatus('disconnected');
+          setAuthStatus('none');
         }
 
-        onDisconnect(event.code);
+        onDisconnect(event.code, shouldReconnect);
       };
     } catch {
       setStatus('disconnected');
+      setAuthStatus('none');
     }
-  }, [onMessage, onConnect, onDisconnect, sendPing]);
+  }, [onMessage, onConnect, onDisconnect, onAuthError, sendPing, cleanupTimers]);
 
-  // Attempt to reconnect using stored credentials
+  /**
+   * Pair with the server using QR code data, then authenticate.
+   * Used for initial device registration.
+   */
+  const pair = useCallback(async (qrData: QRPairingData) => {
+    const myGen = ++generationRef.current;
+    autoReconnectRef.current = false; // Don't reconnect during pairing
+
+    // Close any existing connection before opening a new one
+    // This prevents orphaned WebSocket connections on re-pair
+    if (ws.current) {
+      const oldWs = ws.current;
+      ws.current = null;
+      oldWs.onclose = null; // Prevent old close handler from firing
+      oldWs.onmessage = null;
+      oldWs.onerror = null;
+      try { oldWs.close(); } catch {}
+    }
+
+    cleanupTimers();
+    setStatus('connecting');
+    isAuthenticatedRef.current = false;
+    setAuthStatus('authenticating');
+
+    // Build the pairing message (also stores server info and generates keypair)
+    const pairMsg = await buildPairMessage(qrData);
+    // After the async gap, check if a newer connect/pair call started
+    if (myGen !== generationRef.current) return;
+
+    // Connect to the server's mobile endpoint
+    const base = qrData.url.replace(/\/+$/, '');
+    const wsUrl = base.startsWith('https://') ? base.replace('https://', 'wss://') :
+                  base.startsWith('http://') ? base.replace('http://', 'ws://') :
+                  base;
+    const fullUrl = `${wsUrl}/ws/mobile`;
+
+    try {
+      ws.current = new WebSocket(fullUrl);
+
+      // Timeout — if pairing doesn't complete, surface an error
+      const pairTimeout = setTimeout(() => {
+        if (!isAuthenticatedRef.current && ws.current) {
+          console.warn('[useWebSocket] Pairing timed out after', AUTH_TIMEOUT_MS, 'ms');
+          onAuthError?.('Pairing timed out. Make sure the server is running and the QR code is fresh.');
+          ws.current.close();
+        }
+      }, AUTH_TIMEOUT_MS);
+
+      ws.current.onopen = () => {
+        if (ws.current?.readyState === WebSocket.OPEN) {
+          ws.current.send(JSON.stringify(pairMsg));
+        }
+      };
+
+      ws.current.onmessage = (event) => {
+        let msg: ServerMessage;
+        try {
+          msg = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+
+        if (!isAuthenticatedRef.current) {
+          if (msg.type === 'authError') {
+            clearTimeout(pairTimeout);
+            setAuthStatus('failed');
+            setStatus('disconnected');
+            onAuthError?.(msg.error || 'Pairing failed');
+            ws.current?.close();
+            return;
+          }
+
+          if (msg.type === 'connected') {
+            clearTimeout(pairTimeout);
+            isAuthenticatedRef.current = true;
+            setAuthStatus('authenticated');
+            setStatus('connected');
+            autoReconnectRef.current = true;
+            // Send an immediate ping to keep tunnel alive, then start interval
+            sendPing();
+            pingIntervalRef.current = setInterval(sendPing, PING_INTERVAL);
+            onConnect();
+          }
+        }
+
+        if (isAuthenticatedRef.current) {
+          onMessage(msg);
+        }
+      };
+
+      ws.current.onerror = () => {};
+
+      ws.current.onclose = (event) => {
+        clearTimeout(pairTimeout);
+        const wasPaired = isAuthenticatedRef.current;
+        ws.current = null;
+        isAuthenticatedRef.current = false;
+
+        if (pingIntervalRef.current) {
+          clearInterval(pingIntervalRef.current);
+          pingIntervalRef.current = null;
+        }
+
+        // If we were successfully paired and connection dropped,
+        // use the normal connect() flow to auto-reconnect with signed challenge.
+        const willReconnect = wasPaired && autoReconnectRef.current && event.code !== 1000;
+        if (willReconnect) {
+          setStatus('connecting');
+          reconnectAttemptsRef.current = 0;
+          reconnectTimeoutRef.current = setTimeout(() => {
+            connect();
+          }, RECONNECT_DELAY);
+        } else if (!wasPaired) {
+          setStatus('disconnected');
+          setAuthStatus('failed');
+        } else {
+          setStatus('disconnected');
+          setAuthStatus('none');
+        }
+
+        onDisconnect(event.code, willReconnect);
+      };
+    } catch {
+      setStatus('disconnected');
+      setAuthStatus('failed');
+    }
+  }, [onMessage, onConnect, onDisconnect, onAuthError, sendPing, cleanupTimers, connect]);
+
+  /**
+   * Send a message to the server. Only works if authenticated.
+   */
+  const send = useCallback((type: string, data?: Record<string, unknown>) => {
+    if (ws.current?.readyState === WebSocket.OPEN && isAuthenticatedRef.current) {
+      ws.current.send(JSON.stringify({ ...data, type }));
+      return true;
+    }
+    return false;
+  }, []);
+
+  /**
+   * Disconnect and clean up.
+   */
+  const disconnect = useCallback(() => {
+    autoReconnectRef.current = false;
+    isAuthenticatedRef.current = false;
+    cleanupTimers();
+    ws.current?.close();
+    setStatus('disconnected');
+    setAuthStatus('none');
+  }, [cleanupTimers]);
+
+  /**
+   * Attempt reconnection using stored credentials.
+   */
   const reconnect = useCallback(() => {
-    if (credentialsRef.current && status === 'disconnected') {
-      connect(credentialsRef.current.url, credentialsRef.current.token);
+    if (status === 'disconnected') {
+      connect();
       return true;
     }
     return false;
   }, [connect, status]);
 
-  const send = useCallback((type: string, data?: Record<string, unknown>) => {
-    if (ws.current?.readyState === WebSocket.OPEN) {
-      ws.current.send(JSON.stringify({ type, ...data }));
-      return true;
-    }
-    return false;
-  }, []);
-
-  // Send with auto-reconnect - attempts to reconnect if disconnected
-  const sendWithReconnect = useCallback((type: string, data?: Record<string, unknown>): boolean => {
-    if (ws.current?.readyState === WebSocket.OPEN) {
-      ws.current.send(JSON.stringify({ type, ...data }));
-      return true;
-    }
-
-    // Try to reconnect
-    if (credentialsRef.current && status === 'disconnected') {
-      reconnect();
-    }
-    return false;
-  }, [status, reconnect]);
-
-  const disconnect = useCallback(() => {
-    autoReconnectEnabledRef.current = false; // Disable auto-reconnect
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-    if (pingIntervalRef.current) {
-      clearInterval(pingIntervalRef.current);
-      pingIntervalRef.current = null;
-    }
-    credentialsRef.current = null; // Clear credentials to prevent auto-reconnect
-    ws.current?.close();
-    setStatus('disconnected');
-  }, []);
-
-  return { status, connect, send, sendWithReconnect, disconnect, reconnect, resetPingTimer };
+  return {
+    status,
+    authStatus,
+    connect,
+    pair,
+    send,
+    disconnect,
+    reconnect,
+    resetPingTimer,
+  };
 }

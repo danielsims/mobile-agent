@@ -1,437 +1,264 @@
 import { StatusBar } from 'expo-status-bar';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as Linking from 'expo-linking';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   StyleSheet,
   Text,
   View,
   TouchableOpacity,
   SafeAreaView,
-  KeyboardAvoidingView,
-  Platform,
+  ActivityIndicator,
+  Alert,
 } from 'react-native';
 
-import { Message, PermissionRequest, Session, PermissionMode } from './types';
-import {
-  Settings,
-  InputBar,
-  KeyboardScrollView,
-  MessageBubble,
-  PermissionPrompt,
-  SessionList,
-} from './components';
+import { AgentProvider, useAgentState } from './state/AgentContext';
+import { SettingsProvider } from './state/SettingsContext';
+import { Dashboard, AgentDetailScreen, CreateAgentModal, SettingsScreen } from './components';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useNotifications } from './hooks/useNotifications';
 import { useCompletionChime } from './hooks/useCompletionChime';
+import { parseQRCode, clearCredentials, isPaired, type QRPairingData } from './utils/auth';
+import type { Project, AgentType } from './state/types';
 
-type Screen = 'settings' | 'scanner' | 'chat' | 'sessions';
+type Screen = 'pairing' | 'scanner' | 'dashboard' | 'agent' | 'settings';
 
-export default function App() {
-  // Connection state
-  const [serverUrl, setServerUrl] = useState('');
-  const [authToken, setAuthToken] = useState('');
-  const [screen, setScreen] = useState<Screen>('settings');
+// Inner app component that has access to AgentContext
+function AppInner() {
+  const [screen, setScreen] = useState<Screen>('pairing');
   const [scanned, setScanned] = useState(false);
+  const scannedRef = useRef(false); // Synchronous guard — state is async
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [permission, requestPermission] = useCameraPermissions();
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(false);
 
-  // Chat state
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [sessionName, setSessionName] = useState('New Chat');
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [loadingSessions, setLoadingSessions] = useState(false);
-  const [permissionMode, setPermissionMode] = useState<PermissionMode>('confirm');
-  const [draftText, setDraftText] = useState('');
-
-  const pendingConnectRef = useRef<{ url: string; token: string } | null>(null);
-  const messageIdRef = useRef(0);
-  const permissionSentRef = useRef(false);  // Prevent double-sending permission responses
-  const draftSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Throttle streaming updates to prevent UI freeze
-  const pendingContentRef = useRef('');
-  const flushTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastAssistantMessageRef = useRef('');
-
-  // Message handling
-  const addMessage = useCallback((type: Message['type'], content: string, extra?: Partial<Message>) => {
-    const msg: Message = {
-      id: String(messageIdRef.current++),
-      type,
-      content,
-      timestamp: Date.now(),
-      ...extra,
-    };
-    setMessages(prev => [...prev, msg]);
-  }, []);
-
-  // Flush pending content to messages (throttled)
-  const flushPendingContent = useCallback(() => {
-    if (pendingContentRef.current) {
-      const content = pendingContentRef.current;
-      pendingContentRef.current = '';
-      setMessages(prev => {
-        const last = prev[prev.length - 1];
-        if (last && last.type === 'assistant') {
-          const newContent = last.content + content;
-          lastAssistantMessageRef.current = newContent;
-          return [...prev.slice(0, -1), { ...last, content: newContent }];
-        }
-        lastAssistantMessageRef.current = content;
-        return [...prev, {
-          id: String(messageIdRef.current++),
-          type: 'assistant' as const,
-          content,
-          timestamp: Date.now(),
-        }];
-      });
-    }
-  }, []);
-
-  const appendToLastAssistant = useCallback((content: string) => {
-    // Batch content and flush every 50ms to prevent UI freeze
-    pendingContentRef.current += content;
-    if (!flushTimeoutRef.current) {
-      flushTimeoutRef.current = setTimeout(() => {
-        flushTimeoutRef.current = null;
-        flushPendingContent();
-      }, 50);
-    }
-  }, [flushPendingContent]);
-
-  // Notifications
+  const { state, dispatch, handleServerMessage } = useAgentState();
   const { notifyTaskComplete } = useNotifications();
-
-  // Completion chime
   const { play: playChime } = useCompletionChime();
 
-  // Get the last assistant message content for notifications
-  const getLastAssistantMessage = useCallback(() => {
-    // Use the ref which is updated synchronously during message flush
-    const content = lastAssistantMessageRef.current.trim();
-    if (content) {
-      const firstLine = content.split('\n')[0];
-      return firstLine.length > 100 ? firstLine.slice(0, 97) + '...' : firstLine;
-    }
-    return ''; // Return empty if no message - caller decides what to do
+  // Whether we have stored pairing credentials (checked on mount, updated on pair/unpair)
+  const [hasCreds, setHasCreds] = useState(false);
+  useEffect(() => {
+    isPaired().then(setHasCreds);
   }, []);
 
-  // WebSocket
-  const { status, connect, send, reconnect, resetPingTimer } = useWebSocket({
-    onMessage: (msg) => {
-      switch (msg.type) {
-        case 'connected':
-          if (msg.sessionId) {
-            setSessionId(msg.sessionId);
-            // Clear messages - history will be sent separately with proper types
-            setMessages([]);
-          }
-          if (msg.sessionName) setSessionName(msg.sessionName);
-          if (msg.permissionMode) setPermissionMode(msg.permissionMode);
-          break;
+  // Stable refs for WebSocket callbacks — avoids stale closures
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const handleServerMessageRef = useRef(handleServerMessage);
+  handleServerMessageRef.current = handleServerMessage;
+  const sendRef = useRef<(type: string, data?: Record<string, unknown>) => boolean>(() => false);
 
-        case 'session':
-          if (msg.sessionId) setSessionId(msg.sessionId);
-          if (msg.name) setSessionName(msg.name);
-          break;
+  const onWsMessage = useCallback((msg: import('./state/types').ServerMessage) => {
+    handleServerMessageRef.current(msg);
 
-        case 'history':
-          // Load message history with proper types
-          if (msg.messages && Array.isArray(msg.messages)) {
-            const historyMessages = msg.messages;
-            const loadedMessages: Message[] = historyMessages.map((m: { type: string; content?: string; toolName?: string; toolInput?: string }, i: number) => ({
-              id: `history-${i}`,
-              type: m.type as Message['type'],
-              content: m.content || '',
-              toolName: m.toolName,
-              toolInput: m.toolInput,
-              timestamp: Date.now() - (historyMessages.length - i) * 1000,
-            }));
-            setMessages(loadedMessages);
-          }
-          break;
-
-        case 'userMessage':
-          if (msg.content) {
-            addMessage('user', msg.content);
-          }
-          break;
-
-        case 'output':
-          if (msg.data) {
-            appendToLastAssistant(msg.data);
-          }
-          break;
-
-        case 'buffer':
-          if (msg.data) {
-            appendToLastAssistant(msg.data);
-          }
-          break;
-
-        case 'tool':
-          addMessage('tool', '', {
-            toolName: msg.name,
-            toolInput: msg.input,
-          });
-          break;
-
-        case 'toolResult':
-          if (msg.content) {
-            const toolResultContent = msg.content;
-            setMessages(prev => {
-              const last = prev[prev.length - 1];
-              if (last && last.type === 'tool') {
-                return [...prev.slice(0, -1), { ...last, content: toolResultContent }];
-              }
-              return prev;
-            });
-          }
-          break;
-
-        case 'permission':
-          // Only show if it's a new permission (different ID)
-          const newPermId = msg.id || '';
-          setPendingPermission(prev => {
-            if (prev && prev.id === newPermId) {
-              // Same permission, ignore duplicate
-              return prev;
-            }
-            permissionSentRef.current = false;  // Reset for new permission request
-            return {
-              id: newPermId,
-              toolName: msg.toolName || 'Permission Required',
-              description: msg.description || '',
-              timestamp: Date.now(),
-            };
-          });
-          break;
-
-        case 'done':
-          // Message complete - flush any pending content and reset state
-          if (flushTimeoutRef.current) {
-            clearTimeout(flushTimeoutRef.current);
-            flushTimeoutRef.current = null;
-          }
-          flushPendingContent();
-          // In auto mode, always clear permission state
-          // In confirm mode, only clear if we already responded
-          if (permissionMode === 'auto' || permissionSentRef.current) {
-            setPendingPermission(null);
-          }
-          permissionSentRef.current = false;
-          // Get message content for notification
-          const messageContent = getLastAssistantMessage();
-          // Notify user that task is complete (only shows when app is backgrounded)
-          notifyTaskComplete(messageContent || 'Task completed');
-          // Play completion chime
-          playChime();
-          // Reset the message ref for next response
-          lastAssistantMessageRef.current = '';
-          break;
-
-        case 'sessions':
-          setSessions(msg.sessions || []);
-          setLoadingSessions(false);
-          break;
-
-        case 'reset':
-          setMessages([]);
-          setSessionId(null);
-          setSessionName('New Chat');
-          permissionSentRef.current = false;
-          lastAssistantMessageRef.current = '';
-          break;
-
-        case 'permissionMode':
-          if (msg.mode) setPermissionMode(msg.mode);
-          break;
+    // On initial connect, request history for all agents so dashboard cards show content
+    // and fetch projects so agent card favicons are available immediately
+    if (msg.type === 'connected' && msg.agents) {
+      for (const agent of msg.agents) {
+        sendRef.current('getHistory', { agentId: agent.id });
       }
-    },
-    onConnect: () => {
-      setScreen('chat');
-      saveSettings();
-    },
-    onDisconnect: (code) => {
-      if (code === 4001) {
-        addMessage('system', 'Authentication failed');
+      sendRef.current('listProjects');
+    }
+
+    // Project list response
+    if (msg.type === 'projectList') {
+      if (msg.projects) {
+        setProjects(msg.projects);
       }
+      setProjectsLoading(false);
+    }
+
+    // Worktree created — update projects list with new worktrees
+    if (msg.type === 'worktreeCreated' && msg.projectId && msg.worktrees) {
+      setProjects(prev => prev.map(p =>
+        p.id === msg.projectId ? { ...p, worktrees: msg.worktrees || [] } : p
+      ));
+    }
+
+    // Play chime + notify on agent result
+    if (msg.type === 'agentResult' && msg.agentId) {
+      playChime();
+      const agent = stateRef.current.agents.get(msg.agentId);
+      const name = agent?.sessionName || 'Agent';
+      const cost = msg.totalCost || msg.cost || 0;
+      const preview = agent?.lastOutput?.split('\n')[0]?.slice(0, 100) || 'Task completed';
+      notifyTaskComplete(`[${name}] ${preview} ($${cost.toFixed(2)})`);
+    }
+  }, [playChime, notifyTaskComplete]);
+
+  const onWsConnect = useCallback(() => {
+    setHasCreds(true);
+    // Navigate to dashboard from pre-auth screens.
+    // If already on dashboard/agent (mid-session reconnect), stay put.
+    setScreen(prev =>
+      prev === 'pairing' || prev === 'scanner'
+        ? 'dashboard'
+        : prev,
+    );
+  }, []);
+
+  const onWsDisconnect = useCallback((code: number, willReconnect: boolean) => {
+    if (!willReconnect && code !== 1000) {
+      // All retries exhausted or non-recoverable error — go to pairing screen.
+      // Skip code 1000 (intentional close, e.g. unpair) — handled elsewhere.
+      setScreen('pairing');
+    }
+  }, []);
+
+  // WebSocket connection
+  const {
+    status: connectionStatus,
+    authStatus,
+    connect,
+    pair,
+    send,
+    disconnect,
+    resetPingTimer,
+  } = useWebSocket({
+    onMessage: onWsMessage,
+    onConnect: onWsConnect,
+    onDisconnect: onWsDisconnect,
+    onAuthError: () => {
+      clearCredentials();
+      setHasCreds(false);
     },
   });
 
-  // Load/save settings
-  useEffect(() => {
-    if (pendingConnectRef.current) return;
-    AsyncStorage.getItem('serverUrl').then(v => v && setServerUrl(v));
-    AsyncStorage.getItem('authToken').then(v => v && setAuthToken(v));
-  }, []);
+  // Keep sendRef in sync so onWsMessage can call send() without circular deps
+  sendRef.current = send;
 
-  const saveSettings = async () => {
-    await AsyncStorage.setItem('serverUrl', serverUrl);
-    await AsyncStorage.setItem('authToken', authToken);
-  };
 
-  // Draft persistence - keyed by session
-  const getDraftKey = (sid: string | null) => `draft:${sid || 'new'}`;
-
-  // Load draft when session changes
-  useEffect(() => {
-    const loadDraft = async () => {
-      const key = getDraftKey(sessionId);
-      const saved = await AsyncStorage.getItem(key);
-      if (saved) {
-        setDraftText(saved);
-      } else {
-        setDraftText('');
-      }
-    };
-    loadDraft();
-  }, [sessionId]);
-
-  // Save draft with debounce
-  const handleDraftChange = useCallback((text: string) => {
-    setDraftText(text);
-
-    // Debounce saving to storage
-    if (draftSaveTimeoutRef.current) {
-      clearTimeout(draftSaveTimeoutRef.current);
-    }
-    draftSaveTimeoutRef.current = setTimeout(() => {
-      const key = getDraftKey(sessionId);
-      if (text) {
-        AsyncStorage.setItem(key, text);
-      } else {
-        AsyncStorage.removeItem(key);
-      }
-    }, 500);
-  }, [sessionId]);
-
-  // Clear draft after sending
-  const clearDraft = useCallback(() => {
-    setDraftText('');
-    const key = getDraftKey(sessionId);
-    AsyncStorage.removeItem(key);
-  }, [sessionId]);
-
-  // Deep linking
-  const handleDeepLink = useCallback((url: string) => {
-    try {
-      const parsed = Linking.parse(url);
-      if (parsed.path === 'connect' && parsed.queryParams) {
-        const u = parsed.queryParams.url as string;
-        const t = parsed.queryParams.token as string;
-        if (u && t) {
-          setServerUrl(u);
-          setAuthToken(t);
-          pendingConnectRef.current = { url: u, token: t };
-        }
-      }
-    } catch {
-      // Invalid URL format, ignore
-    }
-  }, []);
-
-  useEffect(() => {
-    Linking.getInitialURL().then(url => url && handleDeepLink(url));
-    const sub = Linking.addEventListener('url', e => handleDeepLink(e.url));
-    return () => sub.remove();
-  }, [handleDeepLink]);
-
-  // Auto-connect after QR scan
-  useEffect(() => {
-    if (pendingConnectRef.current && serverUrl && authToken) {
-      const p = pendingConnectRef.current;
-      if (p.url === serverUrl && p.token === authToken) {
-        pendingConnectRef.current = null;
-        setTimeout(() => {
-          connect(serverUrl, authToken);
-        }, 100);
-      }
-    }
-  }, [serverUrl, authToken, connect]);
-
-  // Handlers
-  const handleScan = async () => {
+  // QR code scanning
+  const handleScanPress = async () => {
     if (!permission?.granted) {
       const result = await requestPermission();
       if (!result.granted) return;
     }
+    scannedRef.current = false;
     setScanned(false);
     setScreen('scanner');
   };
 
   const handleBarCodeScanned = ({ data }: { data: string }) => {
-    if (scanned) return;
+    // Use ref for synchronous guard — setState is async and the scanner
+    // fires multiple times before React re-renders with scanned=true
+    if (scannedRef.current) return;
+    scannedRef.current = true;
     setScanned(true);
-    try {
-      const parsed = JSON.parse(data);
-      if (parsed.url && parsed.token) {
-        setServerUrl(parsed.url);
-        setAuthToken(parsed.token);
-        pendingConnectRef.current = { url: parsed.url, token: parsed.token };
-        setScreen('settings');
-      }
-    } catch {
+
+    const qrData = parseQRCode(data);
+    if (qrData) {
+      handleQRScanned(qrData);
+    } else {
+      Alert.alert('Invalid QR Code', 'This doesn\'t look like a Mobile Agent pairing code.');
+      scannedRef.current = false;
       setScanned(false);
     }
   };
 
-  const handleSend = (text: string) => {
-    // Try to reconnect if disconnected
-    if (status === 'disconnected') {
-      reconnect();
-      return;
+  const handleQRScanned = async (qrData: QRPairingData) => {
+    // Go back to pairing screen — it shows "Connecting..." while status is 'connecting'.
+    // onWsConnect will navigate to dashboard when the connection succeeds.
+    setScreen('pairing');
+
+    // Always pair when scanning a QR code. The token is fresh from the QR,
+    // and re-pairing handles device re-registration cleanly (e.g. after service
+    // restart where the device was lost from devices.json, or after app reinstall
+    // where the device generated a new keypair).
+    pair(qrData);
+    // Success: onWsConnect → dashboard
+    // Failure: onWsDisconnect → stays on pairing, status resets, button reappears
+  };
+
+  const handleUnpair = async () => {
+    disconnect();
+    await clearCredentials();
+    setHasCreds(false);
+    dispatch({ type: 'SET_AGENTS', agents: [] });
+    dispatch({ type: 'SET_ACTIVE_AGENT', agentId: null });
+    setScreen('pairing');
+  };
+
+  // Agent actions
+  const handleCreateAgent = () => {
+    setShowCreateModal(true);
+  };
+
+  const handleCreateAgentSubmit = (config: {
+    agentType: AgentType;
+    projectId?: string;
+    worktreePath?: string;
+  }) => {
+    send('createAgent', {
+      agentType: config.agentType,
+      projectId: config.projectId,
+      worktreePath: config.worktreePath,
+    });
+  };
+
+  const handleRequestProjects = () => {
+    setProjectsLoading(true);
+    send('listProjects');
+  };
+
+  const handleCreateWorktree = (projectId: string, branchName: string) => {
+    send('createWorktree', { projectId, branchName });
+  };
+
+  const handleUnregisterProject = (projectId: string) => {
+    send('unregisterProject', { projectId });
+  };
+
+  const handleDestroyAgent = (agentId: string) => {
+    send('destroyAgent', { agentId });
+    if (selectedAgentId === agentId) {
+      setSelectedAgentId(null);
+      setScreen('dashboard');
     }
-    send('input', { text });
-    clearDraft();
   };
 
-  const handlePermissionResponse = (action: 'yes' | 'no') => {
-    if (permissionSentRef.current) {
-      return;
-    }
-    permissionSentRef.current = true;
-    send('permission', { action });
-    setPendingPermission(null);
+  const handleSelectAgent = (agentId: string) => {
+    dispatch({ type: 'SET_ACTIVE_AGENT', agentId });
+    setSelectedAgentId(agentId);
+    setScreen('agent');
+
+    // Request history for this agent
+    send('getHistory', { agentId });
   };
 
-  const handleShowSessions = () => {
-    // Try to reconnect if disconnected
-    if (status === 'disconnected') {
-      reconnect();
-      return;
-    }
-    setLoadingSessions(true);
-    send('getSessions', {});
-    setScreen('sessions');
+  const handleSendMessage = (agentId: string, text: string) => {
+    send('sendMessage', { agentId, text });
   };
 
-  const handleSelectSession = (session: Session) => {
-    send('resumeSession', { sessionId: session.id, name: session.name });
-    setSessionId(session.id);
-    setSessionName(session.name || 'Resumed Chat');
-    setMessages([]);
-    setScreen('chat');
+  const handleRespondPermission = (agentId: string, requestId: string, behavior: 'allow' | 'deny') => {
+    send('respondPermission', { agentId, requestId, behavior });
+    dispatch({ type: 'REMOVE_PERMISSION', agentId, requestId });
   };
 
-  const handleNewChat = () => {
-    send('reset', {});
-    setMessages([]);
-    setSessionId(null);
-    setSessionName('New Chat');
-    setScreen('chat');
+  const handleSetAutoApprove = (agentId: string, enabled: boolean) => {
+    send('setAutoApprove', { agentId, enabled });
+    dispatch({ type: 'SET_SESSION_INFO', agentId, autoApprove: enabled });
   };
 
-  const togglePermissionMode = () => {
-    const newMode = permissionMode === 'auto' ? 'confirm' : 'auto';
-    send('setPermissionMode', { mode: newMode });
-    setPermissionMode(newMode);
+  const handleBackToDashboard = () => {
+    setSelectedAgentId(null);
+    dispatch({ type: 'SET_ACTIVE_AGENT', agentId: null });
+    setScreen('dashboard');
   };
 
-  // Scanner screen
+  const handleOpenSettings = () => {
+    setScreen('settings');
+  };
+
+  const handleBackFromSettings = () => {
+    setScreen('dashboard');
+  };
+
+  // --- Screen rendering ---
+
+  // QR Scanner
   if (screen === 'scanner') {
     return (
       <SafeAreaView style={styles.container}>
@@ -447,7 +274,10 @@ export default function App() {
             <View style={styles.scannerFrame} />
             <Text style={styles.scannerHint}>Scan the QR code from your terminal</Text>
           </View>
-          <TouchableOpacity style={styles.cancelBtn} onPress={() => setScreen('settings')}>
+          <TouchableOpacity
+            style={styles.cancelBtn}
+            onPress={() => setScreen('pairing')}
+          >
             <Text style={styles.cancelBtnText}>Cancel</Text>
           </TouchableOpacity>
         </View>
@@ -455,107 +285,133 @@ export default function App() {
     );
   }
 
-  // Settings screen
-  if (screen === 'settings') {
+  // Pairing screen
+  if (screen === 'pairing') {
+    const isConnecting = connectionStatus === 'connecting' || authStatus === 'authenticating';
+
     return (
       <SafeAreaView style={styles.container}>
         <StatusBar style="light" />
-        <Settings
-          serverUrl={serverUrl}
-          authToken={authToken}
-          status={status}
-          onServerUrlChange={setServerUrl}
-          onAuthTokenChange={setAuthToken}
-          onConnect={() => connect(serverUrl, authToken)}
-          onScan={handleScan}
-          onBack={status === 'connected' ? () => setScreen('chat') : undefined}
-        />
+        <View style={styles.pairingContainer}>
+          <Text style={styles.pairingTitle}>Mobile Agent</Text>
+          <Text style={styles.pairingSubtitle}>
+            Control coding agents remotely from your phone
+          </Text>
+
+          {isConnecting ? (
+            <>
+              <TouchableOpacity style={styles.primaryBtnConnecting} activeOpacity={1}>
+                <View style={styles.primaryBtnRow}>
+                  <ActivityIndicator color="#888" size="small" />
+                  <Text style={styles.primaryBtnTextConnecting}>Connecting...</Text>
+                </View>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.secondaryBtn} onPress={() => disconnect()}>
+                <Text style={styles.secondaryBtnText}>Cancel</Text>
+              </TouchableOpacity>
+            </>
+          ) : hasCreds ? (
+            <>
+              <TouchableOpacity style={styles.primaryBtn} onPress={() => connect()}>
+                <Text style={styles.primaryBtnText}>Connect</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.secondaryBtn} onPress={handleScanPress}>
+                <Text style={styles.secondaryBtnText}>Scan New QR Code</Text>
+              </TouchableOpacity>
+            </>
+          ) : (
+            <>
+              <TouchableOpacity style={styles.primaryBtn} onPress={handleScanPress}>
+                <Text style={styles.primaryBtnText}>Scan QR Code</Text>
+              </TouchableOpacity>
+              <Text style={styles.pairingHelp}>
+                Run `npm start` in the mobile-agent/service directory,{'\n'}
+                then scan the QR code shown in your terminal.
+              </Text>
+            </>
+          )}
+        </View>
       </SafeAreaView>
     );
   }
 
-  // Sessions screen
-  if (screen === 'sessions') {
+  // Dashboard + overlays (layered so dashboard is visible during swipe-back)
+  if (screen === 'dashboard' || (screen === 'agent' && selectedAgentId) || screen === 'settings') {
     return (
-      <SafeAreaView style={styles.container}>
+      <View style={styles.container}>
         <StatusBar style="light" />
-        <SessionList
-          sessions={sessions}
-          loading={loadingSessions}
-          onSelect={handleSelectSession}
-          onNewChat={handleNewChat}
-          onBack={() => setScreen('chat')}
+        <SafeAreaView style={styles.safeTop} />
+        <View style={styles.layerBase} pointerEvents={screen === 'dashboard' ? 'auto' : 'none'}>
+          <Dashboard
+            connectionStatus={connectionStatus}
+            projects={projects}
+            onSelectAgent={handleSelectAgent}
+            onCreateAgent={handleCreateAgent}
+            onDestroyAgent={handleDestroyAgent}
+            onSendMessage={handleSendMessage}
+            onOpenSettings={handleOpenSettings}
+          />
+        </View>
+        {screen === 'agent' && selectedAgentId && (
+          <View style={styles.layerOverlay} pointerEvents="box-none">
+            <SafeAreaView style={styles.safeTop} />
+            <AgentDetailScreen
+              agentId={selectedAgentId}
+              connectionStatus={connectionStatus}
+              projects={projects}
+              onBack={handleBackToDashboard}
+              onSendMessage={handleSendMessage}
+              onRespondPermission={handleRespondPermission}
+              onSetAutoApprove={handleSetAutoApprove}
+              onResetPingTimer={resetPingTimer}
+            />
+          </View>
+        )}
+        {screen === 'settings' && (
+          <View style={styles.layerOverlay} pointerEvents="box-none">
+            <SafeAreaView style={styles.safeTop} />
+            <SettingsScreen
+              onBack={handleBackFromSettings}
+              onUnpair={handleUnpair}
+            />
+          </View>
+        )}
+        <CreateAgentModal
+          visible={showCreateModal && screen === 'dashboard'}
+          projects={projects}
+          projectsLoading={projectsLoading}
+          onClose={() => setShowCreateModal(false)}
+          onSubmit={handleCreateAgentSubmit}
+          onRequestProjects={handleRequestProjects}
+          onCreateWorktree={handleCreateWorktree}
+          onUnregisterProject={handleUnregisterProject}
         />
-      </SafeAreaView>
+      </View>
     );
   }
 
-  // Chat screen
+  // Fallback
   return (
     <View style={styles.container}>
       <StatusBar style="light" />
-      <SafeAreaView style={styles.safeTop}>
-        <View style={styles.header}>
-          <TouchableOpacity onPress={handleShowSessions} style={styles.headerLeft}>
-            <Text style={styles.sessionName} numberOfLines={1}>
-              {sessionName}
-            </Text>
-            <View style={styles.chevronIcon}>
-              <View style={styles.chevronLine1} />
-              <View style={styles.chevronLine2} />
-            </View>
-          </TouchableOpacity>
-
-          <View style={styles.headerRight}>
-            <TouchableOpacity onPress={togglePermissionMode} style={styles.modePill}>
-              <Text style={styles.modeText}>{permissionMode === 'auto' ? 'Auto' : 'Ask'}</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity onPress={() => setScreen('settings')}>
-              <View style={styles.statusPill}>
-                <View style={[styles.statusDot, status === 'connected' ? styles.dotGreen : styles.dotRed]} />
-                <Text style={styles.statusText}>{status === 'connected' ? 'Connected' : 'Offline'}</Text>
-              </View>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </SafeAreaView>
-
-      <KeyboardAvoidingView
-        style={styles.main}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={0}
-      >
-        <KeyboardScrollView
-          style={styles.chatArea}
-          contentContainerStyle={styles.chatContent}
-        >
-          {messages.length === 0 ? (
-            <Text style={styles.placeholder}>Send a message to start chatting...</Text>
-          ) : (
-            messages.map(msg => (
-              <MessageBubble key={msg.id} message={msg} />
-            ))
-          )}
-
-          {pendingPermission && (
-            <PermissionPrompt
-              description={pendingPermission.description}
-              onApprove={() => handlePermissionResponse('yes')}
-              onDeny={() => handlePermissionResponse('no')}
-            />
-          )}
-        </KeyboardScrollView>
-
-        <InputBar
-          onSend={handleSend}
-          disabled={status !== 'connected' || !!pendingPermission}
-          onActivity={resetPingTimer}
-          initialValue={draftText}
-          onDraftChange={handleDraftChange}
-        />
-      </KeyboardAvoidingView>
+      <View style={styles.centered}>
+        <Text style={styles.errorText}>Something went wrong</Text>
+        <TouchableOpacity style={styles.retryBtn} onPress={() => setScreen('pairing')}>
+          <Text style={styles.retryBtnText}>Go to Pairing</Text>
+        </TouchableOpacity>
+      </View>
     </View>
+  );
+}
+
+// Root component: wraps with providers
+export default function App() {
+  return (
+    <SettingsProvider>
+      <AgentProvider>
+        <AppInner />
+      </AgentProvider>
+    </SettingsProvider>
   );
 }
 
@@ -567,106 +423,81 @@ const styles = StyleSheet.create({
   safeTop: {
     backgroundColor: '#0a0a0a',
   },
-  // Header
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
-  },
-  headerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-    marginRight: 12,
-  },
-  sessionName: {
-    color: '#fafafa',
-    fontSize: 16,
-    fontWeight: '600',
+  layerBase: {
     flex: 1,
   },
-  chevronIcon: {
-    width: 12,
-    height: 8,
-    marginLeft: 6,
+  layerOverlay: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  centered: {
+    flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  chevronLine1: {
-    position: 'absolute',
-    width: 7,
-    height: 1.5,
-    backgroundColor: '#666',
-    borderRadius: 1,
-    transform: [{ rotate: '45deg' }, { translateX: -2 }],
-  },
-  chevronLine2: {
-    position: 'absolute',
-    width: 7,
-    height: 1.5,
-    backgroundColor: '#666',
-    borderRadius: 1,
-    transform: [{ rotate: '-45deg' }, { translateX: 2 }],
-  },
-  headerRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  modePill: {
-    backgroundColor: '#1a1a1a',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 12,
-  },
-  modeText: {
-    color: '#888',
-    fontSize: 12,
-  },
-  statusPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#1a1a1a',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 12,
-  },
-  statusDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    marginRight: 6,
-  },
-  dotGreen: {
-    backgroundColor: '#22c55e',
-  },
-  dotRed: {
-    backgroundColor: '#ef4444',
-  },
-  statusText: {
-    color: '#888',
-    fontSize: 12,
-  },
-  // Main
-  main: {
+  // Pairing screen
+  pairingContainer: {
     flex: 1,
+    padding: 24,
+    justifyContent: 'center',
+    backgroundColor: '#0a0a0a',
   },
-  chatArea: {
-    flex: 1,
-  },
-  chatContent: {
-    padding: 16,
-    paddingBottom: 16,
-  },
-  placeholder: {
-    color: '#555',
-    fontSize: 14,
+  pairingTitle: {
+    fontSize: 28,
+    fontWeight: '700',
+    color: '#fafafa',
     textAlign: 'center',
-    marginTop: 40,
+    marginBottom: 8,
+  },
+  pairingSubtitle: {
+    fontSize: 15,
+    color: '#888',
+    textAlign: 'center',
+    marginBottom: 40,
+    lineHeight: 22,
+  },
+  primaryBtn: {
+    backgroundColor: '#fff',
+    padding: 16,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  primaryBtnText: {
+    color: '#000',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  primaryBtnConnecting: {
+    backgroundColor: '#1a1a1a',
+    padding: 16,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  primaryBtnRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  primaryBtnTextConnecting: {
+    color: '#888',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  secondaryBtn: {
+    padding: 14,
+    alignItems: 'center',
+    marginTop: 12,
+  },
+  secondaryBtnText: {
+    color: '#666',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  pairingHelp: {
+    color: '#555',
+    fontSize: 13,
+    textAlign: 'center',
+    marginTop: 24,
+    lineHeight: 20,
   },
   // Scanner
   scannerContainer: {
@@ -703,5 +534,21 @@ const styles = StyleSheet.create({
   cancelBtnText: {
     color: '#fafafa',
     fontSize: 15,
+  },
+  // Error / fallback
+  errorText: {
+    color: '#888',
+    fontSize: 15,
+    marginBottom: 16,
+  },
+  retryBtn: {
+    backgroundColor: '#1a1a1a',
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 8,
+  },
+  retryBtnText: {
+    color: '#fafafa',
+    fontSize: 14,
   },
 });
