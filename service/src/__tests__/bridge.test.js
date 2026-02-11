@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { generateKeyPairSync, sign, randomBytes } from 'node:crypto';
 import WebSocket from 'ws';
 import { Bridge } from '../bridge.js';
@@ -213,6 +213,28 @@ describe('Bridge', () => {
       const msg = await waitForMessage(ws, m => m.type === 'error');
       expect(msg.error).toMatch(/not found/i);
 
+      ws.close();
+    });
+
+    it('rejects interruptAgent for nonexistent agent', async () => {
+      send(ws, { type: 'interruptAgent', agentId: 'nonexistent' });
+      const msg = await waitForMessage(ws, m => m.type === 'error');
+      expect(msg.error).toMatch(/not found/i);
+
+      ws.close();
+    });
+
+    it('routes interruptAgent to session.interrupt', async () => {
+      const agentId = '00000000-0000-0000-0000-000000000042';
+      const interrupt = vi.fn().mockResolvedValue(true);
+
+      bridge.agents.set(agentId, { interrupt });
+      send(ws, { type: 'interruptAgent', agentId });
+
+      await new Promise(resolve => setTimeout(resolve, 25));
+      expect(interrupt).toHaveBeenCalledOnce();
+
+      bridge.agents.delete(agentId);
       ws.close();
     });
   });

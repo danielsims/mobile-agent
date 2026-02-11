@@ -23,6 +23,7 @@ import type { Project, AgentType, GitLogCommit, ProviderModelOption } from './st
 import type { GitStatusData } from './components/GitTabContent';
 
 type Screen = 'pairing' | 'scanner' | 'dashboard' | 'agent' | 'settings' | 'git';
+const MODEL_PREFETCH_TYPES: AgentType[] = ['claude', 'codex', 'opencode'];
 
 // Inner app component that has access to AgentContext
 function AppInner() {
@@ -257,13 +258,22 @@ function AppInner() {
   };
 
   // Agent actions
+  const prefetchModelsForCreateFlow = useCallback(() => {
+    for (const type of MODEL_PREFETCH_TYPES) {
+      if (Object.prototype.hasOwnProperty.call(modelsByType, type)) continue;
+      send('listModels', { agentType: type });
+    }
+  }, [modelsByType, send]);
+
   const handleCreateAgent = () => {
+    prefetchModelsForCreateFlow();
     setCreateModalInitialProjectId(undefined);
     setCreateModalInitialWorktreePath(undefined);
     setShowCreateModal(true);
   };
 
   const handleCreateAgentForWorktree = (projectId: string, worktreePath: string) => {
+    prefetchModelsForCreateFlow();
     setCreateModalInitialProjectId(projectId);
     setCreateModalInitialWorktreePath(worktreePath);
     setShowCreateModal(true);
@@ -324,6 +334,12 @@ function AppInner() {
 
   const handleSendMessage = (agentId: string, text: string) => {
     send('sendMessage', { agentId, text });
+  };
+
+  const handleStopAgent = (agentId: string) => {
+    send('interruptAgent', { agentId });
+    // Optimistic: unblock input immediately while backend performs interrupt.
+    dispatch({ type: 'UPDATE_AGENT_STATUS', agentId, status: 'idle' });
   };
 
   const handleRespondPermission = (agentId: string, requestId: string, behavior: 'allow' | 'deny') => {
@@ -497,6 +513,7 @@ function AppInner() {
               projects={projects}
               onBack={handleBackToDashboard}
               onSendMessage={handleSendMessage}
+              onStopAgent={handleStopAgent}
               onRespondPermission={handleRespondPermission}
               onSetAutoApprove={handleSetAutoApprove}
               onResetPingTimer={resetPingTimer}

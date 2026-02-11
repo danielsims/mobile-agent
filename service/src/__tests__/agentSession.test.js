@@ -107,6 +107,20 @@ describe('AgentSession', () => {
       session.driver.emit('init', { sessionId: 'sess-1' });
       expect(session._initialized).toBe(true);
     });
+
+    it('moves session to idle after init when starting', () => {
+      expect(session.status).toBe('starting');
+      session.driver.emit('init', { sessionId: 'sess-1' });
+      expect(session.status).toBe('idle');
+    });
+
+    it('does not mark init as running', () => {
+      session.driver.emit('init', { sessionId: 'sess-1' });
+      const runningUpdate = broadcasts.find(
+        b => b.type === 'agentUpdated' && b.data.status === 'running',
+      );
+      expect(runningUpdate).toBeFalsy();
+    });
   });
 
   describe('Driver event: stream', () => {
@@ -463,6 +477,29 @@ describe('AgentSession', () => {
 
       session.respondToPermission('req-1', 'allow');
       expect(session.status).toBe('running');
+    });
+  });
+
+  describe('interrupt()', () => {
+    it('interrupts running session and sets status to idle', async () => {
+      session.status = 'running';
+      const spy = vi.spyOn(session.driver, 'interrupt').mockResolvedValue(undefined);
+
+      const ok = await session.interrupt();
+
+      expect(ok).toBe(true);
+      expect(spy).toHaveBeenCalledOnce();
+      expect(session.status).toBe('idle');
+    });
+
+    it('returns false when session is not running', async () => {
+      session.status = 'idle';
+      const spy = vi.spyOn(session.driver, 'interrupt').mockResolvedValue(undefined);
+
+      const ok = await session.interrupt();
+
+      expect(ok).toBe(false);
+      expect(spy).not.toHaveBeenCalled();
     });
   });
 

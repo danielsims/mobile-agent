@@ -164,7 +164,6 @@ export class ClaudeDriver extends BaseDriver {
             projectName: msg.cwd ? basename(msg.cwd) : null,
             gitBranch: this._detectBranch(msg.cwd),
           });
-          this.emit('status', { status: 'running' });
         }
         break;
       }
@@ -295,6 +294,20 @@ export class ClaudeDriver extends BaseDriver {
       },
     });
     console.log(`[Claude ${this._agentId?.slice(0, 8)}] Permission mode -> ${mode}`);
+  }
+
+  async interrupt() {
+    // Best-effort interrupt for the active turn.
+    // Claude's stream-json control channel supports control_request subtypes.
+    const requestId = `req_interrupt_${uuidv4().slice(0, 8)}`;
+    this._send({
+      type: 'control_request',
+      request_id: requestId,
+      request: {
+        subtype: 'interrupt',
+      },
+    });
+    console.log(`[Claude ${this._agentId?.slice(0, 8)}] Interrupt requested`);
   }
 
   async stop() {

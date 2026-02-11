@@ -398,6 +398,10 @@ export class Bridge {
         this._handleSendMessage(ws, msg, deviceId);
         break;
 
+      case 'interruptAgent':
+        this._handleInterruptAgent(ws, msg, deviceId);
+        break;
+
       case 'respondPermission':
         this._handleRespondPermission(ws, msg, deviceId);
         break;
@@ -545,6 +549,22 @@ export class Bridge {
 
     // Echo the user message to all mobile clients
     this._broadcastToMobile('userMessage', { agentId: msg.agentId, content: text });
+  }
+
+  async _handleInterruptAgent(ws, msg, deviceId) {
+    const session = this.agents.get(msg.agentId);
+    if (!session) {
+      this._sendTo(ws, 'error', { error: 'Agent not found.' });
+      return;
+    }
+
+    const interrupted = await session.interrupt();
+    if (!interrupted) {
+      this._sendTo(ws, 'error', { error: 'Agent is not currently running.' });
+      return;
+    }
+
+    logAudit('agent_interrupted', { agentId: msg.agentId.slice(0, 8), deviceId });
   }
 
   _handleRespondPermission(ws, msg, deviceId) {

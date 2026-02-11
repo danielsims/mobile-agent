@@ -63,6 +63,11 @@ export class AgentSession {
       if (data.gitBranch !== undefined) this.gitBranch = data.gitBranch;
       if (data.projectName) this.projectName = data.projectName;
       this._initialized = true;
+      // Initialization means the session is ready, not actively executing.
+      // Keep explicit active/error states if they already exist.
+      if (['starting', 'connected'].includes(this.status)) {
+        this.status = 'idle';
+      }
 
       console.log(`[Agent ${this.id.slice(0, 8)}] Init: type=${this.type}, model=${this.model}, cwd=${this.projectName || '?'}, branch=${this.gitBranch || '?'}`);
       this._broadcast('agentUpdated', {
@@ -73,7 +78,7 @@ export class AgentSession {
         cwd: this.cwd,
         gitBranch: this.gitBranch,
         projectName: this.projectName,
-        status: 'running',
+        status: this.status,
       });
     });
 
@@ -349,6 +354,29 @@ export class AgentSession {
     }
 
     return true;
+  }
+
+  /**
+   * Interrupt the current turn, if any.
+   * Returns true if an interrupt was requested.
+   */
+  async interrupt() {
+    if (!['running', 'awaiting_permission'].includes(this.status)) {
+      return false;
+    }
+
+    try {
+      await this.driver.interrupt();
+      this._currentStreamContent = '';
+      this.pendingPermissions.clear();
+      this._setStatus('idle');
+      return true;
+    } catch (err) {
+      const message = err?.message || String(err);
+      console.error(`[Agent ${this.id.slice(0, 8)}] Interrupt failed: ${message}`);
+      this._setStatus('error');
+      return false;
+    }
   }
 
   /**

@@ -2,10 +2,12 @@ import React, { useState } from 'react';
 import { View, Text, ScrollView, StyleSheet, Platform, TouchableOpacity } from 'react-native';
 import { StreamdownRN } from 'streamdown-rn';
 import type { AgentMessage, ContentBlock } from '../state/types';
+import { ShimmerText } from './ShimmerText';
 
 interface MessageBubbleProps {
   message: AgentMessage;
   toolResultMap?: Map<string, string>;
+  animateThinking?: boolean;
 }
 
 // Extract markdown string from content blocks
@@ -86,6 +88,7 @@ function ToolUseCard({ block, result }: { block: ContentBlock & { type: 'tool_us
   const [expanded, setExpanded] = useState(false);
   const fallbackName = formatToolName(block.name);
   const title = extractToolDescription(block.input) || fallbackName;
+  const isCompleted = result != null;
 
   return (
     <View style={styles.toolCard}>
@@ -97,9 +100,11 @@ function ToolUseCard({ block, result }: { block: ContentBlock & { type: 'tool_us
         <View style={styles.toolHeaderLeft}>
           <ToolIcon size={11} color="#666" />
           <Text style={styles.toolName} numberOfLines={1}>{title}</Text>
-          <View style={styles.toolBadge}>
-            <View style={styles.toolBadgeDot} />
-            <Text style={styles.toolBadgeText}>Completed</Text>
+          <View style={[styles.toolBadge, !isCompleted && styles.toolBadgeRunning]}>
+            <View style={[styles.toolBadgeDot, !isCompleted && styles.toolBadgeDotRunning]} />
+            <Text style={[styles.toolBadgeText, !isCompleted && styles.toolBadgeTextRunning]}>
+              {isCompleted ? 'Completed' : 'Running'}
+            </Text>
           </View>
         </View>
         <View style={[styles.toolChevronBox, expanded && styles.toolChevronBoxOpen]}>
@@ -168,7 +173,15 @@ export function buildToolResultMap(messages: AgentMessage[]): Map<string, string
 }
 
 // Render a single ContentBlock (tool_result handled inline with tool_use)
-function ContentBlockView({ block, resultMap }: { block: ContentBlock; resultMap?: Map<string, string> }) {
+function ContentBlockView({
+  block,
+  resultMap,
+  animateThinking = false,
+}: {
+  block: ContentBlock;
+  resultMap?: Map<string, string>;
+  animateThinking?: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
 
   switch (block.type) {
@@ -184,17 +197,25 @@ function ContentBlockView({ block, resultMap }: { block: ContentBlock; resultMap
       return null; // Rendered inline within the matching ToolUseCard
 
     case 'thinking':
+      if (!block.text || !block.text.trim()) return null;
       return (
-        <TouchableOpacity
-          style={styles.thinkingContainer}
-          onPress={() => setExpanded(!expanded)}
-          activeOpacity={0.7}
-        >
-          <Text style={styles.thinkingLabel}>
-            Thinking {expanded ? '\u25B4' : '\u25BE'}
-          </Text>
+        <View style={styles.thinkingContainer}>
+          <TouchableOpacity
+            style={styles.thinkingHeader}
+            onPress={() => setExpanded(!expanded)}
+            activeOpacity={0.7}
+          >
+            {animateThinking ? (
+              <ShimmerText text="Thinking" style={styles.thinkingLabel} duration={1700} />
+            ) : (
+              <Text style={styles.thinkingLabelStatic}>Thinking</Text>
+            )}
+            <Text style={styles.thinkingChevron}>
+              {expanded ? '\u25B4' : '\u25BE'}
+            </Text>
+          </TouchableOpacity>
           {expanded && <Text style={styles.thinkingText}>{block.text}</Text>}
-        </TouchableOpacity>
+        </View>
       );
 
     default:
@@ -202,7 +223,7 @@ function ContentBlockView({ block, resultMap }: { block: ContentBlock; resultMap
   }
 }
 
-export function MessageBubble({ message, toolResultMap }: MessageBubbleProps) {
+export function MessageBubble({ message, toolResultMap, animateThinking = false }: MessageBubbleProps) {
   const isUser = message.type === 'user';
   const isSystem = message.type === 'system';
 
@@ -233,7 +254,11 @@ export function MessageBubble({ message, toolResultMap }: MessageBubbleProps) {
     // ContentBlock array — render text blocks as unified markdown,
     // non-text blocks (tool_use, thinking) as custom components
     const textMarkdown = blocksToMarkdown(message.content);
-    const nonTextBlocks = message.content.filter(b => b.type !== 'text' && b.type !== 'tool_result');
+    const nonTextBlocks = message.content.filter((b) => {
+      if (b.type === 'text' || b.type === 'tool_result') return false;
+      if (b.type === 'thinking' && (!b.text || !b.text.trim())) return false;
+      return true;
+    });
 
     return (
       <View style={styles.bubble}>
@@ -241,7 +266,12 @@ export function MessageBubble({ message, toolResultMap }: MessageBubbleProps) {
           <StreamdownRN theme="dark">{textMarkdown}</StreamdownRN>
         )}
         {nonTextBlocks.map((block, i) => (
-          <ContentBlockView key={i} block={block} resultMap={toolResultMap} />
+          <ContentBlockView
+            key={i}
+            block={block}
+            resultMap={toolResultMap}
+            animateThinking={animateThinking}
+          />
         ))}
       </View>
     );
@@ -322,16 +352,25 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     gap: 5,
   },
+  toolBadgeRunning: {
+    backgroundColor: 'rgba(245,158,11,0.12)',
+  },
   toolBadgeDot: {
     width: 5,
     height: 5,
     borderRadius: 2.5,
     backgroundColor: '#22c55e',
   },
+  toolBadgeDotRunning: {
+    backgroundColor: '#f59e0b',
+  },
   toolBadgeText: {
     color: '#22c55e',
     fontSize: 10,
     fontWeight: '500',
+  },
+  toolBadgeTextRunning: {
+    color: '#f59e0b',
   },
   toolChevronBox: {
     width: 20,
@@ -429,22 +468,37 @@ const styles = StyleSheet.create({
 
   // --- Thinking ---
   thinkingContainer: {
-    backgroundColor: 'rgba(139,92,246,0.06)',
-    borderRadius: 6,
-    padding: 10,
-    marginVertical: 4,
-    borderLeftWidth: 2,
-    borderLeftColor: '#8b5cf6',
+    marginVertical: 5,
+  },
+  thinkingHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
   },
   thinkingLabel: {
-    color: '#8b5cf6',
+    color: '#888',
     fontSize: 12,
     fontWeight: '500',
   },
+  thinkingLabelStatic: {
+    color: '#888',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  thinkingChevron: {
+    color: '#666',
+    fontSize: 12,
+    marginLeft: 5,
+  },
   thinkingText: {
-    color: '#a78bfa',
+    color: '#9a9a9a',
     fontSize: 13,
     lineHeight: 20,
-    marginTop: 6,
+    marginTop: 8,
+    marginLeft: 6,
+    paddingLeft: 10,
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    borderLeftColor: '#353535',
+    fontStyle: 'italic',
   },
 });
