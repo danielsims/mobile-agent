@@ -144,6 +144,16 @@ export interface Project {
   worktrees: Worktree[];
 }
 
+export interface GitLogCommit {
+  hash: string;
+  abbrevHash: string;
+  parents: string[];
+  subject: string;
+  author: string;
+  relativeTime: string;
+  refs: string[];
+}
+
 // --- Server Messages (new protocol) ---
 
 export interface ServerMessage {
@@ -209,6 +219,10 @@ export interface ServerMessage {
   // gitDiff
   filePath?: string;
   diff?: string;
+
+  // gitLog
+  projectPath?: string;
+  commits?: GitLogCommit[];
 
   // error
   error?: string;

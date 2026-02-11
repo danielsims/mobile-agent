@@ -19,7 +19,7 @@ import { useWebSocket } from './hooks/useWebSocket';
 import { useNotifications } from './hooks/useNotifications';
 import { useCompletionChime } from './hooks/useCompletionChime';
 import { parseQRCode, clearCredentials, isPaired, type QRPairingData } from './utils/auth';
-import type { Project, AgentType } from './state/types';
+import type { Project, AgentType, GitLogCommit } from './state/types';
 import type { GitStatusData } from './components/GitTabContent';
 
 type Screen = 'pairing' | 'scanner' | 'dashboard' | 'agent' | 'settings' | 'git';
@@ -51,6 +51,10 @@ function AppInner() {
   // Git overview state — for the GitScreen dashboard view
   const [gitDataMap, setGitDataMap] = useState<Map<string, GitStatusData>>(new Map());
   const [gitLoadingAgents, setGitLoadingAgents] = useState<Set<string>>(new Set());
+
+  // Git log state — per-project commit history
+  const [gitLogMap, setGitLogMap] = useState<Map<string, GitLogCommit[]>>(new Map());
+  const [gitLogLoading, setGitLogLoading] = useState<Set<string>>(new Set());
 
   // Whether we have stored pairing credentials (checked on mount, updated on pair/unpair)
   useEffect(() => {
@@ -122,6 +126,20 @@ function AppInner() {
     if (msg.type === 'gitDiff' && msg.agentId) {
       setGitDiff(msg.diff || '');
       setGitDiffLoading(false);
+    }
+
+    // Git log response
+    if (msg.type === 'gitLog' && msg.projectPath) {
+      setGitLogMap(prev => {
+        const next = new Map(prev);
+        next.set(msg.projectPath!, msg.commits || []);
+        return next;
+      });
+      setGitLogLoading(prev => {
+        const next = new Set(prev);
+        next.delete(msg.projectPath!);
+        return next;
+      });
     }
 
     // Play chime + notify on agent result
@@ -346,6 +364,16 @@ function AppInner() {
     send('getGitStatus', { agentId });
   }, [send]);
 
+  // For GitScreen: request commit log for a project
+  const handleRequestGitLog = useCallback((projectPath: string) => {
+    setGitLogLoading(prev => {
+      const next = new Set(prev);
+      next.add(projectPath);
+      return next;
+    });
+    send('getGitLog', { projectPath });
+  }, [send]);
+
   // --- Screen rendering ---
 
   // QR Scanner
@@ -479,12 +507,15 @@ function AppInner() {
             <GitScreen
               onBack={handleBackFromGit}
               onRequestGitStatus={handleGitScreenRequestStatus}
+              onRequestGitLog={handleRequestGitLog}
               onSelectAgent={handleSelectAgent}
               onDestroyAgent={handleDestroyAgent}
               onSendMessage={handleSendMessage}
               onCreateWorktree={handleCreateWorktree}
               onCreateAgentForWorktree={handleCreateAgentForWorktree}
               gitDataMap={gitDataMap}
+              gitLogMap={gitLogMap}
+              gitLogLoading={gitLogLoading}
               loadingAgentIds={gitLoadingAgents}
               projects={projects}
             />

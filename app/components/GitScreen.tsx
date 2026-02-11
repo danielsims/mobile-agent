@@ -14,6 +14,8 @@ import {
   Keyboard,
   Alert,
   ActivityIndicator,
+  type NativeSyntheticEvent,
+  type NativeScrollEvent,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
@@ -21,8 +23,10 @@ import { useAgentState } from '../state/AgentContext';
 import { useSettings } from '../state/SettingsContext';
 import { AgentCard } from './AgentCard';
 import { FileTypeIcon } from './FileTypeIcon';
+import { SourceTabContent } from './SourceTabContent';
+import { CommitsTabContent } from './CommitsTabContent';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
-import type { Project, AgentState, AgentType } from '../state/types';
+import type { Project, GitLogCommit, AgentState, AgentType } from '../state/types';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
 const SWIPE_THRESHOLD = SCREEN_WIDTH * 0.25;
@@ -43,12 +47,15 @@ interface AgentGitData {
 interface GitScreenProps {
   onBack: () => void;
   onRequestGitStatus: (agentId: string) => void;
+  onRequestGitLog: (projectPath: string) => void;
   onSelectAgent: (agentId: string) => void;
   onDestroyAgent?: (agentId: string) => void;
   onSendMessage?: (agentId: string, text: string) => void;
   onCreateWorktree?: (projectId: string, branchName: string) => void;
   onCreateAgentForWorktree?: (projectId: string, worktreePath: string) => void;
   gitDataMap: Map<string, AgentGitData>;
+  gitLogMap: Map<string, GitLogCommit[]>;
+  gitLogLoading: Set<string>;
   loadingAgentIds: Set<string>;
   projects: Project[];
 }
@@ -144,12 +151,19 @@ function StackedAgentAvatars({ agents, size = 20 }: { agents: AgentState[]; size
   );
 }
 
-export function GitScreen({ onBack, onRequestGitStatus, onSelectAgent, onDestroyAgent, onSendMessage, onCreateWorktree, onCreateAgentForWorktree, gitDataMap, loadingAgentIds, projects }: GitScreenProps) {
+type GitScreenTab = 'diff' | 'source' | 'commits';
+const GIT_TABS: GitScreenTab[] = ['diff', 'source', 'commits'];
+
+export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelectAgent, onDestroyAgent, onSendMessage, onCreateWorktree, onCreateAgentForWorktree, gitDataMap, gitLogMap, gitLogLoading, loadingAgentIds, projects }: GitScreenProps) {
   const { state } = useAgentState();
   const { settings } = useSettings();
   const [expandedWorktree, setExpandedWorktree] = useState<string | null>(null);
   const [expandedNewWorktree, setExpandedNewWorktree] = useState<string | null>(null);
   const [newBranchName, setNewBranchName] = useState('');
+
+  // Tab state
+  const [activeTab, setActiveTab] = useState<GitScreenTab>('diff');
+  const tabScrollRef = useRef<ScrollView>(null);
 
   // Chat/voice state
   const [chatAgentId, setChatAgentId] = useState<string | null>(null);
@@ -238,6 +252,26 @@ export function GitScreen({ onBack, onRequestGitStatus, onSelectAgent, onDestroy
 
   const canSend = chatText.trim().length > 0;
   const canSendVoice = voiceText.trim().length > 0;
+
+  // Tab switching
+  const handleTabSwitch = useCallback((tab: GitScreenTab) => {
+    if (tab !== activeTab) {
+      if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      setActiveTab(tab);
+      const idx = GIT_TABS.indexOf(tab);
+      tabScrollRef.current?.scrollTo({ x: idx * SCREEN_WIDTH, animated: true });
+    }
+  }, [activeTab]);
+
+  const handleTabScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const offsetX = event.nativeEvent.contentOffset.x;
+    const page = Math.round(offsetX / SCREEN_WIDTH);
+    const tab = GIT_TABS[page];
+    if (tab && tab !== activeTab) {
+      if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      setActiveTab(tab);
+    }
+  }, [activeTab]);
 
   const handleCreateWorktree = useCallback((projectId: string) => {
     const trimmed = newBranchName.trim();
@@ -378,14 +412,43 @@ export function GitScreen({ onBack, onRequestGitStatus, onSelectAgent, onDestroy
           </TouchableOpacity>
         </View>
 
-        <ScrollView style={styles.content} contentContainerStyle={styles.contentInner}>
-          {projects.length === 0 ? (
-            <View style={styles.emptyContainer}>
-              <Text style={styles.emptyText}>No projects registered</Text>
-              <Text style={styles.emptySubtext}>Register a project to see git status here</Text>
-            </View>
-          ) : (
-            projects.map(project => (
+        {/* Tab bar */}
+        <View style={styles.tabBar}>
+          {GIT_TABS.map(tab => (
+            <TouchableOpacity
+              key={tab}
+              style={[styles.tab, activeTab === tab && styles.tabActive]}
+              onPress={() => handleTabSwitch(tab)}
+              activeOpacity={0.7}
+            >
+              <Text style={[styles.tabText, activeTab === tab && styles.tabTextActive]}>
+                {tab === 'diff' ? 'Worktrees' : tab === 'source' ? 'Source' : 'Commits'}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        {/* Tab content — horizontal paging */}
+        <View style={styles.tabMain}>
+          <ScrollView
+            ref={tabScrollRef}
+            horizontal
+            pagingEnabled
+            showsHorizontalScrollIndicator={false}
+            onMomentumScrollEnd={handleTabScroll}
+            scrollEventThrottle={16}
+            keyboardShouldPersistTaps="handled"
+          >
+            {/* Worktrees tab */}
+            <View style={styles.tabPage}>
+              <ScrollView style={styles.content} contentContainerStyle={styles.contentInner}>
+                {projects.length === 0 ? (
+                  <View style={styles.emptyContainer}>
+                    <Text style={styles.emptyText}>No projects registered</Text>
+                    <Text style={styles.emptySubtext}>Register a project to see git status here</Text>
+                  </View>
+                ) : (
+                  projects.map(project => (
               <View key={project.id} style={styles.projectSection}>
                 <View style={styles.sectionHeader}>
                   <ProjectIcon project={project} />
@@ -527,7 +590,30 @@ export function GitScreen({ onBack, onRequestGitStatus, onSelectAgent, onDestroy
               </View>
             ))
           )}
-        </ScrollView>
+              </ScrollView>
+            </View>
+
+            {/* Source tab */}
+            <View style={styles.tabPage}>
+              <SourceTabContent
+                projects={projects}
+                gitLogMap={gitLogMap}
+                gitLogLoading={gitLogLoading}
+                onRequestGitLog={onRequestGitLog}
+              />
+            </View>
+
+            {/* Commits tab */}
+            <View style={styles.tabPage}>
+              <CommitsTabContent
+                projects={projects}
+                gitLogMap={gitLogMap}
+                gitLogLoading={gitLogLoading}
+                onRequestGitLog={onRequestGitLog}
+              />
+            </View>
+          </ScrollView>
+        </View>
 
         {chatAgentId && chatAgent && onSendMessage && (
           <View style={[overlayStyles.inlineOverlay, { bottom: keyboardHeight - 40 }]}>
@@ -664,8 +750,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 4,
     paddingBottom: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1a1a1a',
     gap: 8,
   },
   headerTitle: {
@@ -678,6 +762,40 @@ const styles = StyleSheet.create({
   },
   closeButton: {
     paddingLeft: 8,
+  },
+  tabBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 4,
+    backgroundColor: '#0f0f0f',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#1a1a1a',
+  },
+  tab: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderBottomWidth: 2,
+    borderBottomColor: 'transparent',
+  },
+  tabActive: {
+    borderBottomColor: '#fff',
+  },
+  tabText: {
+    color: '#555',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  tabTextActive: {
+    color: '#fff',
+  },
+  tabMain: {
+    flex: 1,
+  },
+  tabPage: {
+    width: SCREEN_WIDTH,
+    flex: 1,
   },
   closeText: {
     color: '#888',
