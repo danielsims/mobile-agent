@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo } from 'react';
+import React, { useMemo } from 'react';
 import {
   View,
   Text,
@@ -15,7 +15,6 @@ interface SourceTabContentProps {
   projects: Project[];
   gitLogMap: Map<string, GitLogCommit[]>;
   gitLogLoading: Set<string>;
-  onRequestGitLog: (projectPath: string) => void;
 }
 
 // --- Graph types ---
@@ -45,20 +44,37 @@ const LANE_COLORS = [
   '#8b5cf6', '#ec4899', '#06b6d4', '#f97316',
 ];
 
-// --- Ref classification (same as CommitsTabContent) ---
+// --- Ref parsing & classification ---
 
-function classifyRef(ref: string): 'head' | 'tag' | 'remote' | 'local' {
-  if (ref === 'HEAD') return 'head';
-  if (ref.startsWith('tag:')) return 'tag';
-  if (ref.startsWith('origin/')) return 'remote';
-  return 'local';
+interface ParsedRef {
+  label: string;
+  kind: 'head' | 'tag' | 'remote' | 'local';
 }
 
-const REF_STYLES: Record<ReturnType<typeof classifyRef>, { backgroundColor: string; color: string }> = {
-  local:  { backgroundColor: 'rgba(34,197,94,0.15)',  color: '#22c55e' },
-  remote: { backgroundColor: 'rgba(59,130,246,0.15)', color: '#3b82f6' },
-  tag:    { backgroundColor: 'rgba(245,158,11,0.15)', color: '#f59e0b' },
-  head:   { backgroundColor: 'rgba(168,85,247,0.15)', color: '#a855f7' },
+function parseRefs(refs: string[]): ParsedRef[] {
+  const result: ParsedRef[] = [];
+  for (const raw of refs) {
+    if (raw.startsWith('HEAD -> ')) {
+      result.push({ label: 'HEAD', kind: 'head' });
+      result.push({ label: raw.slice(8), kind: 'local' });
+    } else if (raw === 'HEAD') {
+      result.push({ label: 'HEAD', kind: 'head' });
+    } else if (raw.startsWith('tag: ')) {
+      result.push({ label: raw.slice(5), kind: 'tag' });
+    } else if (raw.startsWith('origin/')) {
+      result.push({ label: raw, kind: 'remote' });
+    } else {
+      result.push({ label: raw, kind: 'local' });
+    }
+  }
+  return result;
+}
+
+const REF_COLORS: Record<ParsedRef['kind'], { bg: string; fg: string }> = {
+  local:  { bg: 'rgba(34,197,94,0.15)',  fg: '#22c55e' },
+  remote: { bg: 'rgba(59,130,246,0.15)', fg: '#3b82f6' },
+  tag:    { bg: 'rgba(245,158,11,0.15)', fg: '#f59e0b' },
+  head:   { bg: 'rgba(168,85,247,0.15)', fg: '#a855f7' },
 };
 
 // --- ProjectIcon (same pattern as CommitsTabContent) ---
@@ -323,7 +339,7 @@ function CommitGraph({ commits }: { commits: GitLogCommit[] }) {
         <View style={[styles.metadataColumn, { height: svgHeight }]}>
           {nodes.map((node, i) => {
             const commit = node.commit;
-            const refs = commit.refs || [];
+            const refs = parseRefs(commit.refs || []);
             return (
               <View
                 key={`meta-${i}`}
@@ -339,16 +355,15 @@ function CommitGraph({ commits }: { commits: GitLogCommit[] }) {
                   <Text style={styles.commitHash}>{commit.abbrevHash}</Text>
                   <Text style={styles.commitSeparator}> · </Text>
                   <Text style={styles.commitTime}>{commit.relativeTime}</Text>
-                  {refs.length > 0 && refs.map((ref, j) => {
-                    const kind = classifyRef(ref);
-                    const refStyle = REF_STYLES[kind];
+                  {refs.map((r, j) => {
+                    const c = REF_COLORS[r.kind];
                     return (
                       <View
                         key={`ref-${j}`}
-                        style={[styles.refBadge, { backgroundColor: refStyle.backgroundColor, marginLeft: 4 }]}
+                        style={[styles.refBadge, { backgroundColor: c.bg, marginLeft: 4 }]}
                       >
-                        <Text style={[styles.refText, { color: refStyle.color }]}>
-                          {ref}
+                        <Text style={[styles.refText, { color: c.fg }]}>
+                          {r.label}
                         </Text>
                       </View>
                     );
@@ -369,14 +384,7 @@ export function SourceTabContent({
   projects,
   gitLogMap,
   gitLogLoading,
-  onRequestGitLog,
 }: SourceTabContentProps) {
-  // Request git log for each project on mount
-  useEffect(() => {
-    for (const project of projects) {
-      onRequestGitLog(project.path);
-    }
-  }, []); // Only on mount
 
   const allEmpty = projects.every(p => {
     const commits = gitLogMap.get(p.path);

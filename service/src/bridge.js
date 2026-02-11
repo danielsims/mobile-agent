@@ -742,7 +742,9 @@ export class Bridge {
 
   _handleGetGitLog(ws, msg) {
     const { projectPath, maxCount } = msg;
+    console.log(`[GitLog] Request received — projectPath=${projectPath}`);
     if (!projectPath) {
+      console.log('[GitLog] ERROR: no projectPath');
       this._sendTo(ws, 'error', { error: 'projectPath required.' });
       return;
     }
@@ -750,11 +752,13 @@ export class Bridge {
     const all = getProjects();
     const isRegistered = Object.values(all).some(p => p.path === projectPath);
     if (!isRegistered) {
+      console.log(`[GitLog] ERROR: path not registered. Registered: ${Object.values(all).map(p => p.path).join(', ')}`);
       this._sendTo(ws, 'error', { error: 'Path is not a registered project.' });
       return;
     }
 
     const commits = getGitLog(projectPath, maxCount || 100);
+    console.log(`[GitLog] Sending ${commits.length} commits for ${projectPath}`);
     this._sendTo(ws, 'gitLog', { projectPath, commits });
   }
 

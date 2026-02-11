@@ -165,6 +165,13 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
   const [activeTab, setActiveTab] = useState<GitScreenTab>('diff');
   const tabScrollRef = useRef<ScrollView>(null);
 
+  // Request git log for all projects when screen mounts / projects change
+  useEffect(() => {
+    for (const project of projects) {
+      onRequestGitLog(project.path);
+    }
+  }, [projects, onRequestGitLog]);
+
   // Chat/voice state
   const [chatAgentId, setChatAgentId] = useState<string | null>(null);
   const [chatText, setChatText] = useState('');
@@ -476,17 +483,11 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                             onCreateAgentForWorktree?.(project.id, wt.path);
                             return;
                           }
-                          if (agents.length === 1) {
-                            // Single agent: navigate directly
-                            animateBack();
-                            setTimeout(() => onSelectAgent(agents[0].id), 300);
-                          } else {
-                            // Multiple agents: toggle expanded space
-                            setExpandedWorktree(isExpanded ? null : wt.path);
-                          }
+                          // Toggle expanded agent card(s)
+                          setExpandedWorktree(isExpanded ? null : wt.path);
                         }}
                       >
-                        <View style={[styles.branchDot, wt.isMain && styles.branchDotMain, !hasAgents && styles.branchDotInactive]} />
+                        <View style={[styles.branchDot, hasAgents && styles.branchDotActive, !hasAgents && styles.branchDotInactive]} />
                         <Text style={[styles.branchName, !hasAgents && styles.branchNameInactive]} numberOfLines={1}>
                           {wt.branch}
                         </Text>
@@ -505,7 +506,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                         </View>
                       </TouchableOpacity>
 
-                      {isExpanded && agents.length > 1 && (
+                      {isExpanded && hasAgents && (
                         <View style={styles.spaceContainer}>
                           <View style={agents.length <= 2 ? styles.spaceStack : styles.spaceGrid}>
                             {agents.map(agent => (
@@ -599,7 +600,6 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                 projects={projects}
                 gitLogMap={gitLogMap}
                 gitLogLoading={gitLogLoading}
-                onRequestGitLog={onRequestGitLog}
               />
             </View>
 
@@ -609,7 +609,6 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                 projects={projects}
                 gitLogMap={gitLogMap}
                 gitLogLoading={gitLogLoading}
-                onRequestGitLog={onRequestGitLog}
               />
             </View>
           </ScrollView>
@@ -865,7 +864,7 @@ const styles = StyleSheet.create({
     borderRadius: 3,
     backgroundColor: '#555',
   },
-  branchDotMain: {
+  branchDotActive: {
     backgroundColor: '#22c55e',
   },
   branchDotInactive: {
