@@ -1,4 +1,4 @@
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -17,49 +17,32 @@ function findBinary(envVar, localName) {
   return localName;
 }
 
-function makeAutoOption(type) {
-  if (type === 'codex') {
-    return {
-      value: 'auto',
-      label: 'Auto (Recommended)',
-      note: 'Use account-compatible Codex default model',
-    };
-  }
-  return {
-    value: 'auto',
-    label: 'Auto (Recommended)',
-    note: 'Use provider default model',
-  };
+function capitalizeToken(token) {
+  if (!token) return token;
+  const lower = token.toLowerCase();
+  if (lower === 'gpt') return 'GPT';
+  if (lower === 'claude') return 'Claude';
+  if (/^\d+(\.\d+)?$/.test(token)) return token;
+  return lower.charAt(0).toUpperCase() + lower.slice(1);
 }
 
-function parseClaudeAliasesFromHelp() {
-  const claudePath = findBinary('CLAUDE_PATH', 'claude');
-  try {
-    const help = execFileSync(claudePath, ['--help'], {
-      encoding: 'utf-8',
-      timeout: 5000,
-    });
-    const line = help.split('\n').find(l => l.includes('--model <model>')) || '';
-    const aliasRegex = /'([a-z0-9-]+)'/g;
-    const out = [];
-    let match;
-    while ((match = aliasRegex.exec(line)) !== null) {
-      const value = match[1];
-      // Skip full IDs; only keep short aliases from the docs line.
-      if (value.startsWith('claude-')) continue;
-      out.push(value);
+function formatModelLabel(type, value) {
+  if (!value || value === 'auto') return 'Auto (Recommended)';
+
+  if (type === 'claude') {
+    const m = value.match(/^claude-([a-z0-9]+)-(\d+)-(\d+)(?:-\d{8})?$/i);
+    if (m) {
+      const family = capitalizeToken(m[1]);
+      return `Claude ${family} ${m[2]}.${m[3]}`;
     }
-    return [...new Set(out)];
-  } catch {
-    return [];
   }
-}
 
-function formatClaudeModelLabel(model) {
-  const m = model.match(/^claude-([a-z0-9_]+)-(\d+)-(\d+)/);
-  if (!m) return model;
-  const family = m[1].charAt(0).toUpperCase() + m[1].slice(1);
-  return `Claude ${family} ${m[2]}.${m[3]}`;
+  const parts = value.split('-').filter(Boolean);
+  if (parts.length >= 2 && parts[0].toLowerCase() === 'gpt' && /^\d/.test(parts[1])) {
+    const tail = parts.slice(2).map(capitalizeToken).join(' ');
+    return `GPT-${parts[1]}${tail ? ` ${tail}` : ''}`;
+  }
+  return parts.map(capitalizeToken).join(' ') || value;
 }
 
 function scanClaudeModelsFromSessions(limit = 50) {
@@ -128,7 +111,7 @@ function scanClaudeModelsFromSessions(limit = 50) {
     .filter(value => typeof value === 'string' && value.length > 0 && !value.startsWith('<') && !value.includes('synthetic'))
     .map(value => ({
       value,
-      label: formatClaudeModelLabel(value),
+      label: formatModelLabel('claude', value),
     }));
 
   return models;
@@ -218,14 +201,19 @@ async function listCodexModels() {
         });
         notify('initialized', {});
         const modelResult = await request('model/list', {});
-        const raw = Array.isArray(modelResult?.data)
-          ? modelResult.data
-          : (Array.isArray(modelResult) ? modelResult : []);
+        const collections = [
+          modelResult,
+          modelResult?.data,
+          modelResult?.models,
+          modelResult?.items,
+          modelResult?.data?.models,
+          modelResult?.data?.items,
+        ];
+        const raw = collections.flatMap((c) => (Array.isArray(c) ? c : []));
         const mapped = raw
           .map((m) => ({
-            value: m?.model || m?.id,
-            label: m?.displayName || m?.model || m?.id,
-            note: typeof m?.description === 'string' ? m.description : undefined,
+            value: m?.model || m?.id || m?.name || m?.slug,
+            label: m?.model || m?.id || m?.name || m?.slug,
           }))
           .filter((m) => typeof m.value === 'string' && m.value.length > 0);
         cleanup();
@@ -244,45 +232,39 @@ export async function listModelsForAgentType(type) {
     return cached.models;
   }
 
-  let options = [makeAutoOption(type)];
+  let options = [];
 
   try {
     if (type === 'codex') {
       const codex = await listCodexModels();
-      const seen = new Set(options.map(m => m.value));
+      const seen = new Set();
       for (const m of codex) {
         if (seen.has(m.value)) continue;
         seen.add(m.value);
-        options.push(m);
+        options.push({
+          value: m.value,
+          label: formatModelLabel('codex', m.value),
+        });
       }
     } else if (type === 'claude') {
       const discovered = scanClaudeModelsFromSessions();
-      const seen = new Set(options.map(m => m.value));
-      // Surface environment override first if present.
+      const seen = new Set();
+
+      // Include explicit env override when set.
       const envModel = process.env.CLAUDE_MODEL?.trim();
       if (envModel && !seen.has(envModel)) {
         seen.add(envModel);
         options.push({
           value: envModel,
-          label: formatClaudeModelLabel(envModel),
-          note: 'Configured via CLAUDE_MODEL',
+          label: formatModelLabel('claude', envModel),
         });
       }
       for (const m of discovered) {
         if (seen.has(m.value)) continue;
         seen.add(m.value);
-        options.push(m);
-      }
-
-      // Use aliases advertised by the installed CLI help text.
-      // This keeps options fresh across CLI updates without hardcoding names.
-      for (const alias of parseClaudeAliasesFromHelp()) {
-        if (seen.has(alias)) continue;
-        seen.add(alias);
         options.push({
-          value: alias,
-          label: alias.charAt(0).toUpperCase() + alias.slice(1),
-          note: 'CLI model alias',
+          value: m.value,
+          label: formatModelLabel('claude', m.value),
         });
       }
     }
