@@ -335,13 +335,13 @@ function AppInner() {
     );
   }
 
-  // Dashboard + Agent detail (layered so dashboard is visible during swipe-back)
-  if (screen === 'dashboard' || (screen === 'agent' && selectedAgentId)) {
+  // Dashboard + overlays (layered so dashboard is visible during swipe-back)
+  if (screen === 'dashboard' || (screen === 'agent' && selectedAgentId) || screen === 'settings') {
     return (
       <View style={styles.container}>
         <StatusBar style="light" />
         <SafeAreaView style={styles.safeTop} />
-        <View style={styles.layerBase} pointerEvents={screen === 'agent' ? 'none' : 'auto'}>
+        <View style={styles.layerBase} pointerEvents={screen === 'dashboard' ? 'auto' : 'none'}>
           <Dashboard
             connectionStatus={connectionStatus}
             projects={projects}
@@ -367,6 +367,15 @@ function AppInner() {
             />
           </View>
         )}
+        {screen === 'settings' && (
+          <View style={styles.layerOverlay} pointerEvents="box-none">
+            <SafeAreaView style={styles.safeTop} />
+            <SettingsScreen
+              onBack={handleBackFromSettings}
+              onUnpair={handleUnpair}
+            />
+          </View>
+        )}
         <CreateAgentModal
           visible={showCreateModal && screen === 'dashboard'}
           projects={projects}
@@ -376,20 +385,6 @@ function AppInner() {
           onRequestProjects={handleRequestProjects}
           onCreateWorktree={handleCreateWorktree}
           onUnregisterProject={handleUnregisterProject}
-        />
-      </View>
-    );
-  }
-
-  // Settings
-  if (screen === 'settings') {
-    return (
-      <View style={styles.container}>
-        <StatusBar style="light" />
-        <SafeAreaView style={styles.safeTop} />
-        <SettingsScreen
-          onBack={handleBackFromSettings}
-          onUnpair={handleUnpair}
         />
       </View>
     );

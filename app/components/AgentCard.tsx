@@ -15,7 +15,7 @@ import Svg, { Path } from 'react-native-svg';
 import { useSettings } from '../state/SettingsContext';
 import type { AgentState, AgentStatus, AgentType, AgentMessage, ContentBlock, Project } from '../state/types';
 
-export type CardLayout = 'full' | 'grid';
+export type CardLayout = 'full' | 'grid' | 'page';
 
 interface AgentCardProps {
   agent: AgentState;
@@ -177,7 +177,7 @@ function ChevronRight({ size = 12, color = '#555' }: { size?: number; color?: st
 }
 
 export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, onChat, layout = 'grid' }: AgentCardProps) {
-  const isFull = layout === 'full';
+  const isFull = layout === 'full' || layout === 'page';
   const scrollRef = useRef<ScrollView>(null);
   const [bodyHeight, setBodyHeight] = useState(0);
   const [showMenu, setShowMenu] = useState(false);
@@ -209,7 +209,9 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
   }, [isFull, terminalContent]);
 
   const cardStyle: ViewStyle[] = [styles.card];
-  if (isFull) {
+  if (layout === 'page') {
+    cardStyle.push(styles.cardPage);
+  } else if (isFull) {
     cardStyle.push(styles.cardFull);
   }
 
@@ -463,6 +465,13 @@ const styles = StyleSheet.create({
     padding: 16,
     margin: 0,
     marginBottom: 0,
+  },
+  cardPage: {
+    flex: 1,
+    minHeight: 0,
+    padding: 14,
+    margin: 0,
+    marginBottom: 6,
   },
   cardTappable: {
     flex: 1,

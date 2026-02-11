@@ -17,7 +17,7 @@ import Svg, { Path } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
 import { useAgent, useAgentState } from '../state/AgentContext';
 import type { ConnectionStatus, PermissionRequest } from '../types';
-import type { AgentMessage, AgentType, Project } from '../state/types';
+import type { AgentType, Project } from '../state/types';
 import { KeyboardScrollView } from './KeyboardScrollView';
 import { MessageBubble, buildToolResultMap } from './MessageBubble';
 import { InputBar } from './InputBar';
@@ -305,7 +305,13 @@ export function AgentDetailScreen({
       return projects.find(p => p.name === agent.projectName) || null;
     }
     return null;
-  }, [agent?.cwd, agent?.projectName, projects]);
+  }, [agent, projects]);
+
+  // Build a global toolUseId → result map across ALL messages
+  const toolResultMap = useMemo(
+    () => agent ? buildToolResultMap(agent.messages) : new Map(),
+    [agent],
+  );
 
   if (!agent) {
     return (
@@ -328,12 +334,6 @@ export function AgentDetailScreen({
   const isDisabled = connectionStatus !== 'connected' || agent.status === 'exited';
   const permissions = Array.from(agent.pendingPermissions.values());
   const modelDisplayName = formatModelName(agent.model, agent.type);
-
-  // Build a global toolUseId → result map across ALL messages
-  const toolResultMap = useMemo(
-    () => buildToolResultMap(agent.messages),
-    [agent.messages],
-  );
 
   // Build project/branch subtitle
   const subtitle = agent.projectName
