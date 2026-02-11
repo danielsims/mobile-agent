@@ -71,6 +71,27 @@ export class AgentSession {
     this._onBroadcast = fn;
   }
 
+  /**
+   * Check if the git branch has changed and broadcast an update if so.
+   * Called after each agent turn completes rather than polling.
+   */
+  _checkBranchChange() {
+    if (!this.cwd) return;
+    try {
+      const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+        cwd: this.cwd, encoding: 'utf-8', timeout: 3000,
+      }).trim();
+      if (branch && branch !== this.gitBranch) {
+        this.gitBranch = branch;
+        this._broadcast('agentUpdated', {
+          agentId: this.id,
+          gitBranch: this.gitBranch,
+        });
+        console.log(`[Agent ${this.id.slice(0, 8)}] Branch changed to: ${branch}`);
+      }
+    } catch { /* git not available or not a repo */ }
+  }
+
   _broadcast(type, data = {}) {
     if (this._onBroadcast) {
       this._onBroadcast(this.id, type, data);
@@ -319,6 +340,9 @@ export class AgentSession {
           outputTokens: this.outputTokens,
           contextUsedPercent: this.contextUsedPercent,
         });
+
+        // Check if the branch changed during this turn
+        this._checkBranchChange();
         break;
       }
 
@@ -425,6 +449,9 @@ export class AgentSession {
   }
 
   sendPrompt(text) {
+    // Check if branch changed since last interaction
+    this._checkBranchChange();
+
     if (!this.sessionName) {
       this.sessionName = text.slice(0, 60) + (text.length > 60 ? '...' : '');
       this._broadcast('agentUpdated', { agentId: this.id, sessionName: this.sessionName });

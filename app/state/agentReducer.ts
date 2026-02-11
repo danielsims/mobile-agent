@@ -155,10 +155,26 @@ export function agentReducer(state: AppState, action: AgentAction): AppState {
     }
 
     case 'SET_MESSAGES': {
-      return updateAgent(state, action.agentId, (agent) => ({
-        ...agent,
-        messages: action.messages,
-      }));
+      return updateAgent(state, action.agentId, (agent) => {
+        // Derive lastOutput from the last assistant message so card previews work
+        let lastOutput = agent.lastOutput;
+        for (let i = action.messages.length - 1; i >= 0; i--) {
+          const msg = action.messages[i];
+          if (msg.type === 'assistant') {
+            if (typeof msg.content === 'string') {
+              lastOutput = msg.content.slice(-500);
+            } else if (Array.isArray(msg.content)) {
+              const text = msg.content
+                .filter((b): b is { type: 'text'; text: string } => b.type === 'text' && 'text' in b)
+                .map(b => b.text)
+                .join('\n');
+              if (text) lastOutput = text.slice(-500);
+            }
+            break;
+          }
+        }
+        return { ...agent, messages: action.messages, lastOutput };
+      });
     }
 
     case 'ADD_PERMISSION': {

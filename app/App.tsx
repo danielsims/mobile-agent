@@ -33,7 +33,7 @@ function AppInner() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(false);
 
-  const { state, dispatch, handleServerMessage } = useAgentState();
+  const { state, dispatch, handleServerMessage, loadCachedMessages } = useAgentState();
   const { notifyTaskComplete } = useNotifications();
   const { play: playChime } = useCompletionChime();
 
@@ -48,16 +48,21 @@ function AppInner() {
   stateRef.current = state;
   const handleServerMessageRef = useRef(handleServerMessage);
   handleServerMessageRef.current = handleServerMessage;
+  const loadCachedMessagesRef = useRef(loadCachedMessages);
+  loadCachedMessagesRef.current = loadCachedMessages;
   const sendRef = useRef<(type: string, data?: Record<string, unknown>) => boolean>(() => false);
 
   const onWsMessage = useCallback((msg: import('./state/types').ServerMessage) => {
     handleServerMessageRef.current(msg);
 
-    // On initial connect, request history for all agents so dashboard cards show content
-    // and fetch projects so agent card favicons are available immediately
+    // On initial connect, load cached messages first, then fetch from server only if needed
     if (msg.type === 'connected' && msg.agents) {
       for (const agent of msg.agents) {
-        sendRef.current('getHistory', { agentId: agent.id });
+        loadCachedMessagesRef.current(agent.id).then((hadCache) => {
+          if (!hadCache) {
+            sendRef.current('getHistory', { agentId: agent.id });
+          }
+        });
       }
       sendRef.current('listProjects');
     }
@@ -224,8 +229,12 @@ function AppInner() {
     setSelectedAgentId(agentId);
     setScreen('agent');
 
-    // Request history for this agent
-    send('getHistory', { agentId });
+    // Load cached messages in background — only fetch from server if cache was empty
+    loadCachedMessages(agentId).then((hadCache) => {
+      if (!hadCache) {
+        send('getHistory', { agentId });
+      }
+    });
   };
 
   const handleSendMessage = (agentId: string, text: string) => {

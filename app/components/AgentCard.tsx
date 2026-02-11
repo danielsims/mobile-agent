@@ -232,7 +232,7 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
 
   // Build terminal content from messages
   const terminalContent = useMemo(() => {
-    if (isFull) {
+    if (isFull && agent.messages.length > 0) {
       return agent.messages
         .map(msg => extractMessageText(msg))
         .filter(Boolean)

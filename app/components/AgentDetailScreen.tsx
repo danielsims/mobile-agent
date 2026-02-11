@@ -195,6 +195,8 @@ export function AgentDetailScreen({
   const agent = useAgent(agentId);
   const { dispatch } = useAgentState();
   const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const INITIAL_MESSAGE_WINDOW = 30;
+  const [messageWindow, setMessageWindow] = useState(INITIAL_MESSAGE_WINDOW);
 
   // Swipe-from-left-edge to go back
   const swipeX = useRef(new Animated.Value(0)).current;
@@ -365,6 +367,15 @@ export function AgentDetailScreen({
     [agent],
   );
 
+  // Only render the last N messages for performance
+  const visibleMessages = useMemo(() => {
+    if (!agent) return [];
+    const msgs = agent.messages;
+    if (msgs.length <= messageWindow) return msgs;
+    return msgs.slice(msgs.length - messageWindow);
+  }, [agent, messageWindow]);
+  const hasHiddenMessages = agent ? agent.messages.length > messageWindow : false;
+
   if (!agent) {
     return (
       <View style={styles.overlay}>
@@ -500,9 +511,21 @@ export function AgentDetailScreen({
             {agent.messages.length === 0 ? (
               <Text style={styles.placeholder}>Send a message to start...</Text>
             ) : (
-              agent.messages.map((msg) => (
-                <MessageBubble key={msg.id} message={msg} toolResultMap={toolResultMap} />
-              ))
+              <>
+                {hasHiddenMessages && (
+                  <TouchableOpacity
+                    style={styles.loadMoreBtn}
+                    onPress={() => setMessageWindow(w => w + 50)}
+                  >
+                    <Text style={styles.loadMoreText}>
+                      Load earlier messages ({agent.messages.length - messageWindow} hidden)
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                {visibleMessages.map((msg, idx) => (
+                  <MessageBubble key={`${msg.id}-${idx}`} message={msg} toolResultMap={toolResultMap} />
+                ))}
+              </>
             )}
 
             {/* Pending permissions */}
@@ -714,6 +737,16 @@ const styles = StyleSheet.create({
     fontSize: 14,
     textAlign: 'center',
     marginTop: 40,
+  },
+  loadMoreBtn: {
+    alignSelf: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    marginBottom: 12,
+  },
+  loadMoreText: {
+    color: '#666',
+    fontSize: 13,
   },
   emptyContainer: {
     flex: 1,
