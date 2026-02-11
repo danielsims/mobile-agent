@@ -4,7 +4,7 @@ import { basename } from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
 
 const MAX_HISTORY = 200;
-const MAX_LAST_OUTPUT = 500;
+const MAX_LAST_OUTPUT = 2000;
 
 let historyMsgSeq = 0;
 function nextHistoryId(suffix) {
@@ -65,10 +65,33 @@ export class AgentSession {
     if (transcript.messages?.length > 0) {
       this.messageHistory = transcript.messages;
     }
+    // Mark as initialized so status normalizes correctly (connected → idle)
+    this._initialized = true;
   }
 
   setOnBroadcast(fn) {
     this._onBroadcast = fn;
+  }
+
+  /**
+   * Check if the git branch has changed and broadcast an update if so.
+   * Called after each agent turn completes rather than polling.
+   */
+  _checkBranchChange() {
+    if (!this.cwd) return;
+    try {
+      const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+        cwd: this.cwd, encoding: 'utf-8', timeout: 3000,
+      }).trim();
+      if (branch && branch !== this.gitBranch) {
+        this.gitBranch = branch;
+        this._broadcast('agentUpdated', {
+          agentId: this.id,
+          gitBranch: this.gitBranch,
+        });
+        console.log(`[Agent ${this.id.slice(0, 8)}] Branch changed to: ${branch}`);
+      }
+    } catch { /* git not available or not a repo */ }
   }
 
   _broadcast(type, data = {}) {
@@ -78,6 +101,11 @@ export class AgentSession {
   }
 
   _setStatus(status) {
+    // Normalize 'connected' to 'idle' for initialized agents —
+    // 'connected' just means CLI socket attached, not actively working
+    if (status === 'connected' && this._initialized) {
+      status = 'idle';
+    }
     this.status = status;
     this._broadcast('agentUpdated', { agentId: this.id, status });
   }
@@ -152,7 +180,8 @@ export class AgentSession {
    */
   attachCliSocket(ws) {
     this._cliSocket = ws;
-    this._setStatus('connected');
+    // If already initialized, go straight to idle (not 'connected')
+    this._setStatus(this._initialized ? 'idle' : 'connected');
     console.log(`[Agent ${this.id.slice(0, 8)}] CLI WebSocket attached`);
 
     ws.on('message', (data) => {
@@ -319,6 +348,9 @@ export class AgentSession {
           outputTokens: this.outputTokens,
           contextUsedPercent: this.contextUsedPercent,
         });
+
+        // Check if the branch changed during this turn
+        this._checkBranchChange();
         break;
       }
 
@@ -425,6 +457,9 @@ export class AgentSession {
   }
 
   sendPrompt(text) {
+    // Check if branch changed since last interaction
+    this._checkBranchChange();
+
     if (!this.sessionName) {
       this.sessionName = text.slice(0, 60) + (text.length > 60 ? '...' : '');
       this._broadcast('agentUpdated', { agentId: this.id, sessionName: this.sessionName });

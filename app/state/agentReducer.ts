@@ -1,4 +1,4 @@
-import type { AppState, AgentState, AgentAction, AgentSnapshot, PermissionRequest } from './types';
+import type { AppState, AgentState, AgentAction, AgentMessage, AgentSnapshot, PermissionRequest } from './types';
 
 let messageIdCounter = 0;
 
@@ -14,6 +14,26 @@ function permissionsArrayToMap(perms: AgentSnapshot['pendingPermissions']): Map<
     }
   }
   return map;
+}
+
+function deriveLastOutput(messages: AgentMessage[], fallback: string): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.type === 'assistant') {
+      if (typeof msg.content === 'string') {
+        return msg.content.slice(-2000);
+      }
+      if (Array.isArray(msg.content)) {
+        const text = msg.content
+          .filter((b): b is { type: 'text'; text: string } => b.type === 'text' && 'text' in b)
+          .map(b => b.text)
+          .join('\n');
+        if (text) return text.slice(-2000);
+      }
+      break;
+    }
+  }
+  return fallback;
 }
 
 function snapshotToAgentState(snapshot: AgentSnapshot): AgentState {
@@ -146,8 +166,8 @@ export function agentReducer(state: AppState, action: AgentAction): AppState {
 
         // Update lastOutput rolling preview
         let lastOutput = agent.lastOutput + action.text;
-        if (lastOutput.length > 500) {
-          lastOutput = lastOutput.slice(-500);
+        if (lastOutput.length > 2000) {
+          lastOutput = lastOutput.slice(-2000);
         }
 
         return { ...agent, messages: msgs, lastOutput };
@@ -158,7 +178,22 @@ export function agentReducer(state: AppState, action: AgentAction): AppState {
       return updateAgent(state, action.agentId, (agent) => ({
         ...agent,
         messages: action.messages,
+        lastOutput: deriveLastOutput(action.messages, agent.lastOutput),
       }));
+    }
+
+    case 'BATCH_SET_MESSAGES': {
+      const newAgents = new Map(state.agents);
+      for (const { agentId, messages } of action.batch) {
+        const agent = newAgents.get(agentId);
+        if (!agent) continue;
+        newAgents.set(agentId, {
+          ...agent,
+          messages,
+          lastOutput: deriveLastOutput(messages, agent.lastOutput),
+        });
+      }
+      return { ...state, agents: newAgents };
     }
 
     case 'ADD_PERMISSION': {

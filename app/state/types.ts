@@ -97,6 +97,7 @@ export type AgentAction =
   | { type: 'ADD_MESSAGE'; agentId: string; message: AgentMessage }
   | { type: 'APPEND_STREAM_CONTENT'; agentId: string; text: string }
   | { type: 'SET_MESSAGES'; agentId: string; messages: AgentMessage[] }
+  | { type: 'BATCH_SET_MESSAGES'; batch: Array<{ agentId: string; messages: AgentMessage[] }> }
   | { type: 'ADD_PERMISSION'; agentId: string; permission: PermissionRequest }
   | { type: 'REMOVE_PERMISSION'; agentId: string; requestId: string }
   | { type: 'SET_SESSION_INFO'; agentId: string; sessionId?: string; model?: string; tools?: string[]; sessionName?: string; status?: AgentStatus; cwd?: string; gitBranch?: string; projectName?: string; autoApprove?: boolean }
