@@ -54,7 +54,7 @@ export class CodexDriver extends BaseDriver {
     this._initialized = false;
     this._model = process.env.CODEX_MODEL?.trim() || null;
     this._approvalPolicy = 'untrusted'; // 'untrusted' | 'on-request' | 'on-failure' | 'never'
-    this._sandboxMode = 'read-only'; // 'read-only' | 'workspace-write' | 'danger-full-access'
+    this._sandboxMode = 'workspace-write'; // 'read-only' | 'workspace-write' | 'danger-full-access'
     this._workspaceWritableRoots = [];
     this._currentStreamContent = '';
     this._activeToolUseIds = new Set();  // tool items currently in progress (web search, etc.)
@@ -605,8 +605,8 @@ export class CodexDriver extends BaseDriver {
     const modeMap = {
       // Auto mode: allow sandboxed writes by default, escalate when needed.
       bypassPermissions: { approvalPolicy: 'on-failure', sandboxMode: 'workspace-write' },
-      // Ask mode: force explicit permission path before writes.
-      default: { approvalPolicy: 'untrusted', sandboxMode: 'read-only' },
+      // Ask mode: stricter prompts while still permitting approved writes.
+      default: { approvalPolicy: 'untrusted', sandboxMode: 'workspace-write' },
     };
     const mapped = modeMap[mode];
     if (mapped) {

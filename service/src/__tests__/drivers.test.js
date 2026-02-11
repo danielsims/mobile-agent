@@ -1019,7 +1019,8 @@ describe('CodexDriver', () => {
       expect(msg.params.input).toEqual([{ type: 'text', text: 'Fix the bug' }]);
       expect(msg.params.approvalPolicy).toBe('untrusted');
       expect(msg.params.sandboxPolicy).toEqual({
-        type: 'readOnly',
+        type: 'workspaceWrite',
+        networkAccess: false,
       });
 
       // Resolve the request
@@ -1160,10 +1161,10 @@ describe('CodexDriver', () => {
       expect(driver._sandboxMode).toBe('workspace-write');
     });
 
-    it('maps default to untrusted with read-only sandbox', async () => {
+    it('maps default to untrusted with workspace-write sandbox', async () => {
       await driver.setPermissionMode('default');
       expect(driver._approvalPolicy).toBe('untrusted');
-      expect(driver._sandboxMode).toBe('read-only');
+      expect(driver._sandboxMode).toBe('workspace-write');
     });
   });
 
