@@ -243,7 +243,7 @@ describe('ClaudeDriver', () => {
       expect(initEvent.data.projectName).toBe('project');
     });
 
-    it('emits running status after init', () => {
+    it('does not emit running status from init alone', () => {
       const ws = createMockWebSocket();
       driver.attachSocket(ws);
 
@@ -255,8 +255,8 @@ describe('ClaudeDriver', () => {
       }));
 
       const statusEvents = events.filter(e => e.event === 'status');
-      // Should have 'connected' (from attach) then 'running' (from init)
-      expect(statusEvents.some(e => e.data.status === 'running')).toBe(true);
+      // Init should not imply an active turn.
+      expect(statusEvents.some(e => e.data.status === 'running')).toBe(false);
     });
   });
 
@@ -526,6 +526,21 @@ describe('ClaudeDriver', () => {
     });
   });
 
+  describe('Interrupt', () => {
+    it('sends interrupt control request', async () => {
+      const ws = createMockWebSocket();
+      driver.attachSocket(ws);
+
+      await driver.interrupt();
+
+      expect(ws.send).toHaveBeenCalledOnce();
+      const sent = JSON.parse(ws.send.mock.calls[0][0].trim());
+      expect(sent.type).toBe('control_request');
+      expect(sent.request.subtype).toBe('interrupt');
+      expect(typeof sent.request_id).toBe('string');
+    });
+  });
+
   describe('Cleanup', () => {
     it('closes socket and marks not ready on stop', async () => {
       const ws = createMockWebSocket();
@@ -762,6 +777,89 @@ describe('CodexDriver', () => {
         text: 'I should check the tests first',
       });
     });
+
+    it('extracts thinking text from reasoning summary payloads', () => {
+      driver._handleMessage({
+        method: 'item/completed',
+        params: {
+          item: {
+            type: 'reasoning',
+            summary: [{ type: 'summary_text', text: '**Planning file update**' }],
+            content: null,
+          },
+        },
+      });
+
+      const msgEvent = events.find(e => e.event === 'message');
+      expect(msgEvent).toBeTruthy();
+      expect(msgEvent.data.content[0]).toEqual({
+        type: 'thinking',
+        text: 'Planning file update',
+      });
+    });
+
+    it('extracts thinking text from string summary arrays', () => {
+      driver._handleMessage({
+        method: 'item/completed',
+        params: {
+          item: {
+            type: 'reasoning',
+            summary: ['**Checking references**'],
+            content: [],
+          },
+        },
+      });
+
+      const msgEvent = events.find(e => e.event === 'message');
+      expect(msgEvent).toBeTruthy();
+      expect(msgEvent.data.content[0]).toEqual({
+        type: 'thinking',
+        text: 'Checking references',
+      });
+    });
+
+    it('emits tool_use on web search start and tool_result on completion', () => {
+      driver._handleMessage({
+        method: 'item/started',
+        params: {
+          item: {
+            type: 'webSearch',
+            id: 'ws-1',
+            query: '',
+            action: { type: 'other' },
+          },
+        },
+      });
+
+      driver._handleMessage({
+        method: 'item/completed',
+        params: {
+          item: {
+            type: 'webSearch',
+            id: 'ws-1',
+            query: 'openai models',
+            action: {
+              type: 'search',
+              query: 'openai models',
+              queries: ['openai models', 'openai latest model'],
+            },
+          },
+        },
+      });
+
+      const messageEvents = events.filter(e => e.event === 'message');
+      expect(messageEvents.length).toBeGreaterThanOrEqual(2);
+
+      const startMsg = messageEvents[0];
+      expect(startMsg.data.content[0].type).toBe('tool_use');
+      expect(startMsg.data.content[0].name).toBe('web_search');
+      expect(startMsg.data.content[0].id).toBe('ws-1');
+
+      const endMsg = messageEvents[1];
+      expect(endMsg.data.content[0].type).toBe('tool_result');
+      expect(endMsg.data.content[0].toolUseId).toBe('ws-1');
+      expect(endMsg.data.content[0].content).toContain('Query: openai models');
+    });
   });
 
   describe('Message handling (permissions)', () => {
@@ -798,6 +896,52 @@ describe('CodexDriver', () => {
       expect(permEvent).toBeTruthy();
       expect(permEvent.data.toolName).toBe('file_change');
       expect(permEvent.data.toolInput.file).toBe('/etc/hosts');
+    });
+  });
+
+  describe('Message handling (dynamic tool server requests)', () => {
+    it('responds to unsupported item/tool/call with a failure result', () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+
+      driver._handleMessage({
+        id: 'srv-tool-1',
+        method: 'item/tool/call',
+        params: {
+          threadId: 'thread-1',
+          turnId: '0',
+          callId: 'call-1',
+          tool: 'custom_tool',
+          arguments: { foo: 'bar' },
+        },
+      });
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.jsonrpc).toBe('2.0');
+      expect(msg.id).toBe('srv-tool-1');
+      expect(msg.result.success).toBe(false);
+      expect(Array.isArray(msg.result.contentItems)).toBe(true);
+    });
+
+    it('responds to item/tool/requestUserInput with empty answers', () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+
+      driver._handleMessage({
+        id: 'srv-input-1',
+        method: 'item/tool/requestUserInput',
+        params: {
+          threadId: 'thread-1',
+          turnId: '0',
+          itemId: 'item-1',
+          questions: [{ id: 'q1', header: 'Q1', question: 'Continue?' }],
+        },
+      });
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.jsonrpc).toBe('2.0');
+      expect(msg.id).toBe('srv-input-1');
+      expect(msg.result).toEqual({ answers: {} });
     });
   });
 
@@ -873,6 +1017,7 @@ describe('CodexDriver', () => {
       expect(msg.method).toBe('turn/start');
       expect(msg.params.threadId).toBe('thread-123');
       expect(msg.params.input).toEqual([{ type: 'text', text: 'Fix the bug' }]);
+      expect(msg.params.approvalPolicy).toBe('on-request');
 
       // Resolve the request
       driver._handleMessage({ id: msg.id, result: {} });
@@ -890,12 +1035,13 @@ describe('CodexDriver', () => {
   });
 
   describe('Permission response', () => {
-    it('sends approval for command execution', async () => {
+    it('responds to server approval requests using JSON-RPC response objects', async () => {
       const proc = createMockProcess();
       driver._process = proc;
 
-      // Simulate an incoming approval request
+      // Simulate an incoming server request (msg.id + method).
       driver._handleMessage({
+        id: 'srv-123',
         method: 'item/commandExecution/requestApproval',
         params: { itemId: 'cmd-1', parsedCmd: { cmd: 'npm', args: ['install'] } },
       });
@@ -905,9 +1051,27 @@ describe('CodexDriver', () => {
       const requestId = permEvent.data.requestId;
 
       // Respond with approval
+      await driver.respondPermission(requestId, 'allow');
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.jsonrpc).toBe('2.0');
+      expect(msg.id).toBe('srv-123');
+      expect(msg.result.decision).toBe('accept');
+    });
+
+    it('falls back to legacy item/approve when approval arrives without server request id', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+
+      driver._handleMessage({
+        method: 'item/commandExecution/requestApproval',
+        params: { itemId: 'cmd-1', parsedCmd: { cmd: 'npm', args: ['install'] } },
+      });
+
+      const permEvent = events.find(e => e.event === 'permission');
+      const requestId = permEvent.data.requestId;
+
       const promise = driver.respondPermission(requestId, 'allow');
 
-      // Resolve the RPC
       const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
       expect(msg.method).toBe('item/approve');
       expect(msg.params.itemId).toBe('cmd-1');
@@ -922,18 +1086,17 @@ describe('CodexDriver', () => {
       driver._process = proc;
 
       driver._handleMessage({
+        id: 'srv-456',
         method: 'item/commandExecution/requestApproval',
         params: { itemId: 'cmd-2', parsedCmd: { cmd: 'rm', args: ['-rf', '/'] } },
       });
 
       const permEvent = events.find(e => e.event === 'permission');
-      const promise = driver.respondPermission(permEvent.data.requestId, 'deny');
+      await driver.respondPermission(permEvent.data.requestId, 'deny');
 
       const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
-      expect(msg.params.decision).toBe('decline');
-
-      driver._handleMessage({ id: msg.id, result: {} });
-      await promise;
+      expect(msg.id).toBe('srv-456');
+      expect(msg.result.decision).toBe('decline');
     });
   });
 

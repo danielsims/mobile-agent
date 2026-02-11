@@ -174,6 +174,34 @@ export function agentReducer(state: AppState, action: AgentAction): AppState {
       });
     }
 
+    case 'FINALIZE_ASSISTANT_MESSAGE': {
+      return updateAgent(state, action.agentId, (agent) => {
+        const msgs = [...agent.messages];
+        const last = msgs[msgs.length - 1];
+
+        if (last && last.type === 'assistant' && typeof last.content === 'string') {
+          msgs[msgs.length - 1] = {
+            ...last,
+            content: action.content,
+            timestamp: action.timestamp,
+          };
+        } else {
+          msgs.push({
+            id: nextMessageId(),
+            type: 'assistant',
+            content: action.content,
+            timestamp: action.timestamp,
+          });
+        }
+
+        return {
+          ...agent,
+          messages: msgs,
+          lastOutput: deriveLastOutput(msgs, agent.lastOutput),
+        };
+      });
+    }
+
     case 'SET_MESSAGES': {
       return updateAgent(state, action.agentId, (agent) => ({
         ...agent,

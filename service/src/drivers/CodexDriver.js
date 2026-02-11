@@ -55,9 +55,13 @@ export class CodexDriver extends BaseDriver {
     this._model = process.env.CODEX_MODEL?.trim() || null;
     this._approvalPolicy = 'on-request'; // 'untrusted' | 'on-request' | 'on-failure' | 'never'
     this._currentStreamContent = '';
+    this._activeToolUseIds = new Set();  // tool items currently in progress (web search, etc.)
+    this._lastReasoningText = '';
+    this._lastReasoningAt = 0;
 
-    // Map codex item IDs to our permission request IDs
-    this._approvalRequests = new Map(); // itemId -> requestId
+    // Track pending approval requests keyed by our UI requestId.
+    // entry: { rpcRequestId?: string|number, itemId?: string }
+    this._approvalRequests = new Map();
   }
 
   async start(agentId, opts = {}) {
@@ -199,8 +203,14 @@ export class CodexDriver extends BaseDriver {
   }
 
   _handleMessage(msg) {
+    const isServerRequest =
+      msg?.id != null &&
+      typeof msg?.method === 'string' &&
+      msg?.result == null &&
+      msg?.error == null;
+
     // JSON-RPC responses (have an `id` field matching our request)
-    if (msg.id != null && this._pendingRpc.has(msg.id)) {
+    if (!isServerRequest && msg.id != null && this._pendingRpc.has(msg.id)) {
       const pending = this._pendingRpc.get(msg.id);
       this._pendingRpc.delete(msg.id);
       if (pending.timer) clearTimeout(pending.timer);
@@ -270,6 +280,7 @@ export class CodexDriver extends BaseDriver {
       case 'item/started': {
         const item = params.item || params;
         console.log(`[Codex ${this._agentId?.slice(0, 8)}] Item started: ${item.type} (${item.id})`);
+        this._handleItemStarted(item);
         break;
       }
 
@@ -306,8 +317,11 @@ export class CodexDriver extends BaseDriver {
 
       case 'item/commandExecution/requestApproval': {
         const requestId = uuidv4();
-        const itemId = params.itemId || params.item?.id;
-        this._approvalRequests.set(itemId, requestId);
+        const itemId = params.itemId || params.item?.id || params.id || null;
+        this._approvalRequests.set(requestId, {
+          rpcRequestId: isServerRequest ? msg.id : null,
+          itemId,
+        });
 
         this.emit('permission', {
           requestId,
@@ -324,8 +338,11 @@ export class CodexDriver extends BaseDriver {
 
       case 'item/fileChange/requestApproval': {
         const requestId = uuidv4();
-        const itemId = params.itemId || params.item?.id;
-        this._approvalRequests.set(itemId, requestId);
+        const itemId = params.itemId || params.item?.id || params.id || null;
+        this._approvalRequests.set(requestId, {
+          rpcRequestId: isServerRequest ? msg.id : null,
+          itemId,
+        });
 
         this.emit('permission', {
           requestId,
@@ -346,6 +363,36 @@ export class CodexDriver extends BaseDriver {
 
       case 'turn/plan/updated': {
         // Agent plan — could show in UI
+        break;
+      }
+
+      case 'codex/event/agent_reasoning': {
+        const text = params.msg?.text || params.text || '';
+        this._emitReasoningMessage(text);
+        break;
+      }
+
+      case 'item/tool/call': {
+        // Dynamic tool calls are not implemented by mobile-agent yet.
+        // Respond explicitly so the turn does not stall waiting on output.
+        if (isServerRequest) {
+          this._rpcRespond(msg.id, {
+            success: false,
+            contentItems: [{
+              type: 'inputText',
+              text: 'Dynamic tool calls are not supported by this client.',
+            }],
+          });
+        }
+        break;
+      }
+
+      case 'item/tool/requestUserInput': {
+        // Experimental request-user-input flow is not wired in mobile UI yet.
+        // Reply with an empty answer map so the server can continue gracefully.
+        if (isServerRequest) {
+          this._rpcRespond(msg.id, { answers: {} });
+        }
         break;
       }
 
@@ -426,10 +473,37 @@ export class CodexDriver extends BaseDriver {
       }
 
       case 'reasoning': {
-        const text = item.text || item.content || '';
-        if (text) {
+        const text = this._extractReasoningText(item);
+        this._emitReasoningMessage(text);
+        break;
+      }
+
+      case 'webSearch':
+      case 'web_search': {
+        const toolId = item.id || uuidv4();
+        const resultText = this._formatWebSearchResult(item);
+
+        if (this._activeToolUseIds.has(toolId)) {
+          this._activeToolUseIds.delete(toolId);
           this.emit('message', {
-            content: [{ type: 'thinking', text }],
+            content: [{ type: 'tool_result', toolUseId: toolId, content: resultText }],
+          });
+        } else {
+          // Fallback if start event was missed.
+          this.emit('message', {
+            content: [
+              {
+                type: 'tool_use',
+                id: toolId,
+                name: 'web_search',
+                input: { query: item.query || item.action?.query || '' },
+              },
+              {
+                type: 'tool_result',
+                toolUseId: toolId,
+                content: resultText,
+              },
+            ],
           });
         }
         break;
@@ -453,6 +527,7 @@ export class CodexDriver extends BaseDriver {
       await this._rpcRequest('turn/start', {
         threadId: this._threadId,
         input: [{ type: 'text', text }],
+        approvalPolicy: this._approvalPolicy,
       });
     } catch (err) {
       console.error(`[Codex ${this._agentId?.slice(0, 8)}] turn/start failed:`, err.message);
@@ -462,31 +537,29 @@ export class CodexDriver extends BaseDriver {
   }
 
   async respondPermission(requestId, behavior, updatedInput) {
-    // Find the itemId for this requestId
-    let targetItemId = null;
-    for (const [itemId, rId] of this._approvalRequests) {
-      if (rId === requestId) {
-        targetItemId = itemId;
-        this._approvalRequests.delete(itemId);
-        break;
-      }
-    }
-
-    if (!targetItemId) {
+    const pending = this._approvalRequests.get(requestId);
+    if (!pending) {
       console.log(`[Codex ${this._agentId?.slice(0, 8)}] No approval found for requestId: ${requestId}`);
       return;
     }
+    this._approvalRequests.delete(requestId);
 
     const decision = behavior === 'allow' ? 'accept' : 'decline';
 
-    // Codex uses JSON-RPC request/response for approvals:
-    // The server sent us a request, we respond with { id, result: { decision } }
-    // But since we receive it as a notification, we send back via a separate method
     try {
-      await this._rpcRequest('item/approve', {
-        itemId: targetItemId,
-        decision,
-      });
+      // Current Codex app-server protocol sends approval prompts as server
+      // requests (with msg.id) and expects a JSON-RPC response with the same id.
+      if (pending.rpcRequestId != null) {
+        this._rpcRespond(pending.rpcRequestId, { decision });
+      } else if (pending.itemId) {
+        // Legacy fallback for older app-server variants.
+        await this._rpcRequest('item/approve', {
+          itemId: pending.itemId,
+          decision,
+        });
+      } else {
+        console.log(`[Codex ${this._agentId?.slice(0, 8)}] Missing approval routing metadata for requestId: ${requestId}`);
+      }
     } catch (err) {
       console.error(`[Codex ${this._agentId?.slice(0, 8)}] Approval response failed:`, err.message);
     }
@@ -535,6 +608,7 @@ export class CodexDriver extends BaseDriver {
     this._threadId = null;
     this._turnId = null;
     this._approvalRequests.clear();
+    this._activeToolUseIds.clear();
   }
 
   // --- JSON-RPC helpers ---
@@ -562,6 +636,11 @@ export class CodexDriver extends BaseDriver {
     this._write(msg);
   }
 
+  _rpcRespond(id, result = {}) {
+    const msg = JSON.stringify({ jsonrpc: '2.0', id, result });
+    this._write(msg);
+  }
+
   _write(data) {
     if (!this._process?.stdin?.writable) return;
     this._process.stdin.write(data + '\n');
@@ -585,5 +664,109 @@ export class CodexDriver extends BaseDriver {
         this.emit('init', { gitBranch: branch });
       }
     } catch { /* git not available */ }
+  }
+
+  _extractReasoningText(item) {
+    if (!item || typeof item !== 'object') return '';
+    const parts = [];
+
+    const addText = (value) => {
+      if (typeof value !== 'string') return;
+      const trimmed = value.trim();
+      if (!trimmed) return;
+      // Reasoning summaries commonly come wrapped in markdown bold markers.
+      const unwrapped = trimmed.replace(/^\*\*(.+)\*\*$/s, '$1').trim();
+      if (unwrapped) parts.push(unwrapped);
+    };
+
+    addText(item.text);
+
+    if (Array.isArray(item.summary)) {
+      for (const s of item.summary) {
+        if (typeof s === 'string') {
+          addText(s);
+          continue;
+        }
+        if (!s || typeof s !== 'object') continue;
+        addText(s.text);
+        addText(s.summary_text);
+      }
+    }
+
+    if (Array.isArray(item.summary_text)) {
+      for (const s of item.summary_text) addText(s);
+    }
+
+    const content = item.content;
+    if (typeof content === 'string') {
+      addText(content);
+    } else if (Array.isArray(content)) {
+      for (const c of content) {
+        if (!c || typeof c !== 'object') continue;
+        addText(c.text);
+        addText(c.summary_text);
+      }
+    } else if (content && typeof content === 'object') {
+      addText(content.text);
+      addText(content.summary_text);
+    }
+
+    return parts.join('\n\n').trim();
+  }
+
+  _emitReasoningMessage(text) {
+    if (typeof text !== 'string') return;
+    const normalized = text.trim().replace(/^\*\*(.+)\*\*$/s, '$1').trim();
+    if (!normalized) return;
+
+    const now = Date.now();
+    if (normalized === this._lastReasoningText && now - this._lastReasoningAt < 2000) {
+      return;
+    }
+    this._lastReasoningText = normalized;
+    this._lastReasoningAt = now;
+
+    this.emit('message', {
+      content: [{ type: 'thinking', text: normalized }],
+    });
+  }
+
+  _handleItemStarted(item) {
+    if (!item || typeof item !== 'object') return;
+    const type = item.type;
+
+    if (type === 'webSearch' || type === 'web_search') {
+      const toolId = item.id || uuidv4();
+      this._activeToolUseIds.add(toolId);
+      this.emit('message', {
+        content: [
+          {
+            type: 'tool_use',
+            id: toolId,
+            name: 'web_search',
+            input: {
+              query: item.query || item.action?.query || '',
+            },
+          },
+        ],
+      });
+    }
+  }
+
+  _formatWebSearchResult(item) {
+    const action = item?.action || {};
+    const query = action.query || item?.query || '';
+    const queries = Array.isArray(action.queries) ? action.queries.filter((q) => typeof q === 'string') : [];
+
+    const lines = [];
+    if (query) lines.push(`Query: ${query}`);
+    if (queries.length > 0) {
+      lines.push('Expanded queries:');
+      for (const q of queries) lines.push(`- ${q}`);
+    }
+    if (lines.length === 0) {
+      return 'Web search completed.';
+    }
+    return lines.join('\n');
   }
 }
