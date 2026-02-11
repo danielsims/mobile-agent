@@ -1018,6 +1018,10 @@ describe('CodexDriver', () => {
       expect(msg.params.threadId).toBe('thread-123');
       expect(msg.params.input).toEqual([{ type: 'text', text: 'Fix the bug' }]);
       expect(msg.params.approvalPolicy).toBe('on-request');
+      expect(msg.params.sandboxPolicy).toEqual({
+        type: 'workspaceWrite',
+        networkAccess: false,
+      });
 
       // Resolve the request
       driver._handleMessage({ id: msg.id, result: {} });
@@ -1031,6 +1035,26 @@ describe('CodexDriver', () => {
       const errorEvent = events.find(e => e.event === 'error');
       expect(errorEvent).toBeTruthy();
       expect(errorEvent.data.message).toBe('Codex not ready');
+    });
+
+    it('includes extra writable roots in workspace sandbox policy when present', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+      driver._ready = true;
+      driver._threadId = 'thread-123';
+      driver._workspaceWritableRoots = ['/repo/.git', '/repo/.git/worktrees/feat-codex'];
+
+      const sendPromise = driver.sendPrompt('Commit these changes');
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+
+      expect(msg.params.sandboxPolicy).toEqual({
+        type: 'workspaceWrite',
+        networkAccess: false,
+        writableRoots: ['/repo/.git', '/repo/.git/worktrees/feat-codex'],
+      });
+
+      driver._handleMessage({ id: msg.id, result: {} });
+      await sendPromise;
     });
   });
 
@@ -1130,14 +1154,16 @@ describe('CodexDriver', () => {
   });
 
   describe('Permission mode mapping', () => {
-    it('maps bypassPermissions to never', async () => {
+    it('maps bypassPermissions to on-failure with workspace-write sandbox', async () => {
       await driver.setPermissionMode('bypassPermissions');
-      expect(driver._approvalPolicy).toBe('never');
+      expect(driver._approvalPolicy).toBe('on-failure');
+      expect(driver._sandboxMode).toBe('workspace-write');
     });
 
-    it('maps default to on-request', async () => {
+    it('maps default to on-request with workspace-write sandbox', async () => {
       await driver.setPermissionMode('default');
       expect(driver._approvalPolicy).toBe('on-request');
+      expect(driver._sandboxMode).toBe('workspace-write');
     });
   });
 
@@ -1156,10 +1182,12 @@ describe('CodexDriver', () => {
       expect(driver._rpcRequest).toHaveBeenNthCalledWith(2, 'thread/start', expect.objectContaining({
         model: 'codex-mini-latest',
         cwd: '/tmp',
+        sandbox: driver._sandboxMode,
       }));
       expect(driver._rpcRequest).toHaveBeenNthCalledWith(3, 'thread/start', {
         cwd: '/tmp',
         approvalPolicy: driver._approvalPolicy,
+        sandbox: driver._sandboxMode,
       });
       expect(driver._threadId).toBe('thread-1');
       expect(driver.isReady()).toBe(true);

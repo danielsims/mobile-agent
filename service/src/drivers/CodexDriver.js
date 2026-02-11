@@ -22,7 +22,7 @@
 
 import { spawn, execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { basename } from 'node:path';
+import { basename, isAbsolute, resolve } from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
 import { BaseDriver } from './BaseDriver.js';
 
@@ -54,6 +54,8 @@ export class CodexDriver extends BaseDriver {
     this._initialized = false;
     this._model = process.env.CODEX_MODEL?.trim() || null;
     this._approvalPolicy = 'on-request'; // 'untrusted' | 'on-request' | 'on-failure' | 'never'
+    this._sandboxMode = 'workspace-write'; // 'read-only' | 'workspace-write' | 'danger-full-access'
+    this._workspaceWritableRoots = [];
     this._currentStreamContent = '';
     this._activeToolUseIds = new Set();  // tool items currently in progress (web search, etc.)
     this._lastReasoningText = '';
@@ -68,6 +70,7 @@ export class CodexDriver extends BaseDriver {
     const { cwd = null, resumeSessionId = null, model = null } = opts;
     this._agentId = agentId;
     this._cwd = cwd;
+    this._workspaceWritableRoots = this._detectWorkspaceWritableRoots(cwd);
     if (typeof model === 'string' && model.trim()) {
       this._model = model.trim();
     }
@@ -149,13 +152,25 @@ export class CodexDriver extends BaseDriver {
       // Step 3: Start or resume a thread
       let threadResult;
       if (resumeSessionId) {
-        threadResult = await this._rpcRequest('thread/resume', {
-          threadId: resumeSessionId,
-        });
+        try {
+          threadResult = await this._rpcRequest('thread/resume', {
+            threadId: resumeSessionId,
+            approvalPolicy: this._approvalPolicy,
+            sandbox: this._sandboxMode,
+          });
+        } catch (err) {
+          const msg = String(err?.message || err || '');
+          if (!/approvalPolicy|sandbox/i.test(msg)) throw err;
+          // Compatibility fallback for older app-server variants.
+          threadResult = await this._rpcRequest('thread/resume', {
+            threadId: resumeSessionId,
+          });
+        }
       } else {
         const baseParams = {
           cwd: cwd || process.env.HOME,
           approvalPolicy: this._approvalPolicy,
+          sandbox: this._sandboxMode,
         };
         if (this._model) baseParams.model = this._model;
 
@@ -176,6 +191,7 @@ export class CodexDriver extends BaseDriver {
           threadResult = await this._rpcRequest('thread/start', {
             cwd: cwd || process.env.HOME,
             approvalPolicy: this._approvalPolicy,
+            sandbox: this._sandboxMode,
           });
         }
       }
@@ -528,6 +544,7 @@ export class CodexDriver extends BaseDriver {
         threadId: this._threadId,
         input: [{ type: 'text', text }],
         approvalPolicy: this._approvalPolicy,
+        sandboxPolicy: this._buildTurnSandboxPolicy(),
       });
     } catch (err) {
       console.error(`[Codex ${this._agentId?.slice(0, 8)}] turn/start failed:`, err.message);
@@ -583,13 +600,22 @@ export class CodexDriver extends BaseDriver {
   }
 
   async setPermissionMode(mode) {
-    // Map our generic modes to Codex approval policies
-    const policyMap = {
-      'bypassPermissions': 'never',  // never ask for approval
-      'default': 'on-request',       // ask for approval on each action
+    // Map shared app modes (Ask / Auto) to Codex-native policies.
+    // Auto uses on-failure, not never, so write failures can still escalate.
+    const modeMap = {
+      bypassPermissions: { approvalPolicy: 'on-failure', sandboxMode: 'workspace-write' },
+      default: { approvalPolicy: 'on-request', sandboxMode: 'workspace-write' },
     };
-    this._approvalPolicy = policyMap[mode] || mode;
-    console.log(`[Codex ${this._agentId?.slice(0, 8)}] Approval policy -> ${this._approvalPolicy}`);
+    const mapped = modeMap[mode];
+    if (mapped) {
+      this._approvalPolicy = mapped.approvalPolicy;
+      this._sandboxMode = mapped.sandboxMode;
+    } else {
+      this._approvalPolicy = mode;
+    }
+    console.log(
+      `[Codex ${this._agentId?.slice(0, 8)}] Policy -> approval=${this._approvalPolicy}, sandbox=${this._sandboxMode}`,
+    );
   }
 
   async stop() {
@@ -768,5 +794,63 @@ export class CodexDriver extends BaseDriver {
       return 'Web search completed.';
     }
     return lines.join('\n');
+  }
+
+  _buildTurnSandboxPolicy() {
+    switch (this._sandboxMode) {
+      case 'danger-full-access':
+        return { type: 'dangerFullAccess' };
+      case 'read-only':
+        return { type: 'readOnly' };
+      case 'workspace-write':
+      default: {
+        const policy = {
+          type: 'workspaceWrite',
+          networkAccess: false,
+        };
+        if (this._workspaceWritableRoots.length > 0) {
+          policy.writableRoots = this._workspaceWritableRoots;
+        }
+        return policy;
+      }
+    }
+  }
+
+  _detectWorkspaceWritableRoots(cwd) {
+    if (!cwd) return [];
+
+    const roots = new Set();
+    const addRoot = (value) => {
+      if (typeof value !== 'string' || !value.trim()) return;
+      const abs = isAbsolute(value) ? value : resolve(cwd, value);
+      roots.add(abs);
+    };
+
+    try {
+      // In git worktrees, commit/index lock files often live under the
+      // common git dir outside cwd. Allowing these roots keeps workspace-write
+      // functional without falling back to full disk access.
+      const gitDir = execFileSync('git', ['rev-parse', '--git-dir'], {
+        cwd,
+        encoding: 'utf-8',
+        timeout: 3000,
+      }).trim();
+      addRoot(gitDir);
+    } catch {
+      // not a git repo or git unavailable
+    }
+
+    try {
+      const commonGitDir = execFileSync('git', ['rev-parse', '--git-common-dir'], {
+        cwd,
+        encoding: 'utf-8',
+        timeout: 3000,
+      }).trim();
+      addRoot(commonGitDir);
+    } catch {
+      // not a git repo or git unavailable
+    }
+
+    return Array.from(roots);
   }
 }
