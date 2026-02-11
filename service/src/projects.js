@@ -453,6 +453,48 @@ export function getGitBranchInfo(cwd) {
   return result;
 }
 
+// --- Git Log ---
+
+/**
+ * Get structured commit log for a repository.
+ * @param {string} cwd - Absolute path to the working directory
+ * @param {number} [maxCount=100] - Maximum number of commits
+ * @returns {Array<{ hash, abbrevHash, parents, subject, author, relativeTime, refs }>}
+ */
+export function getGitLog(cwd, maxCount = 100) {
+  try {
+    const SEP = '\x00';
+    const output = execFileSync('git', [
+      'log',
+      '--all',
+      `--max-count=${maxCount}`,
+      `--format=%H${SEP}%h${SEP}%P${SEP}%s${SEP}%an${SEP}%ar${SEP}%D`,
+    ], {
+      cwd,
+      encoding: 'utf-8',
+      timeout: 15000,
+    });
+
+    return output
+      .split('\n')
+      .filter(Boolean)
+      .map(line => {
+        const [hash, abbrevHash, parentStr, subject, author, relativeTime, refStr] = line.split(SEP);
+        return {
+          hash,
+          abbrevHash,
+          parents: parentStr ? parentStr.split(' ').filter(Boolean) : [],
+          subject,
+          author,
+          relativeTime,
+          refs: refStr ? refStr.split(', ').filter(Boolean) : [],
+        };
+      });
+  } catch {
+    return [];
+  }
+}
+
 // --- Persistence ---
 
 function writeProjects() {

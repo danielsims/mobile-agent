@@ -29,6 +29,7 @@ import {
   getGitStatus,
   getGitDiff,
   getGitBranchInfo,
+  getGitLog,
 } from './projects.js';
 
 const MAX_CONCURRENT_AGENTS = 10;
@@ -425,6 +426,10 @@ export class Bridge {
         this._handleGetGitDiff(ws, msg);
         break;
 
+      case 'getGitLog':
+        this._handleGetGitLog(ws, msg);
+        break;
+
       case 'ping':
         this._sendTo(ws, 'pong');
         break;
@@ -733,6 +738,24 @@ export class Bridge {
       filePath: filePath || null,
       diff,
     });
+  }
+
+  _handleGetGitLog(ws, msg) {
+    const { projectPath, maxCount } = msg;
+    if (!projectPath) {
+      this._sendTo(ws, 'error', { error: 'projectPath required.' });
+      return;
+    }
+
+    const all = getProjects();
+    const isRegistered = Object.values(all).some(p => p.path === projectPath);
+    if (!isRegistered) {
+      this._sendTo(ws, 'error', { error: 'Path is not a registered project.' });
+      return;
+    }
+
+    const commits = getGitLog(projectPath, maxCount || 100);
+    this._sendTo(ws, 'gitLog', { projectPath, commits });
   }
 
   // --- Broadcasting ---
