@@ -4,7 +4,7 @@
 // This module abstracts reading transcripts into a common format so we
 // never persist chat history ourselves — the CLI is the source of truth.
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 const HOME = process.env.HOME;
@@ -20,9 +20,8 @@ export function readTranscript(type, sessionId, cwd) {
   switch (type) {
     case 'claude':
       return _readClaudeTranscript(sessionId, cwd);
-    // Future agent types:
-    // case 'codex':
-    //   return _readCodexTranscript(sessionId, cwd);
+    case 'codex':
+      return _readCodexTranscript(sessionId, cwd);
     // case 'opencode':
     //   return _readOpencodeTranscript(sessionId, cwd);
     default:
@@ -134,7 +133,6 @@ function _findClaudeSessionFile(sessionId, cwd) {
 
   // Fallback: scan project directories for the session file
   try {
-    const { readdirSync } = require('node:fs');
     for (const dir of readdirSync(projectsDir)) {
       const candidate = join(projectsDir, dir, `${sessionId}.jsonl`);
       if (existsSync(candidate)) return candidate;
@@ -159,4 +157,142 @@ function _normalizeBlocks(blocks) {
       return null;
     })
     .filter(Boolean);
+}
+
+// ---------------------------------------------------------------------------
+// Codex — ~/.codex/sessions/<thread-id>/
+// Codex stores sessions as JSONL event logs in its sessions directory.
+// ---------------------------------------------------------------------------
+
+function _readCodexTranscript(sessionId, cwd) {
+  if (!sessionId) return null;
+
+  const sessionsDir = join(HOME, '.codex', 'sessions');
+  const sessionDir = join(sessionsDir, sessionId);
+
+  // Look for the session events file
+  const eventsFile = join(sessionDir, 'events.jsonl');
+  if (!existsSync(eventsFile)) {
+    // Try alternate location: the session ID might be in a flat file
+    const flatFile = join(sessionsDir, `${sessionId}.jsonl`);
+    if (!existsSync(flatFile)) return null;
+    return _parseCodexEvents(flatFile, sessionId);
+  }
+
+  return _parseCodexEvents(eventsFile, sessionId);
+}
+
+function _parseCodexEvents(filePath, sessionId) {
+  try {
+    const content = readFileSync(filePath, 'utf-8');
+    const lines = content.trim().split('\n');
+
+    let model = null;
+    const messages = [];
+    let lastOutput = '';
+    let msgIndex = 0;
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
+
+      const type = event.type || event.method;
+      const params = event.params || event;
+
+      // Extract model from thread/started or initialize
+      if (type === 'thread.started' || type === 'thread/started') {
+        model = params.model || model;
+        continue;
+      }
+
+      // User input turns
+      if (type === 'turn/start' || type === 'turn.start') {
+        const input = params.input;
+        if (Array.isArray(input)) {
+          for (const item of input) {
+            if (item.type === 'text' && item.text) {
+              messages.push({
+                id: `codex-${msgIndex++}`,
+                type: 'user',
+                content: item.text,
+                timestamp: event.timestamp ? new Date(event.timestamp).getTime() : Date.now(),
+              });
+            }
+          }
+        }
+        continue;
+      }
+
+      // Completed agent message items
+      if (type === 'item.completed' || type === 'item/completed') {
+        const item = params.item || params;
+
+        if (item.type === 'agentMessage' || item.type === 'agent_message') {
+          const text = item.text || item.content || '';
+          if (text) {
+            messages.push({
+              id: item.id || `codex-${msgIndex++}`,
+              type: 'assistant',
+              content: [{ type: 'text', text }],
+              timestamp: event.timestamp ? new Date(event.timestamp).getTime() : Date.now(),
+            });
+            lastOutput = text;
+          }
+        }
+
+        if (item.type === 'commandExecution' || item.type === 'command_execution') {
+          const lastMsg = messages[messages.length - 1];
+          if (lastMsg && lastMsg.type === 'assistant' && Array.isArray(lastMsg.content)) {
+            lastMsg.content.push(
+              { type: 'tool_use', id: item.id || `cmd-${msgIndex}`, name: 'command_execution', input: { command: item.command || '' } },
+              { type: 'tool_result', toolUseId: item.id || `cmd-${msgIndex}`, content: item.output || item.result || '' },
+            );
+          } else {
+            messages.push({
+              id: `codex-${msgIndex++}`,
+              type: 'assistant',
+              content: [
+                { type: 'tool_use', id: item.id || `cmd-${msgIndex}`, name: 'command_execution', input: { command: item.command || '' } },
+                { type: 'tool_result', toolUseId: item.id || `cmd-${msgIndex}`, content: item.output || item.result || '' },
+              ],
+              timestamp: event.timestamp ? new Date(event.timestamp).getTime() : Date.now(),
+            });
+          }
+        }
+
+        if (item.type === 'fileChange' || item.type === 'file_change') {
+          const lastMsg = messages[messages.length - 1];
+          const block = {
+            type: 'tool_use',
+            id: item.id || `file-${msgIndex}`,
+            name: 'file_change',
+            input: { file: item.filePath || item.file || '', action: item.action || 'modify' },
+          };
+          if (lastMsg && lastMsg.type === 'assistant' && Array.isArray(lastMsg.content)) {
+            lastMsg.content.push(block);
+          } else {
+            messages.push({
+              id: `codex-${msgIndex++}`,
+              type: 'assistant',
+              content: [block],
+              timestamp: event.timestamp ? new Date(event.timestamp).getTime() : Date.now(),
+            });
+          }
+        }
+      }
+    }
+
+    if (lastOutput.length > 500) lastOutput = lastOutput.slice(-500);
+
+    return { model, messages, lastOutput };
+  } catch (e) {
+    console.error(`[transcripts] Failed to read Codex session ${sessionId.slice(0, 8)}:`, e.message);
+    return null;
+  }
 }

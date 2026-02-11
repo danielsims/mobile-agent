@@ -154,6 +154,12 @@ export interface GitLogCommit {
   refs: string[];
 }
 
+export interface ProviderModelOption {
+  value: string;
+  label: string;
+  note?: string;
+}
+
 // --- Server Messages (new protocol) ---
 
 export interface ServerMessage {
@@ -205,6 +211,10 @@ export interface ServerMessage {
 
   // projectList
   projects?: Project[];
+
+  // modelList
+  agentType?: AgentType;
+  models?: ProviderModelOption[];
 
   // worktreeCreated / worktreeRemoved
   projectId?: string;

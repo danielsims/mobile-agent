@@ -16,6 +16,7 @@ import {
 } from './auth.js';
 import { loadSessions, getSavedSessions, saveSession, removeSession } from './sessions.js';
 import { readTranscript } from './transcripts.js';
+import { listModelsForAgentType } from './models.js';
 import {
   loadProjects,
   getProjects,
@@ -303,6 +304,7 @@ export class Bridge {
         saveSession(id, {
           sessionId: data.sessionId,
           type: session.type,
+          model: session.model,
           sessionName: session.sessionName,
           createdAt: session.createdAt,
           cwd: session.cwd,
@@ -313,7 +315,11 @@ export class Bridge {
       if (type === 'agentUpdated' && data.sessionName) {
         const saved = getSavedSessions();
         if (saved[id]) {
-          saveSession(id, { ...saved[id], sessionName: data.sessionName });
+          saveSession(id, {
+            ...saved[id],
+            model: session.model || saved[id].model || null,
+            sessionName: data.sessionName,
+          });
         }
       }
     });
@@ -337,7 +343,9 @@ export class Bridge {
         continue;
       }
 
-      const session = new AgentSession(agentId, info.type || 'claude');
+      const session = new AgentSession(agentId, info.type || 'claude', {
+        model: info.model || null,
+      });
       session.sessionId = info.sessionId;
       session.sessionName = info.sessionName || 'Restored Agent';
       session.createdAt = info.createdAt || Date.now();
@@ -406,6 +414,10 @@ export class Bridge {
         this._handleListProjects(ws);
         break;
 
+      case 'listModels':
+        this._handleListModels(ws, msg);
+        break;
+
       case 'createWorktree':
         this._handleCreateWorktree(ws, msg, deviceId);
         break;
@@ -454,6 +466,7 @@ export class Bridge {
 
     const agentId = uuidv4();
     const type = msg.agentType || 'claude';
+    const model = typeof msg.model === 'string' && msg.model.trim() ? msg.model.trim() : null;
 
     // Resolve working directory from project/worktree selection
     let cwd = null;
@@ -466,16 +479,33 @@ export class Bridge {
       }
     }
 
-    const session = new AgentSession(agentId, type);
+    const session = new AgentSession(agentId, type, { model });
 
     this._setupAgentBroadcast(session);
     this.agents.set(agentId, session);
-    logAudit('agent_created', { agentId: agentId.slice(0, 8), type, deviceId, cwd: cwd || '~' });
+    logAudit('agent_created', { agentId: agentId.slice(0, 8), type, model: model || 'auto', deviceId, cwd: cwd || '~' });
 
     // Spawn the CLI process in the selected directory (or $HOME by default)
     session.spawn(this.port, null, cwd);
 
     this._broadcastToMobile('agentCreated', { agent: session.getSnapshot() });
+  }
+
+  async _handleListModels(ws, msg) {
+    const agentType = msg.agentType || 'claude';
+    try {
+      const models = await listModelsForAgentType(agentType);
+      this._sendTo(ws, 'modelList', {
+        agentType,
+        models,
+      });
+    } catch (e) {
+      console.error(`[models] listModels failed for ${agentType}:`, e.message);
+      this._sendTo(ws, 'modelList', {
+        agentType,
+        models: [{ value: 'auto', label: 'Auto (Recommended)', note: 'Use provider default model' }],
+      });
+    }
   }
 
   _handleDestroyAgent(ws, msg, deviceId) {

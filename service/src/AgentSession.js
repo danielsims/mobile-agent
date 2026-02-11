@@ -1,7 +1,12 @@
-import { spawn, execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+// AgentSession — transport-agnostic agent lifecycle manager.
+//
+// Delegates all protocol-specific work to a driver (ClaudeDriver, CodexDriver, etc.)
+// and manages the common concerns: message history, permissions, cost tracking,
+// broadcasting to mobile clients, and git branch detection.
+
+import { execFileSync } from 'node:child_process';
 import { basename } from 'node:path';
-import { v4 as uuidv4 } from 'uuid';
+import { createDriver } from './drivers/index.js';
 
 const MAX_HISTORY = 200;
 const MAX_LAST_OUTPUT = 2000;
@@ -11,22 +16,8 @@ function nextHistoryId(suffix) {
   return `h-${++historyMsgSeq}-${suffix}`;
 }
 
-function findClaude() {
-  const paths = [
-    process.env.CLAUDE_PATH,
-    `${process.env.HOME}/.local/bin/claude`,
-    '/usr/local/bin/claude',
-  ].filter(Boolean);
-  for (const p of paths) {
-    if (existsSync(p)) return p;
-  }
-  return 'claude';
-}
-
-const CLAUDE_PATH = findClaude();
-
 export class AgentSession {
-  constructor(id, type = 'claude') {
+  constructor(id, type = 'claude', opts = {}) {
     this.id = id;
     this.type = type;
     this.status = 'starting';
@@ -34,7 +25,7 @@ export class AgentSession {
     this.sessionName = null;
     this.messageHistory = [];
     this.pendingPermissions = new Map();
-    this.model = null;
+    this.model = opts.model || null;
     this.tools = [];
     this.cwd = null;
     this.gitBranch = null;
@@ -46,18 +37,189 @@ export class AgentSession {
     this.createdAt = Date.now();
     this.autoApprove = false;
 
-    this._process = null;
-    this._cliSocket = null;
     this._currentStreamContent = '';
     this._onBroadcast = null;
-    this._promptQueue = [];
-    this._initialized = false; // True after system/init received
+    this._initialized = false;
+
+    // Create the appropriate driver for this agent type
+    this.driver = createDriver(type);
+    this._bindDriverEvents();
+  }
+
+  /**
+   * Wire up normalized events from the driver to AgentSession state + broadcasts.
+   */
+  _bindDriverEvents() {
+    const d = this.driver;
+
+    d.on('init', (data) => {
+      if (data.sessionId) this.sessionId = data.sessionId;
+      if (data.model) this.model = data.model;
+      if (data.tools) this.tools = data.tools;
+      if (data.cwd) {
+        this.cwd = data.cwd;
+        this.projectName = data.projectName || basename(data.cwd);
+      }
+      if (data.gitBranch !== undefined) this.gitBranch = data.gitBranch;
+      if (data.projectName) this.projectName = data.projectName;
+      this._initialized = true;
+
+      console.log(`[Agent ${this.id.slice(0, 8)}] Init: type=${this.type}, model=${this.model}, cwd=${this.projectName || '?'}, branch=${this.gitBranch || '?'}`);
+      this._broadcast('agentUpdated', {
+        agentId: this.id,
+        sessionId: this.sessionId,
+        model: this.model,
+        tools: this.tools,
+        cwd: this.cwd,
+        gitBranch: this.gitBranch,
+        projectName: this.projectName,
+        status: 'running',
+      });
+    });
+
+    d.on('stream', (data) => {
+      const text = data.text || '';
+      if (text) {
+        this._currentStreamContent += text;
+        this._updateLastOutput(text);
+        this._broadcast('streamChunk', { agentId: this.id, text });
+      }
+    });
+
+    d.on('message', (data) => {
+      this._currentStreamContent = '';
+      const content = data.content || [];
+
+      // Extract text for lastOutput
+      for (const block of content) {
+        if (block.type === 'text' && block.text) {
+          this._updateLastOutput(block.text);
+        }
+      }
+
+      this.messageHistory.push({
+        id: nextHistoryId('assistant'),
+        type: 'assistant',
+        content,
+        timestamp: Date.now(),
+      });
+      this._trimHistory();
+
+      this._broadcast('assistantMessage', { agentId: this.id, content });
+    });
+
+    d.on('result', (data) => {
+      const cost = data.totalCost || data.cost || 0;
+      const usage = data.usage || {};
+      const duration = data.duration || 0;
+      const isError = data.isError || false;
+
+      if (cost > 0) this.totalCost = cost; // cumulative
+      this.outputTokens += usage.output_tokens || 0;
+      if (usage.input_tokens != null) {
+        const totalInput = (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0);
+        this.contextUsedPercent = Math.min(100, Math.round((totalInput / 200000) * 100));
+      }
+
+      if (!this.sessionId && data.sessionId) {
+        this.sessionId = data.sessionId;
+      }
+
+      this._broadcast('agentResult', {
+        agentId: this.id,
+        cost,
+        totalCost: this.totalCost,
+        usage,
+        duration,
+        isError,
+        outputTokens: this.outputTokens,
+        contextUsedPercent: this.contextUsedPercent,
+      });
+
+      // Check if the branch changed during this turn
+      this._checkBranchChange();
+    });
+
+    d.on('permission', (data) => {
+      const { requestId, toolName, toolInput } = data;
+
+      // Some drivers can't switch approval policy mid-thread. Enforce
+      // auto-approve at the session layer to keep behavior consistent.
+      if (this.autoApprove) {
+        this.driver.respondPermission(
+          requestId,
+          'allow',
+          toolInput || {},
+        );
+        this._setStatus('running');
+        return;
+      }
+
+      this.pendingPermissions.set(requestId, {
+        requestId,
+        toolName,
+        toolInput: toolInput || {},
+        timestamp: Date.now(),
+      });
+
+      this._setStatus('awaiting_permission');
+      this._broadcast('permissionRequest', {
+        agentId: this.id,
+        requestId,
+        toolName,
+        toolInput: toolInput || {},
+      });
+    });
+
+    d.on('toolProgress', (data) => {
+      this._broadcast('toolProgress', {
+        agentId: this.id,
+        toolName: data.toolName || null,
+        elapsed: data.elapsed || 0,
+      });
+    });
+
+    d.on('toolResults', (data) => {
+      // Merge tool_result blocks into the preceding assistant message
+      const content = data.content;
+      if (!Array.isArray(content)) return;
+
+      const lastAssistant = [...this.messageHistory].reverse().find(m => m.type === 'assistant');
+      if (lastAssistant && Array.isArray(lastAssistant.content)) {
+        for (const b of content) {
+          if (b.type === 'tool_result' && b.tool_use_id) {
+            let resultText = '';
+            if (typeof b.content === 'string') {
+              resultText = b.content;
+            } else if (Array.isArray(b.content)) {
+              resultText = b.content
+                .filter(c => c.type === 'text' && c.text)
+                .map(c => c.text)
+                .join('\n');
+            }
+            lastAssistant.content.push({ type: 'tool_result', toolUseId: b.tool_use_id, content: resultText });
+          }
+        }
+      }
+    });
+
+    d.on('status', (data) => {
+      this._setStatus(data.status);
+    });
+
+    d.on('error', (data) => {
+      console.error(`[Agent ${this.id.slice(0, 8)}] Driver error:`, data.message);
+      this._setStatus('error');
+    });
+
+    d.on('exit', (data) => {
+      console.log(`[Agent ${this.id.slice(0, 8)}] Driver exited: code=${data.code} signal=${data.signal}`);
+      this._setStatus('exited');
+    });
   }
 
   /**
    * Populate from a transcript read from CLI session storage.
-   * Called on restore before the CLI reconnects.
-   * @param {{ model: string|null, messages: Array, lastOutput: string }} transcript
    */
   loadTranscript(transcript) {
     if (transcript.model) this.model = transcript.model;
@@ -65,7 +227,6 @@ export class AgentSession {
     if (transcript.messages?.length > 0) {
       this.messageHistory = transcript.messages;
     }
-    // Mark as initialized so status normalizes correctly (connected → idle)
     this._initialized = true;
   }
 
@@ -73,10 +234,20 @@ export class AgentSession {
     this._onBroadcast = fn;
   }
 
-  /**
-   * Check if the git branch has changed and broadcast an update if so.
-   * Called after each agent turn completes rather than polling.
-   */
+  _broadcast(type, data = {}) {
+    if (this._onBroadcast) {
+      this._onBroadcast(this.id, type, data);
+    }
+  }
+
+  _setStatus(status) {
+    if (status === 'connected' && this._initialized) {
+      status = 'idle';
+    }
+    this.status = status;
+    this._broadcast('agentUpdated', { agentId: this.id, status });
+  }
+
   _checkBranchChange() {
     if (!this.cwd) return;
     try {
@@ -94,355 +265,6 @@ export class AgentSession {
     } catch { /* git not available or not a repo */ }
   }
 
-  _broadcast(type, data = {}) {
-    if (this._onBroadcast) {
-      this._onBroadcast(this.id, type, data);
-    }
-  }
-
-  _setStatus(status) {
-    // Normalize 'connected' to 'idle' for initialized agents —
-    // 'connected' just means CLI socket attached, not actively working
-    if (status === 'connected' && this._initialized) {
-      status = 'idle';
-    }
-    this.status = status;
-    this._broadcast('agentUpdated', { agentId: this.id, status });
-  }
-
-  /**
-   * Spawn the Claude CLI with --sdk-url. The CLI connects TO our server
-   * and waits for prompts over WebSocket. No --print/-p needed.
-   * @param {number} serverPort
-   * @param {string|null} resumeSessionId - If provided, passes --resume to restore a previous session
-   */
-  spawn(serverPort, resumeSessionId = null, cwd = null) {
-    const sdkUrl = `ws://127.0.0.1:${serverPort}/ws/cli/${this.id}`;
-
-    // Set cwd/projectName early so the initial snapshot includes them
-    if (cwd) {
-      this.cwd = cwd;
-      this.projectName = basename(cwd);
-      try {
-        this.gitBranch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-          cwd, encoding: 'utf-8', timeout: 3000,
-        }).trim();
-      } catch { /* not a git repo or git not available */ }
-    }
-
-    // --sdk-url makes the CLI connect as a WebSocket client to our server.
-    // Without --print/-p, it connects and waits for user messages via WS.
-    // system/init is sent after the first user message, not on connect.
-    const args = [
-      '--sdk-url', sdkUrl,
-      '--output-format', 'stream-json',
-      '--input-format', 'stream-json',
-      '--verbose',
-    ];
-
-    if (resumeSessionId) {
-      args.push('--resume', resumeSessionId);
-    }
-
-    console.log(`[Agent ${this.id.slice(0, 8)}] Spawning: ${CLAUDE_PATH} ${resumeSessionId ? `--resume ${resumeSessionId.slice(0, 8)}...` : '--sdk-url'} ws://.../${this.id.slice(0, 8)}...`);
-
-    this._process = spawn(CLAUDE_PATH, args, {
-      cwd: cwd || process.env.HOME,
-      env: { ...process.env },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    this._process.stdout.on('data', (data) => {
-      const text = data.toString().trim();
-      if (text) console.log(`[Agent ${this.id.slice(0, 8)}] stdout: ${text.slice(0, 200)}`);
-    });
-
-    this._process.stderr.on('data', (data) => {
-      const text = data.toString().trim();
-      if (text) console.log(`[Agent ${this.id.slice(0, 8)}] stderr: ${text.slice(0, 200)}`);
-    });
-
-    this._process.on('exit', (code, signal) => {
-      console.log(`[Agent ${this.id.slice(0, 8)}] Exited: code=${code} signal=${signal}`);
-      this._setStatus('exited');
-      this._process = null;
-    });
-
-    this._process.on('error', (err) => {
-      console.error(`[Agent ${this.id.slice(0, 8)}] Process error:`, err.message);
-      this._setStatus('error');
-    });
-  }
-
-  /**
-   * Called by the bridge when the CLI connects back via WebSocket.
-   * Messages arrive as individual WebSocket frames (one JSON object per frame).
-   */
-  attachCliSocket(ws) {
-    this._cliSocket = ws;
-    // If already initialized, go straight to idle (not 'connected')
-    this._setStatus(this._initialized ? 'idle' : 'connected');
-    console.log(`[Agent ${this.id.slice(0, 8)}] CLI WebSocket attached`);
-
-    ws.on('message', (data) => {
-      const text = data.toString();
-
-      // Messages come as individual WebSocket frames, each a complete JSON object.
-      // Try direct parse first (most common), fall back to newline splitting for NDJSON.
-      try {
-        const msg = JSON.parse(text);
-        this._handleCliMessage(msg);
-      } catch {
-        // Might be multiple JSON objects in one frame (NDJSON)
-        for (const line of text.split('\n')) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          try {
-            this._handleCliMessage(JSON.parse(trimmed));
-          } catch {
-            console.log(`[Agent ${this.id.slice(0, 8)}] Non-JSON from CLI: ${trimmed.slice(0, 100)}`);
-          }
-        }
-      }
-    });
-
-    ws.on('close', (code, reason) => {
-      console.log(`[Agent ${this.id.slice(0, 8)}] CLI WebSocket closed: ${code}`);
-      this._cliSocket = null;
-      if (this.status !== 'exited') {
-        this._setStatus('error');
-      }
-    });
-
-    ws.on('error', (err) => {
-      console.error(`[Agent ${this.id.slice(0, 8)}] CLI WebSocket error:`, err.message);
-    });
-
-    // Flush any queued prompts now that the socket is connected
-    this._flushPromptQueue();
-  }
-
-  _flushPromptQueue() {
-    while (this._promptQueue.length > 0 && this._cliSocket?.readyState === 1) {
-      const text = this._promptQueue.shift();
-      this._sendToCliSocket({
-        type: 'user',
-        message: { role: 'user', content: text },
-        session_id: this.sessionId || '',
-      });
-    }
-  }
-
-  /**
-   * Handle a parsed message from the Claude CLI.
-   */
-  _handleCliMessage(msg) {
-    switch (msg.type) {
-      case 'system': {
-        if (msg.subtype === 'init') {
-          this.sessionId = msg.session_id || null;
-          this.model = msg.model || null;
-          this.tools = msg.tools || [];
-          this._initialized = true;
-
-          // Capture working directory and derive git info
-          if (msg.cwd) {
-            this.cwd = msg.cwd;
-            this.projectName = basename(msg.cwd);
-            try {
-              this.gitBranch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-                cwd: msg.cwd,
-                encoding: 'utf-8',
-                timeout: 3000,
-              }).trim();
-            } catch {
-              this.gitBranch = null;
-            }
-          }
-
-          console.log(`[Agent ${this.id.slice(0, 8)}] Init: model=${this.model}, cwd=${this.projectName || '?'}, branch=${this.gitBranch || '?'}, tools=${this.tools.length}`);
-          this._broadcast('agentUpdated', {
-            agentId: this.id,
-            sessionId: this.sessionId,
-            model: this.model,
-            tools: this.tools,
-            cwd: this.cwd,
-            gitBranch: this.gitBranch,
-            projectName: this.projectName,
-            status: 'running',
-          });
-
-          // Don't set idle here — init comes right before first response
-          this._setStatus('running');
-        }
-        break;
-      }
-
-      case 'stream_event': {
-        const event = msg.event;
-        if (!event) break;
-
-        if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
-          const text = event.delta.text || '';
-          if (text) {
-            this._currentStreamContent += text;
-            this._updateLastOutput(text);
-            this._broadcast('streamChunk', { agentId: this.id, text });
-          }
-        }
-        break;
-      }
-
-      case 'assistant': {
-        this._currentStreamContent = '';
-        const content = msg.message?.content || [];
-        const normalized = this._normalizeContentBlocks(content);
-
-        // Also extract text for lastOutput if we didn't get stream_events
-        for (const block of normalized) {
-          if (block.type === 'text' && block.text) {
-            this._updateLastOutput(block.text);
-          }
-        }
-
-        this.messageHistory.push({
-          id: nextHistoryId('assistant'),
-          type: 'assistant',
-          content: normalized,
-          timestamp: Date.now(),
-        });
-        this._trimHistory();
-
-
-        this._setStatus('running');
-        this._broadcast('assistantMessage', { agentId: this.id, content: normalized });
-        break;
-      }
-
-      case 'result': {
-        // total_cost_usd is the actual field name from Claude CLI
-        const cost = msg.total_cost_usd || msg.cost_usd || 0;
-        const usage = msg.usage || {};
-        const duration = msg.duration_ms || 0;
-        const isError = msg.is_error || false;
-
-        this.totalCost = cost; // total_cost_usd is cumulative
-        this.outputTokens += usage.output_tokens || 0;
-        if (usage.input_tokens != null) {
-          const totalInput = (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0);
-          this.contextUsedPercent = Math.min(100, Math.round((totalInput / 200000) * 100));
-        }
-
-        if (!this.sessionId && msg.session_id) {
-          this.sessionId = msg.session_id;
-        }
-
-        this._setStatus('idle');
-        this._broadcast('agentResult', {
-          agentId: this.id,
-          cost,
-          totalCost: this.totalCost,
-          usage,
-          duration,
-          isError,
-          outputTokens: this.outputTokens,
-          contextUsedPercent: this.contextUsedPercent,
-        });
-
-        // Check if the branch changed during this turn
-        this._checkBranchChange();
-        break;
-      }
-
-      case 'control_request': {
-        const request = msg.request || {};
-        const subtype = request.subtype || msg.subtype;
-
-        if (subtype === 'can_use_tool') {
-          // request_id can be top-level or nested in request
-          const requestId = msg.request_id || request.id || uuidv4();
-          const toolName = request.tool_name || 'unknown';
-          // tool input can be at request.input or request.tool_input
-          const toolInput = request.input || request.tool_input || {};
-
-          this.pendingPermissions.set(requestId, {
-            requestId,
-            toolName,
-            toolInput,
-            timestamp: Date.now(),
-          });
-
-          this._setStatus('awaiting_permission');
-          this._broadcast('permissionRequest', {
-            agentId: this.id,
-            requestId,
-            toolName,
-            toolInput,
-          });
-        } else {
-          console.log(`[Agent ${this.id.slice(0, 8)}] control_request subtype: ${subtype}`);
-        }
-        break;
-      }
-
-      case 'tool_progress': {
-        this._broadcast('toolProgress', {
-          agentId: this.id,
-          toolName: msg.tool_name || null,
-          elapsed: msg.elapsed_ms || 0,
-        });
-        break;
-      }
-
-      case 'user': {
-        // Merge tool_result blocks into the preceding assistant message
-        const userContent = msg.message?.content;
-        if (Array.isArray(userContent)) {
-          const lastAssistant = [...this.messageHistory].reverse().find(m => m.type === 'assistant');
-          if (lastAssistant && Array.isArray(lastAssistant.content)) {
-            for (const b of userContent) {
-              if (b.type === 'tool_result' && b.tool_use_id) {
-                let resultText = '';
-                if (typeof b.content === 'string') {
-                  resultText = b.content;
-                } else if (Array.isArray(b.content)) {
-                  resultText = b.content
-                    .filter(c => c.type === 'text' && c.text)
-                    .map(c => c.text)
-                    .join('\n');
-                }
-                lastAssistant.content.push({ type: 'tool_result', toolUseId: b.tool_use_id, content: resultText });
-              }
-            }
-          }
-        }
-        break;
-      }
-
-      default:
-        if (msg.type) {
-          console.log(`[Agent ${this.id.slice(0, 8)}] Unhandled: ${msg.type}`);
-        }
-    }
-  }
-
-  _normalizeContentBlocks(blocks) {
-    return blocks.map(block => {
-      switch (block.type) {
-        case 'text':
-          return { type: 'text', text: block.text || '' };
-        case 'tool_use':
-          return { type: 'tool_use', id: block.id, name: block.name, input: block.input };
-        case 'tool_result':
-          return { type: 'tool_result', toolUseId: block.tool_use_id, content: block.content };
-        case 'thinking':
-          return { type: 'thinking', text: block.thinking || block.text || '' };
-        default:
-          return { type: block.type, ...block };
-      }
-    });
-  }
-
   _updateLastOutput(text) {
     this.lastOutput += text;
     if (this.lastOutput.length > MAX_LAST_OUTPUT) {
@@ -456,8 +278,35 @@ export class AgentSession {
     }
   }
 
+  // --- Public API (transport-agnostic) ---
+
+  /**
+   * Start the agent process. Delegates to driver.start().
+   */
+  spawn(serverPort, resumeSessionId = null, cwd = null) {
+    // Set cwd/projectName early so the initial snapshot includes them
+    if (cwd) {
+      this.cwd = cwd;
+      this.projectName = basename(cwd);
+      try {
+        this.gitBranch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+          cwd, encoding: 'utf-8', timeout: 3000,
+        }).trim();
+      } catch { /* not a git repo or git not available */ }
+    }
+
+    this.driver.start(this.id, {
+      serverPort,
+      resumeSessionId,
+      cwd,
+      model: this.model,
+    });
+  }
+
+  /**
+   * Send a user prompt. Delegates to driver.sendPrompt().
+   */
   sendPrompt(text) {
-    // Check if branch changed since last interaction
     this._checkBranchChange();
 
     if (!this.sessionName) {
@@ -474,20 +323,12 @@ export class AgentSession {
     this._trimHistory();
     this._setStatus('running');
 
-    const message = {
-      type: 'user',
-      message: { role: 'user', content: text },
-      session_id: this.sessionId || '',
-    };
-
-    if (this._cliSocket?.readyState === 1) {
-      this._sendToCliSocket(message);
-    } else {
-      console.log(`[Agent ${this.id.slice(0, 8)}] CLI not connected, queuing`);
-      this._promptQueue.push(text);
-    }
+    this.driver.sendPrompt(text, this.sessionId);
   }
 
+  /**
+   * Respond to a permission request. Delegates to driver.respondPermission().
+   */
   respondToPermission(requestId, behavior, updatedInput) {
     const pending = this.pendingPermissions.get(requestId);
     if (!pending) {
@@ -497,32 +338,11 @@ export class AgentSession {
 
     this.pendingPermissions.delete(requestId);
 
-    let innerResponse;
-    if (behavior === 'allow') {
-      innerResponse = {
-        behavior: 'allow',
-        // updatedInput is required for allow — pass through original input
-        updatedInput: updatedInput || pending.toolInput || {},
-      };
-    } else {
-      innerResponse = {
-        behavior: 'deny',
-        message: 'Denied by user',
-      };
-    }
-
-    const response = {
-      type: 'control_response',
-      response: {
-        subtype: 'success',
-        request_id: requestId,
-        response: innerResponse,
-      },
-    };
-
-    if (this._cliSocket?.readyState === 1) {
-      this._sendToCliSocket(response);
-    }
+    this.driver.respondPermission(
+      requestId,
+      behavior,
+      updatedInput || pending.toolInput || {},
+    );
 
     if (this.pendingPermissions.size === 0) {
       this._setStatus('running');
@@ -532,25 +352,23 @@ export class AgentSession {
   }
 
   /**
-   * Change the CLI's permission mode at runtime.
-   * 'bypassPermissions' = auto-approve all tools, 'default' = prompt for each.
+   * Change the agent's permission mode. Delegates to driver.setPermissionMode().
    */
   setPermissionMode(mode) {
-    const requestId = `req_perm_${uuidv4().slice(0, 8)}`;
-    this._sendToCliSocket({
-      type: 'control_request',
-      request_id: requestId,
-      request: {
-        subtype: 'set_permission_mode',
-        mode,
-      },
-    });
-    console.log(`[Agent ${this.id.slice(0, 8)}] Permission mode -> ${mode}`);
+    this.driver.setPermissionMode(mode);
   }
 
-  _sendToCliSocket(msg) {
-    if (!this._cliSocket || this._cliSocket.readyState !== 1) return;
-    this._cliSocket.send(JSON.stringify(msg) + '\n');
+  /**
+   * Called by the bridge when a CLI WebSocket connects back.
+   * Only relevant for drivers that use websocket-server transport (Claude).
+   */
+  attachCliSocket(ws) {
+    if (typeof this.driver.attachSocket === 'function') {
+      this.driver.attachSocket(ws);
+    } else {
+      console.log(`[Agent ${this.id.slice(0, 8)}] Driver ${this.type} does not support attachSocket`);
+      ws.close(4005, 'Agent type does not accept CLI connections');
+    }
   }
 
   getSnapshot() {
@@ -583,23 +401,8 @@ export class AgentSession {
 
   destroy() {
     console.log(`[Agent ${this.id.slice(0, 8)}] Destroying`);
-
-    if (this._cliSocket) {
-      try { this._cliSocket.close(); } catch {}
-      this._cliSocket = null;
-    }
-
-    if (this._process) {
-      try { this._process.kill('SIGTERM'); } catch {}
-      const proc = this._process;
-      setTimeout(() => {
-        try { proc.kill('SIGKILL'); } catch {}
-      }, 5000);
-      this._process = null;
-    }
-
+    this.driver.stop();
     this.status = 'exited';
     this.pendingPermissions.clear();
-    this._promptQueue = [];
   }
 }

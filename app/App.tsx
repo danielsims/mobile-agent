@@ -19,7 +19,7 @@ import { useWebSocket } from './hooks/useWebSocket';
 import { useNotifications } from './hooks/useNotifications';
 import { useCompletionChime } from './hooks/useCompletionChime';
 import { parseQRCode, clearCredentials, isPaired, type QRPairingData } from './utils/auth';
-import type { Project, AgentType, GitLogCommit } from './state/types';
+import type { Project, AgentType, GitLogCommit, ProviderModelOption } from './state/types';
 import type { GitStatusData } from './components/GitTabContent';
 
 type Screen = 'pairing' | 'scanner' | 'dashboard' | 'agent' | 'settings' | 'git';
@@ -36,6 +36,8 @@ function AppInner() {
   const [createModalInitialWorktreePath, setCreateModalInitialWorktreePath] = useState<string | undefined>();
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(false);
+  const [modelsByType, setModelsByType] = useState<Record<string, ProviderModelOption[]>>({});
+  const [modelsLoadingType, setModelsLoadingType] = useState<AgentType | null>(null);
   const [hasCreds, setHasCreds] = useState(false);
 
   const { state, dispatch, handleServerMessage, loadCachedMessages } = useAgentState();
@@ -90,6 +92,14 @@ function AppInner() {
         setProjects(msg.projects);
       }
       setProjectsLoading(false);
+    }
+
+    if (msg.type === 'modelList' && msg.agentType) {
+      setModelsByType(prev => ({
+        ...prev,
+        [msg.agentType!]: msg.models || [],
+      }));
+      setModelsLoadingType(prev => (prev === msg.agentType ? null : prev));
     }
 
     // Worktree created — update projects list with new worktrees
@@ -261,11 +271,13 @@ function AppInner() {
 
   const handleCreateAgentSubmit = (config: {
     agentType: AgentType;
+    model?: string;
     projectId?: string;
     worktreePath?: string;
   }) => {
     send('createAgent', {
       agentType: config.agentType,
+      model: config.model,
       projectId: config.projectId,
       worktreePath: config.worktreePath,
     });
@@ -274,6 +286,11 @@ function AppInner() {
   const handleRequestProjects = () => {
     setProjectsLoading(true);
     send('listProjects');
+  };
+
+  const handleRequestModels = (agentType: AgentType) => {
+    setModelsLoadingType(agentType);
+    send('listModels', { agentType });
   };
 
   const handleCreateWorktree = (projectId: string, branchName: string) => {
@@ -525,9 +542,12 @@ function AppInner() {
           visible={showCreateModal && (screen === 'dashboard' || screen === 'git')}
           projects={projects}
           projectsLoading={projectsLoading}
+          modelsByType={modelsByType}
+          modelsLoadingType={modelsLoadingType}
           onClose={() => { setShowCreateModal(false); setCreateModalInitialProjectId(undefined); setCreateModalInitialWorktreePath(undefined); }}
           onSubmit={handleCreateAgentSubmit}
           onRequestProjects={handleRequestProjects}
+          onRequestModels={handleRequestModels}
           onCreateWorktree={handleCreateWorktree}
           onUnregisterProject={handleUnregisterProject}
           initialProjectId={createModalInitialProjectId}
