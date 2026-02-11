@@ -1017,10 +1017,9 @@ describe('CodexDriver', () => {
       expect(msg.method).toBe('turn/start');
       expect(msg.params.threadId).toBe('thread-123');
       expect(msg.params.input).toEqual([{ type: 'text', text: 'Fix the bug' }]);
-      expect(msg.params.approvalPolicy).toBe('on-request');
+      expect(msg.params.approvalPolicy).toBe('untrusted');
       expect(msg.params.sandboxPolicy).toEqual({
-        type: 'workspaceWrite',
-        networkAccess: false,
+        type: 'readOnly',
       });
 
       // Resolve the request
@@ -1043,6 +1042,7 @@ describe('CodexDriver', () => {
       driver._ready = true;
       driver._threadId = 'thread-123';
       driver._workspaceWritableRoots = ['/repo/.git', '/repo/.git/worktrees/feat-codex'];
+      await driver.setPermissionMode('bypassPermissions');
 
       const sendPromise = driver.sendPrompt('Commit these changes');
       const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
@@ -1160,10 +1160,10 @@ describe('CodexDriver', () => {
       expect(driver._sandboxMode).toBe('workspace-write');
     });
 
-    it('maps default to on-request with workspace-write sandbox', async () => {
+    it('maps default to untrusted with read-only sandbox', async () => {
       await driver.setPermissionMode('default');
-      expect(driver._approvalPolicy).toBe('on-request');
-      expect(driver._sandboxMode).toBe('workspace-write');
+      expect(driver._approvalPolicy).toBe('untrusted');
+      expect(driver._sandboxMode).toBe('read-only');
     });
   });
 

@@ -53,8 +53,8 @@ export class CodexDriver extends BaseDriver {
     this._buffer = '';            // incomplete line buffer for stdout
     this._initialized = false;
     this._model = process.env.CODEX_MODEL?.trim() || null;
-    this._approvalPolicy = 'on-request'; // 'untrusted' | 'on-request' | 'on-failure' | 'never'
-    this._sandboxMode = 'workspace-write'; // 'read-only' | 'workspace-write' | 'danger-full-access'
+    this._approvalPolicy = 'untrusted'; // 'untrusted' | 'on-request' | 'on-failure' | 'never'
+    this._sandboxMode = 'read-only'; // 'read-only' | 'workspace-write' | 'danger-full-access'
     this._workspaceWritableRoots = [];
     this._currentStreamContent = '';
     this._activeToolUseIds = new Set();  // tool items currently in progress (web search, etc.)
@@ -603,8 +603,10 @@ export class CodexDriver extends BaseDriver {
     // Map shared app modes (Ask / Auto) to Codex-native policies.
     // Auto uses on-failure, not never, so write failures can still escalate.
     const modeMap = {
+      // Auto mode: allow sandboxed writes by default, escalate when needed.
       bypassPermissions: { approvalPolicy: 'on-failure', sandboxMode: 'workspace-write' },
-      default: { approvalPolicy: 'on-request', sandboxMode: 'workspace-write' },
+      // Ask mode: force explicit permission path before writes.
+      default: { approvalPolicy: 'untrusted', sandboxMode: 'read-only' },
     };
     const mapped = modeMap[mode];
     if (mapped) {
