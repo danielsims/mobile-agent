@@ -127,7 +127,7 @@ export function Dashboard({
   const [pageRestored, setPageRestored] = useState(false);
   const inlineInputRef = useRef<TextInput>(null);
   const scrollViewRef = useRef<ScrollView>(null);
-  const prevAgentCount = useRef(0);
+  const prevAgentCount = useRef(-1); // -1 = not yet initialized
 
   const agents = useMemo(() =>
     Array.from(state.agents.values()).sort((a, b) => a.createdAt - b.createdAt),
@@ -195,8 +195,13 @@ export function Dashboard({
     }
   }, [totalPages, currentPage]);
 
-  // Auto-scroll to last page when a new agent is created
+  // Auto-scroll to last page when a new agent is created (not on initial load)
   useEffect(() => {
+    if (prevAgentCount.current === -1) {
+      // First load — just record the count, don't scroll
+      prevAgentCount.current = agents.length;
+      return;
+    }
     if (agents.length > prevAgentCount.current && pages.length > 0) {
       const lastPage = pages.length - 1;
       setTimeout(() => {
