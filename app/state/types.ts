@@ -97,6 +97,7 @@ export type AgentAction =
   | { type: 'ADD_MESSAGE'; agentId: string; message: AgentMessage }
   | { type: 'APPEND_STREAM_CONTENT'; agentId: string; text: string }
   | { type: 'FINALIZE_ASSISTANT_MESSAGE'; agentId: string; content: ContentBlock[]; timestamp: number }
+  | { type: 'MERGE_TOOL_RESULTS'; agentId: string; results: Array<{ toolUseId: string; content: string | unknown }> }
   | { type: 'SET_MESSAGES'; agentId: string; messages: AgentMessage[] }
   | { type: 'BATCH_SET_MESSAGES'; batch: Array<{ agentId: string; messages: AgentMessage[] }> }
   | { type: 'ADD_PERMISSION'; agentId: string; permission: PermissionRequest }

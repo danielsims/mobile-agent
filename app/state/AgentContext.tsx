@@ -213,6 +213,17 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
         break;
       }
 
+      case 'toolResults': {
+        if (msg.agentId && Array.isArray(msg.results) && msg.results.length > 0) {
+          dispatch({
+            type: 'MERGE_TOOL_RESULTS',
+            agentId: msg.agentId,
+            results: msg.results,
+          });
+        }
+        break;
+      }
+
       case 'permissionRequest': {
         if (msg.agentId && msg.requestId) {
           dispatch({

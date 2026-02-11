@@ -527,17 +527,19 @@ describe('ClaudeDriver', () => {
   });
 
   describe('Interrupt', () => {
-    it('sends interrupt control request', async () => {
-      const ws = createMockWebSocket();
-      driver.attachSocket(ws);
+    it('sends SIGINT to the CLI process', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
 
       await driver.interrupt();
 
-      expect(ws.send).toHaveBeenCalledOnce();
-      const sent = JSON.parse(ws.send.mock.calls[0][0].trim());
-      expect(sent.type).toBe('control_request');
-      expect(sent.request.subtype).toBe('interrupt');
-      expect(typeof sent.request_id).toBe('string');
+      expect(proc.kill).toHaveBeenCalledWith('SIGINT');
+    });
+
+    it('does nothing when no process exists', async () => {
+      driver._process = null;
+      // Should not throw
+      await driver.interrupt();
     });
   });
 

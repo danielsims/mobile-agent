@@ -189,6 +189,7 @@ export class AgentSession {
       const content = data.content;
       if (!Array.isArray(content)) return;
 
+      const merged = [];
       const lastAssistant = [...this.messageHistory].reverse().find(m => m.type === 'assistant');
       if (lastAssistant && Array.isArray(lastAssistant.content)) {
         for (const b of content) {
@@ -202,9 +203,17 @@ export class AgentSession {
                 .map(c => c.text)
                 .join('\n');
             }
-            lastAssistant.content.push({ type: 'tool_result', toolUseId: b.tool_use_id, content: resultText });
+            const block = { type: 'tool_result', toolUseId: b.tool_use_id, content: resultText };
+            lastAssistant.content.push(block);
+            merged.push(block);
           }
         }
+      }
+
+      // Broadcast so the mobile app knows these tools completed and can
+      // update its UI (e.g. remove "running" spinners on tool_use blocks).
+      if (merged.length > 0) {
+        this._broadcast('toolResults', { agentId: this.id, results: merged });
       }
     });
 

@@ -297,17 +297,18 @@ export class ClaudeDriver extends BaseDriver {
   }
 
   async interrupt() {
-    // Best-effort interrupt for the active turn.
-    // Claude's stream-json control channel supports control_request subtypes.
-    const requestId = `req_interrupt_${uuidv4().slice(0, 8)}`;
-    this._send({
-      type: 'control_request',
-      request_id: requestId,
-      request: {
-        subtype: 'interrupt',
-      },
-    });
-    console.log(`[Claude ${this._agentId?.slice(0, 8)}] Interrupt requested`);
+    // The --sdk-url stream-json protocol does not have an interrupt control
+    // message. The only reliable way to cancel an active turn is to send
+    // SIGINT to the CLI process, which triggers its graceful abort handler.
+    if (this._process) {
+      try {
+        this._process.kill('SIGINT');
+        console.log(`[Claude ${this._agentId?.slice(0, 8)}] SIGINT sent`);
+      } catch (err) {
+        console.error(`[Claude ${this._agentId?.slice(0, 8)}] Failed to send SIGINT:`, err.message);
+        throw err;
+      }
+    }
   }
 
   async stop() {

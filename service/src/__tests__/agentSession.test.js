@@ -358,6 +358,39 @@ describe('AgentSession', () => {
       const lastMsg = session.messageHistory[0];
       expect(lastMsg.content[1].content).toBe('line 1\nline 2');
     });
+
+    it('broadcasts toolResults so mobile app can mark tools as completed', () => {
+      session.driver.emit('message', {
+        content: [
+          { type: 'tool_use', id: 'tu-1', name: 'Read', input: { path: '/file.txt' } },
+        ],
+      });
+
+      session.driver.emit('toolResults', {
+        content: [
+          { type: 'tool_result', tool_use_id: 'tu-1', content: 'done' },
+        ],
+      });
+
+      const toolResultsBroadcast = broadcasts.find(b => b.type === 'toolResults');
+      expect(toolResultsBroadcast).toBeTruthy();
+      expect(toolResultsBroadcast.data.agentId).toBe('agent-123');
+      expect(toolResultsBroadcast.data.results).toHaveLength(1);
+      expect(toolResultsBroadcast.data.results[0].toolUseId).toBe('tu-1');
+    });
+
+    it('does not broadcast when no tool_result blocks are present', () => {
+      session.driver.emit('message', {
+        content: [{ type: 'text', text: 'hi' }],
+      });
+
+      session.driver.emit('toolResults', {
+        content: [{ type: 'text', text: 'not a tool result' }],
+      });
+
+      const toolResultsBroadcast = broadcasts.find(b => b.type === 'toolResults');
+      expect(toolResultsBroadcast).toBeFalsy();
+    });
   });
 
   describe('Driver event: status', () => {
