@@ -26,6 +26,9 @@ import {
   removeWorktree,
   resolveProjectCwd,
   getProjectIcon,
+  getGitStatus,
+  getGitDiff,
+  getGitBranchInfo,
 } from './projects.js';
 
 const MAX_CONCURRENT_AGENTS = 10;
@@ -414,6 +417,14 @@ export class Bridge {
         this._handleUnregisterProject(ws, msg, deviceId);
         break;
 
+      case 'getGitStatus':
+        this._handleGetGitStatus(ws, msg);
+        break;
+
+      case 'getGitDiff':
+        this._handleGetGitDiff(ws, msg);
+        break;
+
       case 'ping':
         this._sendTo(ws, 'pong');
         break;
@@ -673,6 +684,55 @@ export class Bridge {
     } catch (e) {
       this._sendTo(ws, 'error', { error: e.message });
     }
+  }
+
+  // --- Git status/diff handlers ---
+
+  _handleGetGitStatus(ws, msg) {
+    const { agentId } = msg;
+    if (!agentId) {
+      this._sendTo(ws, 'error', { error: 'agentId required.' });
+      return;
+    }
+
+    const session = this.agents.get(agentId);
+    if (!session || !session.cwd) {
+      this._sendTo(ws, 'error', { error: 'Agent not found or no working directory.' });
+      return;
+    }
+
+    const branchInfo = getGitBranchInfo(session.cwd);
+    const files = getGitStatus(session.cwd);
+
+    this._sendTo(ws, 'gitStatus', {
+      agentId,
+      branch: branchInfo.branch,
+      ahead: branchInfo.ahead,
+      behind: branchInfo.behind,
+      files,
+    });
+  }
+
+  _handleGetGitDiff(ws, msg) {
+    const { agentId, filePath } = msg;
+    if (!agentId) {
+      this._sendTo(ws, 'error', { error: 'agentId required.' });
+      return;
+    }
+
+    const session = this.agents.get(agentId);
+    if (!session || !session.cwd) {
+      this._sendTo(ws, 'error', { error: 'Agent not found or no working directory.' });
+      return;
+    }
+
+    const diff = getGitDiff(session.cwd, filePath);
+
+    this._sendTo(ws, 'gitDiff', {
+      agentId,
+      filePath: filePath || null,
+      diff,
+    });
   }
 
   // --- Broadcasting ---
