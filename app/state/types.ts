@@ -201,6 +201,15 @@ export interface ServerMessage {
   worktree?: Worktree;
   worktrees?: Worktree[];
 
+  // gitStatus
+  files?: Array<{ file: string; status: string }>;
+  ahead?: number;
+  behind?: number;
+
+  // gitDiff
+  filePath?: string;
+  diff?: string;
+
   // error
   error?: string;
 }
