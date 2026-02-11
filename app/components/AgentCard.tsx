@@ -86,22 +86,24 @@ function formatModelName(model: string | null, type: AgentType): string {
   return model;
 }
 
-function extractMessageText(msg: AgentMessage): string {
+function extractMessageBody(msg: AgentMessage): string {
   if (msg.type === 'user') {
-    const text = typeof msg.content === 'string' ? msg.content : '';
-    return text ? '❯ You\n' + text : '';
+    return typeof msg.content === 'string' ? msg.content : '';
   }
   if (msg.type === 'assistant') {
-    let text = '';
+    const parts: string[] = [];
     if (typeof msg.content === 'string') {
-      text = msg.content;
+      parts.push(msg.content);
     } else if (Array.isArray(msg.content)) {
-      text = (msg.content as ContentBlock[])
-        .filter((b): b is { type: 'text'; text: string } => b.type === 'text' && 'text' in b)
-        .map(b => b.text)
-        .join('\n');
+      for (const b of msg.content as ContentBlock[]) {
+        if (b.type === 'text' && 'text' in b) {
+          parts.push(b.text);
+        } else if (b.type === 'tool_use' && 'name' in b) {
+          parts.push(`\x00${b.name}`);
+        }
+      }
     }
-    return text ? '❯ Assistant\n' + text : '';
+    return parts.join('\n');
   }
   return '';
 }
@@ -109,6 +111,7 @@ function extractMessageText(msg: AgentMessage): string {
 interface PreviewLine {
   text: string;
   isHeader: boolean;
+  isToolUse?: boolean;
 }
 
 const CARD_MESSAGE_WINDOW = 30;
@@ -116,15 +119,24 @@ const CARD_MESSAGE_WINDOW = 30;
 function buildTerminalPreview(messages: AgentMessage[], maxMessages: number): PreviewLine[] {
   const startIdx = Math.max(0, messages.length - maxMessages);
   const lines: PreviewLine[] = [];
+  let prevType: string | null = null;
   for (let i = startIdx; i < messages.length; i++) {
-    const text = extractMessageText(messages[i]);
-    if (!text) continue;
-    const msgLines = text.split('\n').filter(l => l.trim());
-    for (let idx = 0; idx < msgLines.length; idx++) {
-      lines.push({
-        text: msgLines[idx],
-        isHeader: idx === 0 && msgLines[idx].startsWith('❯ '),
-      });
+    const msg = messages[i];
+    const body = extractMessageBody(msg);
+    if (!body) continue;
+    // Only show header when the sender changes
+    if (msg.type !== prevType) {
+      const header = msg.type === 'user' ? '❯ You' : '❯ Assistant';
+      lines.push({ text: header, isHeader: true });
+      prevType = msg.type;
+    }
+    const bodyLines = body.split('\n').filter(l => l.trim());
+    for (const line of bodyLines) {
+      if (line.startsWith('\x00')) {
+        lines.push({ text: line.slice(1), isHeader: false, isToolUse: true });
+      } else {
+        lines.push({ text: line, isHeader: false });
+      }
     }
   }
   return lines;
@@ -351,14 +363,20 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
     if (h > 0 && h !== bodyHeight) setBodyHeight(h);
   }, [bodyHeight]);
 
+  const renderLine = (line: PreviewLine, i: number) => (
+    <Text key={i}>
+      {i > 0 ? '\n' : ''}
+      {line.isToolUse ? (
+        <Text><Text style={styles.previewHeader}>❯ </Text>{line.text}</Text>
+      ) : (
+        <Text style={line.isHeader ? styles.previewHeader : undefined}>{line.text}</Text>
+      )}
+    </Text>
+  );
+
   const terminalTextElement = terminalLines.length > 0 ? (
     <Text style={[styles.previewText, isFull && styles.previewTextFull]}>
-      {terminalLines.map((line, i) => (
-        <Text key={i}>
-          {i > 0 ? '\n' : ''}
-          <Text style={line.isHeader ? styles.previewHeader : undefined}>{line.text}</Text>
-        </Text>
-      ))}
+      {terminalLines.map(renderLine)}
     </Text>
   ) : null;
 
@@ -374,12 +392,7 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
       </ScrollView>
     ) : (
       <Text style={styles.previewText} numberOfLines={4}>
-        {terminalLines.map((line, i) => (
-          <Text key={i}>
-            {i > 0 ? '\n' : ''}
-            <Text style={line.isHeader ? styles.previewHeader : undefined}>{line.text}</Text>
-          </Text>
-        ))}
+        {terminalLines.map(renderLine)}
       </Text>
     )
   ) : (
