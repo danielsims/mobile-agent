@@ -46,6 +46,8 @@ interface GitScreenProps {
   onSelectAgent: (agentId: string) => void;
   onDestroyAgent?: (agentId: string) => void;
   onSendMessage?: (agentId: string, text: string) => void;
+  onCreateWorktree?: (projectId: string, branchName: string) => void;
+  onCreateAgentForWorktree?: (projectId: string, worktreePath: string) => void;
   gitDataMap: Map<string, AgentGitData>;
   loadingAgentIds: Set<string>;
   projects: Project[];
@@ -142,10 +144,12 @@ function StackedAgentAvatars({ agents, size = 20 }: { agents: AgentState[]; size
   );
 }
 
-export function GitScreen({ onBack, onRequestGitStatus, onSelectAgent, onDestroyAgent, onSendMessage, gitDataMap, loadingAgentIds, projects }: GitScreenProps) {
+export function GitScreen({ onBack, onRequestGitStatus, onSelectAgent, onDestroyAgent, onSendMessage, onCreateWorktree, onCreateAgentForWorktree, gitDataMap, loadingAgentIds, projects }: GitScreenProps) {
   const { state } = useAgentState();
   const { settings } = useSettings();
   const [expandedWorktree, setExpandedWorktree] = useState<string | null>(null);
+  const [expandedNewWorktree, setExpandedNewWorktree] = useState<string | null>(null);
+  const [newBranchName, setNewBranchName] = useState('');
 
   // Chat/voice state
   const [chatAgentId, setChatAgentId] = useState<string | null>(null);
@@ -235,6 +239,15 @@ export function GitScreen({ onBack, onRequestGitStatus, onSelectAgent, onDestroy
   const canSend = chatText.trim().length > 0;
   const canSendVoice = voiceText.trim().length > 0;
 
+  const handleCreateWorktree = useCallback((projectId: string) => {
+    const trimmed = newBranchName.trim();
+    if (!trimmed || !onCreateWorktree) return;
+    onCreateWorktree(projectId, trimmed);
+    setNewBranchName('');
+    setExpandedNewWorktree(null);
+    Keyboard.dismiss();
+  }, [newBranchName, onCreateWorktree]);
+
   // Slide in from the LEFT
   const swipeX = useRef(new Animated.Value(-SCREEN_WIDTH)).current;
 
@@ -257,11 +270,31 @@ export function GitScreen({ onBack, onRequestGitStatus, onSelectAgent, onDestroy
   }, []); // Only on mount
 
   // Swipe from right edge to dismiss (slide back left)
+  // Use capture phase so the ScrollView doesn't steal the touch
+  const edgeSwipeActive = useRef(false);
   const panResponder = useRef(
     PanResponder.create({
+      onStartShouldSetPanResponderCapture: (evt) => {
+        // Claim touch immediately if it starts near the right edge
+        const startX = evt.nativeEvent.pageX;
+        if (startX > SCREEN_WIDTH - EDGE_WIDTH) {
+          edgeSwipeActive.current = true;
+          return true;
+        }
+        edgeSwipeActive.current = false;
+        return false;
+      },
       onMoveShouldSetPanResponder: (_evt, gesture) => {
         return (
-          gesture.x0 > SCREEN_WIDTH - EDGE_WIDTH &&
+          edgeSwipeActive.current &&
+          gesture.dx < -10 &&
+          Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.5
+        );
+      },
+      onMoveShouldSetPanResponderCapture: (_evt, gesture) => {
+        // Also capture during move if we started at the edge
+        return (
+          edgeSwipeActive.current &&
           gesture.dx < -10 &&
           Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.5
         );
@@ -272,6 +305,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onSelectAgent, onDestroy
         }
       },
       onPanResponderRelease: (_evt, gesture) => {
+        edgeSwipeActive.current = false;
         if (gesture.dx < -SWIPE_THRESHOLD) {
           Animated.timing(swipeX, {
             toValue: -SCREEN_WIDTH,
@@ -288,6 +322,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onSelectAgent, onDestroy
         }
       },
       onPanResponderTerminate: () => {
+        edgeSwipeActive.current = false;
         Animated.spring(swipeX, {
           toValue: 0,
           useNativeDriver: true,
@@ -371,10 +406,13 @@ export function GitScreen({ onBack, onRequestGitStatus, onSelectAgent, onDestroy
                     <View key={wt.path}>
                       <TouchableOpacity
                         style={[styles.worktreeRow, isExpanded && styles.worktreeRowExpanded]}
-                        activeOpacity={hasAgents ? 0.7 : 1}
+                        activeOpacity={0.7}
                         onPress={() => {
-                          if (!hasAgents) return;
                           if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                          if (!hasAgents) {
+                            onCreateAgentForWorktree?.(project.id, wt.path);
+                            return;
+                          }
                           if (agents.length === 1) {
                             // Single agent: navigate directly
                             animateBack();
@@ -444,6 +482,48 @@ export function GitScreen({ onBack, onRequestGitStatus, onSelectAgent, onDestroy
                     </View>
                   );
                 })}
+
+                {onCreateWorktree && (
+                  expandedNewWorktree === project.id ? (
+                    <View style={styles.newWorktreeExpanded}>
+                      <TextInput
+                        style={styles.newWorktreeInput}
+                        value={newBranchName}
+                        onChangeText={setNewBranchName}
+                        placeholder="branch-name"
+                        placeholderTextColor="#444"
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        autoFocus
+                        keyboardAppearance="dark"
+                        onSubmitEditing={() => handleCreateWorktree(project.id)}
+                        returnKeyType="done"
+                      />
+                      <TouchableOpacity
+                        style={[styles.newWorktreeCreateBtn, newBranchName.trim() && styles.newWorktreeCreateBtnActive]}
+                        onPress={() => handleCreateWorktree(project.id)}
+                        disabled={!newBranchName.trim()}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={[styles.newWorktreeCreateText, newBranchName.trim() && styles.newWorktreeCreateTextActive]}>
+                          Create
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  ) : (
+                    <TouchableOpacity
+                      style={styles.newWorktreeRow}
+                      onPress={() => {
+                        if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                        setExpandedNewWorktree(project.id);
+                        setNewBranchName('');
+                      }}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.newWorktreeText}>+ New worktree...</Text>
+                    </TouchableOpacity>
+                  )
+                )}
               </View>
             ))
           )}
@@ -763,6 +843,52 @@ const styles = StyleSheet.create({
     color: '#777',
     fontSize: 11,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  // New worktree
+  newWorktreeRow: {
+    backgroundColor: '#1a1a1a',
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    marginBottom: 1,
+  },
+  newWorktreeText: {
+    color: '#444',
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  newWorktreeExpanded: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1a1a1a',
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    marginBottom: 1,
+    gap: 10,
+  },
+  newWorktreeInput: {
+    flex: 1,
+    color: '#e5e5e5',
+    fontSize: 14,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    paddingVertical: 6,
+    paddingHorizontal: 0,
+  },
+  newWorktreeCreateBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+  },
+  newWorktreeCreateBtnActive: {
+    backgroundColor: '#fff',
+  },
+  newWorktreeCreateText: {
+    color: '#444',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  newWorktreeCreateTextActive: {
+    color: '#000',
   },
 });
 

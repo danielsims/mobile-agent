@@ -32,6 +32,8 @@ function AppInner() {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [permission, requestPermission] = useCameraPermissions();
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [createModalInitialProjectId, setCreateModalInitialProjectId] = useState<string | undefined>();
+  const [createModalInitialWorktreePath, setCreateModalInitialWorktreePath] = useState<string | undefined>();
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [hasCreds, setHasCreds] = useState(false);
@@ -228,6 +230,14 @@ function AppInner() {
 
   // Agent actions
   const handleCreateAgent = () => {
+    setCreateModalInitialProjectId(undefined);
+    setCreateModalInitialWorktreePath(undefined);
+    setShowCreateModal(true);
+  };
+
+  const handleCreateAgentForWorktree = (projectId: string, worktreePath: string) => {
+    setCreateModalInitialProjectId(projectId);
+    setCreateModalInitialWorktreePath(worktreePath);
     setShowCreateModal(true);
   };
 
@@ -472,6 +482,8 @@ function AppInner() {
               onSelectAgent={handleSelectAgent}
               onDestroyAgent={handleDestroyAgent}
               onSendMessage={handleSendMessage}
+              onCreateWorktree={handleCreateWorktree}
+              onCreateAgentForWorktree={handleCreateAgentForWorktree}
               gitDataMap={gitDataMap}
               loadingAgentIds={gitLoadingAgents}
               projects={projects}
@@ -479,14 +491,16 @@ function AppInner() {
           </View>
         )}
         <CreateAgentModal
-          visible={showCreateModal && screen === 'dashboard'}
+          visible={showCreateModal && (screen === 'dashboard' || screen === 'git')}
           projects={projects}
           projectsLoading={projectsLoading}
-          onClose={() => setShowCreateModal(false)}
+          onClose={() => { setShowCreateModal(false); setCreateModalInitialProjectId(undefined); setCreateModalInitialWorktreePath(undefined); }}
           onSubmit={handleCreateAgentSubmit}
           onRequestProjects={handleRequestProjects}
           onCreateWorktree={handleCreateWorktree}
           onUnregisterProject={handleUnregisterProject}
+          initialProjectId={createModalInitialProjectId}
+          initialWorktreePath={createModalInitialWorktreePath}
         />
       </View>
     );
