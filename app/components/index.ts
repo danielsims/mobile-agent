@@ -1,11 +1,17 @@
 export { AgentCard } from './AgentCard';
 export { AgentDetailScreen } from './AgentDetailScreen';
+export { ArtifactsTabContent } from './ArtifactsTabContent';
 export { CodeBlock } from './CodeBlock';
+export { CommitsTabContent } from './CommitsTabContent';
 export { CreateAgentModal } from './CreateAgentModal';
 export { Dashboard } from './Dashboard';
+export { FileTypeIcon } from './FileTypeIcon';
+export { GitScreen } from './GitScreen';
+export { GitTabContent } from './GitTabContent';
 export { InputBar } from './InputBar';
 export { KeyboardScrollView } from './KeyboardScrollView';
 export { MessageBubble } from './MessageBubble';
 export { PermissionPrompt } from './PermissionPrompt';
 export { SettingsScreen } from './SettingsScreen';
 export { ShimmerText } from './ShimmerText';
+export { SourceTabContent } from './SourceTabContent';

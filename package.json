@@ -6,5 +6,8 @@
     "start": "cd service && npm start",
     "app": "cd app && npm start",
     "install:all": "cd service && npm install && cd ../app && npm install"
+  },
+  "dependencies": {
+    "seti-icons": "^0.0.4"
   }
 }

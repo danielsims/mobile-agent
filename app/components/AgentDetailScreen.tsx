@@ -23,6 +23,8 @@ import { KeyboardScrollView } from './KeyboardScrollView';
 import { MessageBubble, buildToolResultMap } from './MessageBubble';
 import { InputBar } from './InputBar';
 import { CodeBlock } from './CodeBlock';
+import { GitTabContent, type GitStatusData } from './GitTabContent';
+import { ArtifactsTabContent } from './ArtifactsTabContent';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 import { useSettings } from '../state/SettingsContext';
 
@@ -33,6 +35,8 @@ const SCREEN_WIDTH = Dimensions.get('window').width;
 const SWIPE_THRESHOLD = SCREEN_WIDTH * 0.25;
 const EDGE_WIDTH = 30; // pixels from left edge to start recognizing swipe
 
+type DetailTab = 'chat' | 'git' | 'artifacts';
+
 interface AgentDetailScreenProps {
   agentId: string;
   connectionStatus: ConnectionStatus;
@@ -42,6 +46,12 @@ interface AgentDetailScreenProps {
   onRespondPermission: (agentId: string, requestId: string, behavior: 'allow' | 'deny') => void;
   onSetAutoApprove?: (agentId: string, enabled: boolean) => void;
   onResetPingTimer: () => void;
+  onRequestGitStatus?: (agentId: string) => void;
+  onRequestGitDiff?: (agentId: string, filePath: string) => void;
+  gitStatus?: GitStatusData | null;
+  gitDiff?: string | null;
+  gitLoading?: boolean;
+  gitDiffLoading?: boolean;
 }
 
 function formatCost(cost: number): string {
@@ -191,18 +201,32 @@ export function AgentDetailScreen({
   onRespondPermission,
   onSetAutoApprove,
   onResetPingTimer,
+  onRequestGitStatus,
+  onRequestGitDiff,
+  gitStatus = null,
+  gitDiff = null,
+  gitLoading = false,
+  gitDiffLoading = false,
 }: AgentDetailScreenProps) {
   const agent = useAgent(agentId);
   const { dispatch } = useAgentState();
   const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [activeTab, setActiveTab] = useState<DetailTab>('chat');
+  const tabScrollRef = useRef<ScrollView>(null);
   const INITIAL_MESSAGE_WINDOW = 30;
   const [messageWindow, setMessageWindow] = useState(INITIAL_MESSAGE_WINDOW);
+  const TABS: DetailTab[] = ['chat', 'git', 'artifacts'];
 
-  // Swipe-from-left-edge to go back
+  // Swipe-from-left-edge to go back (only on Chat tab)
   const swipeX = useRef(new Animated.Value(0)).current;
+  const activeTabRef = useRef<DetailTab>('chat');
+  activeTabRef.current = activeTab;
+
   const panResponder = useRef(
     PanResponder.create({
       onMoveShouldSetPanResponder: (_evt, gesture) => {
+        // Only respond on Chat tab — other tabs use horizontal ScrollView for swiping
+        if (activeTabRef.current !== 'chat') return false;
         // Only respond to horizontal swipes starting near the left edge
         return (
           gesture.x0 < EDGE_WIDTH &&
@@ -361,6 +385,65 @@ export function AgentDetailScreen({
     return null;
   }, [agent, projects]);
 
+  // Git request callbacks
+  const handleRequestGitStatus = useCallback(() => {
+    onRequestGitStatus?.(agentId);
+  }, [agentId, onRequestGitStatus]);
+
+  const handleRequestGitDiff = useCallback((filePath: string) => {
+    onRequestGitDiff?.(agentId, filePath);
+  }, [agentId, onRequestGitDiff]);
+
+  // Tab switching — taps and swipes both go through here
+  const handleTabSwitch = useCallback((tab: DetailTab) => {
+    if (tab !== activeTab) {
+      if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      setActiveTab(tab);
+      const idx = TABS.indexOf(tab);
+      tabScrollRef.current?.scrollTo({ x: idx * SCREEN_WIDTH, animated: true });
+    }
+  }, [activeTab, TABS]);
+
+  // Sync tab state from horizontal scroll (swipe between tabs)
+  const handleTabScroll = useCallback((event: import('react-native').NativeSyntheticEvent<import('react-native').NativeScrollEvent>) => {
+    const offsetX = event.nativeEvent.contentOffset.x;
+    const page = Math.round(offsetX / SCREEN_WIDTH);
+    const tab = TABS[page];
+    if (tab && tab !== activeTab) {
+      if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      setActiveTab(tab);
+    }
+  }, [activeTab, TABS]);
+
+  // Count artifact URLs for badge
+  const artifactCount = useMemo(() => {
+    if (!agent) return 0;
+    const urlRegex = /https?:\/\/[^\s<>)"'\]*_`~]+/g;
+    const seen = new Set<string>();
+    const stringifyVal = (val: unknown): string => {
+      if (typeof val === 'string') return val;
+      if (val == null || typeof val === 'boolean' || typeof val === 'number') return '';
+      if (Array.isArray(val)) return val.map(stringifyVal).join('\n');
+      if (typeof val === 'object') return Object.values(val!).map(stringifyVal).join('\n');
+      return '';
+    };
+    for (const msg of agent.messages) {
+      let text = '';
+      if (typeof msg.content === 'string') text = msg.content;
+      else if (Array.isArray(msg.content)) {
+        for (const b of msg.content as any[]) {
+          if (b.type === 'text' && 'text' in b) text += b.text + '\n';
+          else if (b.type === 'thinking' && 'text' in b) text += b.text + '\n';
+          else if (b.type === 'tool_use' && 'input' in b) text += stringifyVal(b.input) + '\n';
+          else if (b.type === 'tool_result') text += stringifyVal(b.content) + '\n';
+        }
+      }
+      const matches = text.match(urlRegex);
+      if (matches) matches.forEach(u => seen.add(u.replace(/[.,;:!?)\]}>]+$/, '')));
+    }
+    return seen.size;
+  }, [agent]);
+
   // Build a global toolUseId → result map across ALL messages
   const toolResultMap = useMemo(
     () => agent ? buildToolResultMap(agent.messages) : new Map(),
@@ -480,15 +563,46 @@ export function AgentDetailScreen({
           )}
         </View>
 
-        {/* Stats bar */}
-        {(agent.totalCost > 0 || agent.outputTokens > 0) && (
-          <View style={styles.statsBar}>
-            <Text style={styles.statItem}>Cost: {formatCost(agent.totalCost)}</Text>
-            <Text style={styles.statItem}>Tokens: {formatTokens(agent.outputTokens)}</Text>
-            {agent.contextUsedPercent > 0 && (
-              <View style={styles.contextStat}>
-                <Text style={styles.statItem}>Context: {Math.round(agent.contextUsedPercent)}%</Text>
-                <View style={styles.contextBarLarge}>
+        {/* Tab bar */}
+        <View style={styles.tabBar}>
+          <TouchableOpacity
+            style={[styles.tab, activeTab === 'chat' && styles.tabActive]}
+            onPress={() => handleTabSwitch('chat')}
+            activeOpacity={0.7}
+          >
+            <Text style={[styles.tabText, activeTab === 'chat' && styles.tabTextActive]}>Chat</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tab, activeTab === 'git' && styles.tabActive]}
+            onPress={() => handleTabSwitch('git')}
+            activeOpacity={0.7}
+          >
+            <Text style={[styles.tabText, activeTab === 'git' && styles.tabTextActive]}>Git</Text>
+            {gitStatus && gitStatus.files.length > 0 && (
+              <View style={[styles.tabBadgeCircle, activeTab === 'git' && styles.tabBadgeCircleActive]}>
+                <Text style={[styles.tabBadgeText, activeTab === 'git' && styles.tabBadgeTextActive]}>{gitStatus.files.length}</Text>
+              </View>
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tab, activeTab === 'artifacts' && styles.tabActive]}
+            onPress={() => handleTabSwitch('artifacts')}
+            activeOpacity={0.7}
+          >
+            <Text style={[styles.tabText, activeTab === 'artifacts' && styles.tabTextActive]}>Artifacts</Text>
+            {artifactCount > 0 && (
+              <View style={[styles.tabBadgeCircle, activeTab === 'artifacts' && styles.tabBadgeCircleActive]}>
+                <Text style={[styles.tabBadgeText, activeTab === 'artifacts' && styles.tabBadgeTextActive]}>{artifactCount}</Text>
+              </View>
+            )}
+          </TouchableOpacity>
+
+          {/* Compact stats inline */}
+          {(agent.totalCost > 0 || agent.outputTokens > 0) && (
+            <View style={styles.tabStats}>
+              <Text style={styles.tabStatText}>{formatCost(agent.totalCost)}</Text>
+              {agent.contextUsedPercent > 0 && (
+                <View style={styles.tabContextBar}>
                   <View
                     style={[
                       styles.contextFill,
@@ -500,103 +614,135 @@ export function AgentDetailScreen({
                     ]}
                   />
                 </View>
-              </View>
-            )}
-          </View>
-        )}
-
-        {/* Chat */}
-        <View style={[styles.main, keyboardHeight > 0 && { paddingBottom: keyboardHeight }]}>
-          <KeyboardScrollView style={styles.chatArea} contentContainerStyle={styles.chatContent}>
-            {agent.messages.length === 0 ? (
-              <Text style={styles.placeholder}>Send a message to start...</Text>
-            ) : (
-              <>
-                {hasHiddenMessages && (
-                  <TouchableOpacity
-                    style={styles.loadMoreBtn}
-                    onPress={() => setMessageWindow(w => w + 50)}
-                  >
-                    <Text style={styles.loadMoreText}>
-                      Load earlier messages ({agent.messages.length - messageWindow} hidden)
-                    </Text>
-                  </TouchableOpacity>
-                )}
-                {visibleMessages.map((msg, idx) => (
-                  <MessageBubble key={`${msg.id}-${idx}`} message={msg} toolResultMap={toolResultMap} />
-                ))}
-              </>
-            )}
-
-            {/* Pending permissions */}
-            {permissions.map((perm) => (
-              <PermissionCard
-                key={perm.requestId}
-                permission={perm}
-                onAllow={() => onRespondPermission(agentId, perm.requestId, 'allow')}
-                onDeny={() => onRespondPermission(agentId, perm.requestId, 'deny')}
-              />
-            ))}
-          </KeyboardScrollView>
-
-          {voiceOpen ? (
-            <View style={[styles.voiceOverlay, keyboardHeight === 0 && styles.voiceOverlaySafeArea]}>
-              <View style={styles.voiceHeader}>
-                <Text style={styles.voiceLabel} numberOfLines={1}>
-                  Send to: {agent.projectName ? (
-                    <>
-                      <Text style={settings.colorfulGitLabels ? styles.voiceProjectName : undefined}>{agent.projectName}</Text>
-                      {agent.gitBranch ? <Text style={settings.colorfulGitLabels ? styles.voiceGitText : undefined}> git:(<Text style={settings.colorfulGitLabels ? styles.voiceBranchName : undefined}>{agent.gitBranch}</Text>)</Text> : null}
-                    </>
-                  ) : agent.sessionName}
-                </Text>
-                <TouchableOpacity onPress={handleVoiceDismiss} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                  <Text style={styles.voiceCancelText}>Cancel</Text>
-                </TouchableOpacity>
-              </View>
-              <View style={styles.voiceTranscriptArea}>
-                <TextInput
-                  style={styles.voiceTranscriptInput}
-                  value={voiceText}
-                  onChangeText={setVoiceText}
-                  placeholder={isListening ? 'Listening...' : 'Starting...'}
-                  placeholderTextColor="#555"
-                  multiline
-                  autoCorrect={false}
-                  spellCheck={false}
-                  keyboardAppearance="dark"
-                />
-              </View>
-              <View style={styles.voiceBottomRow}>
-                <View style={styles.voiceListeningIndicator}>
-                  <View style={[styles.voiceListeningDot, isListening && styles.voiceListeningDotActive]} />
-                  <Text style={styles.voiceListeningStatusText}>{isListening ? 'Listening' : 'Stopped'}</Text>
-                </View>
-                <TouchableOpacity
-                  style={[styles.voiceSendBtn, canSendVoice && styles.voiceSendBtnActive]}
-                  onPress={handleVoiceSend}
-                  disabled={!canSendVoice}
-                  activeOpacity={0.7}
-                >
-                  <View style={styles.voiceSendIcon}>
-                    <View style={[styles.voiceArrowStem, { backgroundColor: canSendVoice ? '#000' : '#555' }]} />
-                    <View style={[styles.voiceArrowHead, { borderBottomColor: canSendVoice ? '#000' : '#555' }]} />
-                  </View>
-                </TouchableOpacity>
-              </View>
+              )}
             </View>
-          ) : (
-            <InputBar
-              onSend={handleSend}
-              onVoice={handleVoiceOpen}
-              disabled={isDisabled || permissions.length > 0}
-              placeholder={agent.status === 'running' ? 'Agent is working...' : 'Ask anything...'}
-              shimmer={agent.status === 'running'}
-              onActivity={onResetPingTimer}
-              initialValue={agent.draftText}
-              onDraftChange={handleDraftChange}
-            />
           )}
+        </View>
+
+        {/* Tab content — horizontal paging ScrollView for swipe between tabs */}
+        <View style={styles.main}>
+          <ScrollView
+            ref={tabScrollRef}
+            horizontal
+            pagingEnabled
+            showsHorizontalScrollIndicator={false}
+            onMomentumScrollEnd={handleTabScroll}
+            scrollEventThrottle={16}
+            keyboardShouldPersistTaps="handled"
+          >
+            {/* Chat tab */}
+            <View style={[styles.tabPage, activeTab === 'chat' && keyboardHeight > 0 && { paddingBottom: keyboardHeight }]}>
+              <KeyboardScrollView style={styles.chatArea} contentContainerStyle={styles.chatContent}>
+                {agent.messages.length === 0 ? (
+                  <Text style={styles.placeholder}>Send a message to start...</Text>
+                ) : (
+                  <>
+                    {hasHiddenMessages && (
+                      <TouchableOpacity
+                        style={styles.loadMoreBtn}
+                        onPress={() => setMessageWindow(w => w + 50)}
+                      >
+                        <Text style={styles.loadMoreText}>
+                          Load earlier messages ({agent.messages.length - messageWindow} hidden)
+                        </Text>
+                      </TouchableOpacity>
+                    )}
+                    {visibleMessages.map((msg, idx) => (
+                      <MessageBubble key={`${msg.id}-${idx}`} message={msg} toolResultMap={toolResultMap} />
+                    ))}
+                  </>
+                )}
+
+                {/* Pending permissions */}
+                {permissions.map((perm) => (
+                  <PermissionCard
+                    key={perm.requestId}
+                    permission={perm}
+                    onAllow={() => onRespondPermission(agentId, perm.requestId, 'allow')}
+                    onDeny={() => onRespondPermission(agentId, perm.requestId, 'deny')}
+                  />
+                ))}
+              </KeyboardScrollView>
+
+              {voiceOpen ? (
+                <View style={[styles.voiceOverlay, keyboardHeight === 0 && styles.voiceOverlaySafeArea]}>
+                  <View style={styles.voiceHeader}>
+                    <Text style={styles.voiceLabel} numberOfLines={1}>
+                      Send to: {agent.projectName ? (
+                        <>
+                          <Text style={settings.colorfulGitLabels ? styles.voiceProjectName : undefined}>{agent.projectName}</Text>
+                          {agent.gitBranch ? <Text style={settings.colorfulGitLabels ? styles.voiceGitText : undefined}> git:(<Text style={settings.colorfulGitLabels ? styles.voiceBranchName : undefined}>{agent.gitBranch}</Text>)</Text> : null}
+                        </>
+                      ) : agent.sessionName}
+                    </Text>
+                    <TouchableOpacity onPress={handleVoiceDismiss} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                      <Text style={styles.voiceCancelText}>Cancel</Text>
+                    </TouchableOpacity>
+                  </View>
+                  <View style={styles.voiceTranscriptArea}>
+                    <TextInput
+                      style={styles.voiceTranscriptInput}
+                      value={voiceText}
+                      onChangeText={setVoiceText}
+                      placeholder={isListening ? 'Listening...' : 'Starting...'}
+                      placeholderTextColor="#555"
+                      multiline
+                      autoCorrect={false}
+                      spellCheck={false}
+                      keyboardAppearance="dark"
+                    />
+                  </View>
+                  <View style={styles.voiceBottomRow}>
+                    <View style={styles.voiceListeningIndicator}>
+                      <View style={[styles.voiceListeningDot, isListening && styles.voiceListeningDotActive]} />
+                      <Text style={styles.voiceListeningStatusText}>{isListening ? 'Listening' : 'Stopped'}</Text>
+                    </View>
+                    <TouchableOpacity
+                      style={[styles.voiceSendBtn, canSendVoice && styles.voiceSendBtnActive]}
+                      onPress={handleVoiceSend}
+                      disabled={!canSendVoice}
+                      activeOpacity={0.7}
+                    >
+                      <View style={styles.voiceSendIcon}>
+                        <View style={[styles.voiceArrowStem, { backgroundColor: canSendVoice ? '#000' : '#555' }]} />
+                        <View style={[styles.voiceArrowHead, { borderBottomColor: canSendVoice ? '#000' : '#555' }]} />
+                      </View>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ) : (
+                <InputBar
+                  onSend={handleSend}
+                  onVoice={handleVoiceOpen}
+                  disabled={isDisabled || permissions.length > 0}
+                  placeholder={agent.status === 'running' ? 'Agent is working...' : 'Ask anything...'}
+                  shimmer={agent.status === 'running'}
+                  onActivity={onResetPingTimer}
+                  initialValue={agent.draftText}
+                  onDraftChange={handleDraftChange}
+                />
+              )}
+            </View>
+
+            {/* Git tab */}
+            <View style={styles.tabPage}>
+              <GitTabContent
+                agentId={agentId}
+                agentStatus={agent.status}
+                gitStatus={gitStatus}
+                gitDiff={gitDiff}
+                loading={gitLoading}
+                diffLoading={gitDiffLoading}
+                onRequestStatus={handleRequestGitStatus}
+                onRequestDiff={handleRequestGitDiff}
+              />
+            </View>
+
+            {/* Artifacts tab */}
+            <View style={styles.tabPage}>
+              <ArtifactsTabContent messages={agent.messages} />
+            </View>
+          </ScrollView>
         </View>
       </Animated.View>
     </View>
@@ -690,31 +836,74 @@ const styles = StyleSheet.create({
   modeTextAuto: {
     color: '#f59e0b',
   },
-  // Stats bar
-  statsBar: {
+  // Tab bar
+  tabBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 6,
+    paddingHorizontal: 4,
     backgroundColor: '#0f0f0f',
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: '#1a1a1a',
-    gap: 16,
   },
-  statItem: {
-    color: '#555',
-    fontSize: 11,
-  },
-  contextStat: {
+  tab: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderBottomWidth: 2,
+    borderBottomColor: 'transparent',
+    gap: 4,
   },
-  contextBarLarge: {
-    width: 40,
-    height: 3,
+  tabActive: {
+    borderBottomColor: '#fff',
+  },
+  tabText: {
+    color: '#555',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  tabTextActive: {
+    color: '#fff',
+  },
+  tabBadgeCircle: {
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#2a2a2a',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 5,
+  },
+  tabBadgeCircleActive: {
+    backgroundColor: '#fff',
+  },
+  tabBadgeText: {
+    color: '#666',
+    fontSize: 10,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  tabBadgeTextActive: {
+    color: '#000',
+  },
+  tabStats: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 6,
+    paddingRight: 8,
+  },
+  tabStatText: {
+    color: '#444',
+    fontSize: 10,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  tabContextBar: {
+    width: 30,
+    height: 2,
     backgroundColor: '#1f1f1f',
-    borderRadius: 2,
+    borderRadius: 1,
     overflow: 'hidden',
   },
   contextFill: {
@@ -723,6 +912,10 @@ const styles = StyleSheet.create({
   },
   // Main
   main: {
+    flex: 1,
+  },
+  tabPage: {
+    width: SCREEN_WIDTH,
     flex: 1,
   },
   chatArea: {

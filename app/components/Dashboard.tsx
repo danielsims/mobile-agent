@@ -16,39 +16,12 @@ import {
 import Svg, { Path, Circle } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { GlassView, isLiquidGlassAvailable } from 'expo-glass-effect';
 import { useAgentState } from '../state/AgentContext';
 import { useSettings } from '../state/SettingsContext';
 import type { AgentState, Project } from '../state/types';
 import type { ConnectionStatus } from '../types';
 import { AgentCard } from './AgentCard';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
-
-// --- User avatar with status badge ---
-
-const AVATAR_SIZE = 36;
-const BADGE_SIZE = 12;
-
-function UserAvatar({ connected, onPress, glass }: { connected: boolean; onPress: () => void; glass?: boolean }) {
-  const handlePress = () => {
-    if (Platform.OS === 'ios') {
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    }
-    onPress();
-  };
-
-  return (
-    <TouchableOpacity onPress={handlePress} activeOpacity={0.7} style={pillStyles.avatarWrap}>
-      <View style={glass ? pillStyles.avatarGlass : pillStyles.avatar}>
-        <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
-          <Circle cx={12} cy={8} r={4} stroke={glass ? '#374151' : '#fff'} strokeWidth={1.8} />
-          <Path d="M4 20c0-3.3 3.6-6 8-6s8 2.7 8 6" stroke={glass ? '#374151' : '#fff'} strokeWidth={1.8} strokeLinecap="round" />
-        </Svg>
-      </View>
-      <View style={[pillStyles.badge, connected ? pillStyles.badgeGreen : pillStyles.badgeRed, glass && pillStyles.badgeGlass]} />
-    </TouchableOpacity>
-  );
-}
 
 interface DashboardProps {
   connectionStatus: ConnectionStatus;
@@ -58,6 +31,7 @@ interface DashboardProps {
   onDestroyAgent: (agentId: string) => void;
   onSendMessage: (agentId: string, text: string) => void;
   onOpenSettings: () => void;
+  onOpenGit?: () => void;
 }
 
 const AGENTS_PER_PAGE = 3;
@@ -72,49 +46,59 @@ interface BottomPillNavProps {
   connectionStatus: ConnectionStatus;
   onOpenSettings: () => void;
   onCreateAgent: () => void;
+  onOpenGit?: () => void;
 }
 
-function BottomPillNav({ currentPage, totalPages, connectionStatus, onOpenSettings, onCreateAgent }: BottomPillNavProps) {
+function BottomPillNav({ currentPage, totalPages, connectionStatus, onOpenSettings, onCreateAgent, onOpenGit }: BottomPillNavProps) {
   const isConnected = connectionStatus === 'connected';
-  const useGlass = isLiquidGlassAvailable();
+  const hasGit = !!onOpenGit;
 
-  const pillContent = (
-    <>
-      <UserAvatar connected={isConnected} onPress={onOpenSettings} glass={useGlass} />
-
-      {totalPages > 1 && (
-        <View style={pillStyles.dotsRow}>
-          {Array.from({ length: totalPages }, (_, i) => (
-            <View
-              key={i}
-              style={[pillStyles.dot, i === currentPage && (useGlass ? pillStyles.dotActiveGlass : pillStyles.dotActive)]}
-            />
-          ))}
-        </View>
-      )}
-
-      <TouchableOpacity onPress={() => {
-        if (Platform.OS === 'ios') {
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-        }
-        onCreateAgent();
-      }} style={useGlass ? pillStyles.addBtnGlass : pillStyles.addBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-        <Text style={useGlass ? pillStyles.addTextGlass : pillStyles.addText}>+</Text>
-      </TouchableOpacity>
-    </>
-  );
+  const dots = totalPages > 1 ? (
+    <View style={pillStyles.dotsRow}>
+      {Array.from({ length: totalPages }, (_, i) => (
+        <View key={i} style={[pillStyles.dot, i === currentPage && pillStyles.dotActive]} />
+      ))}
+    </View>
+  ) : null;
 
   return (
     <View style={pillStyles.wrapper}>
-      {useGlass ? (
-        <GlassView style={pillStyles.pillGlass}>
-          {pillContent}
-        </GlassView>
-      ) : (
-        <View style={pillStyles.pill}>
-          {pillContent}
-        </View>
-      )}
+      {dots && <View style={pillStyles.dotsAbove}>{dots}</View>}
+      <View style={pillStyles.pill}>
+        {hasGit && (
+          <>
+            <TouchableOpacity onPress={() => {
+              if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              onOpenGit!();
+            }} style={pillStyles.sideSection} activeOpacity={0.7}>
+              <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+                <Path d="M6 3v12M18 9a3 3 0 100-6 3 3 0 000 6zM6 21a3 3 0 100-6 3 3 0 000 6zM18 9a9 9 0 01-9 9"
+                  stroke="#999" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+              </Svg>
+              <Text style={pillStyles.sectionLabel}>Git</Text>
+            </TouchableOpacity>
+            <View style={pillStyles.divider} />
+          </>
+        )}
+        <TouchableOpacity onPress={() => {
+          if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          onCreateAgent();
+        }} style={pillStyles.centerSection} activeOpacity={0.7}>
+          <Text style={pillStyles.addIcon}>+</Text>
+          <Text style={pillStyles.sectionLabel}>New Agent</Text>
+        </TouchableOpacity>
+        {hasGit && <View style={pillStyles.divider} />}
+        <TouchableOpacity onPress={onOpenSettings} style={pillStyles.sideSection} activeOpacity={0.7}>
+          <View style={pillStyles.iconWrap}>
+            <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+              <Circle cx={12} cy={8} r={4} stroke="#999" strokeWidth={2} />
+              <Path d="M4 20c0-3.3 3.6-6 8-6s8 2.7 8 6" stroke="#999" strokeWidth={2} strokeLinecap="round" />
+            </Svg>
+            <View style={[pillStyles.statusDot, isConnected ? pillStyles.statusGreen : pillStyles.statusRed]} />
+          </View>
+          <Text style={pillStyles.sectionLabel}>Settings</Text>
+        </TouchableOpacity>
+      </View>
     </View>
   );
 }
@@ -129,6 +113,7 @@ export function Dashboard({
   onDestroyAgent,
   onSendMessage,
   onOpenSettings,
+  onOpenGit,
 }: DashboardProps) {
   const { state } = useAgentState();
   const { settings } = useSettings();
@@ -142,7 +127,7 @@ export function Dashboard({
   const [pageRestored, setPageRestored] = useState(false);
   const inlineInputRef = useRef<TextInput>(null);
   const scrollViewRef = useRef<ScrollView>(null);
-  const prevAgentCount = useRef(0);
+  const prevAgentCount = useRef(-1); // -1 = not yet initialized
 
   const agents = useMemo(() =>
     Array.from(state.agents.values()).sort((a, b) => a.createdAt - b.createdAt),
@@ -210,8 +195,13 @@ export function Dashboard({
     }
   }, [totalPages, currentPage]);
 
-  // Auto-scroll to last page when a new agent is created
+  // Auto-scroll to last page when a new agent is created (not on initial load)
   useEffect(() => {
+    if (prevAgentCount.current === -1) {
+      // First load — just record the count, don't scroll
+      prevAgentCount.current = agents.length;
+      return;
+    }
     if (agents.length > prevAgentCount.current && pages.length > 0) {
       const lastPage = pages.length - 1;
       setTimeout(() => {
@@ -504,6 +494,7 @@ export function Dashboard({
         connectionStatus={connectionStatus}
         onOpenSettings={onOpenSettings}
         onCreateAgent={onCreateAgent}
+        onOpenGit={onOpenGit}
       />
 
       {inlineInput}
@@ -687,67 +678,65 @@ const styles = StyleSheet.create({
 const pillStyles = StyleSheet.create({
   wrapper: {
     alignItems: 'center',
-    paddingBottom: 34,
-    paddingTop: 8,
+    paddingBottom: 30,
+    paddingTop: 12,
   },
   pill: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#ffffff',
-    borderRadius: 100,
-    paddingLeft: 4,
-    paddingRight: 6,
-    paddingVertical: 4,
-    gap: 12,
-  },
-  pillGlass: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderRadius: 100,
-    paddingLeft: 4,
-    paddingRight: 6,
-    paddingVertical: 4,
-    gap: 12,
+    backgroundColor: '#1c1c1e',
+    borderRadius: 16,
     overflow: 'hidden',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.06)',
   },
-  avatarWrap: {
-    width: AVATAR_SIZE,
-    height: AVATAR_SIZE,
+  sideSection: {
+    width: 56,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    gap: 3,
+  },
+  centerSection: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+    paddingVertical: 10,
+    gap: 3,
+  },
+  sectionLabel: {
+    color: '#666',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  divider: {
+    width: StyleSheet.hairlineWidth,
+    height: 28,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  addIcon: {
+    color: '#999',
+    fontSize: 18,
+    fontWeight: '300',
+    lineHeight: 18,
+  },
+  iconWrap: {
     position: 'relative',
   },
-  avatar: {
-    width: AVATAR_SIZE,
-    height: AVATAR_SIZE,
-    borderRadius: AVATAR_SIZE / 2,
-    backgroundColor: '#6b7280',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  avatarGlass: {
-    width: AVATAR_SIZE,
-    height: AVATAR_SIZE,
-    borderRadius: AVATAR_SIZE / 2,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  badge: {
+  statusDot: {
     position: 'absolute',
-    top: -1,
-    right: -1,
-    width: BADGE_SIZE,
-    height: BADGE_SIZE,
-    borderRadius: BADGE_SIZE / 2,
-    borderWidth: 3,
-    borderColor: '#151515',
+    top: -2,
+    right: -4,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    borderWidth: 2,
+    borderColor: '#1c1c1e',
   },
-  badgeGlass: {
-    borderColor: '#1a1a1a',
-  },
-  badgeGreen: {
+  statusGreen: {
     backgroundColor: '#22c55e',
   },
-  badgeRed: {
+  statusRed: {
     backgroundColor: '#ef4444',
   },
   dotsRow: {
@@ -759,43 +748,12 @@ const pillStyles = StyleSheet.create({
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: '#374151',
-    opacity: 1,
+    backgroundColor: '#555',
   },
   dotActive: {
     backgroundColor: '#fff',
-    opacity: 1,
   },
-  dotActiveGlass: {
-    backgroundColor: '#fff',
-    opacity: 1,
-  },
-  addBtn: {
-    width: AVATAR_SIZE,
-    height: AVATAR_SIZE,
-    borderRadius: AVATAR_SIZE / 2,
-    backgroundColor: '#f3f4f6',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  addBtnGlass: {
-    width: AVATAR_SIZE,
-    height: AVATAR_SIZE,
-    borderRadius: AVATAR_SIZE / 2,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  addText: {
-    color: '#374151',
-    fontSize: 22,
-    fontWeight: '400',
-    marginTop: -1,
-  },
-  addTextGlass: {
-    color: '#374151',
-    fontSize: 22,
-    fontWeight: '400',
-    marginTop: -1,
+  dotsAbove: {
+    marginBottom: 8,
   },
 });

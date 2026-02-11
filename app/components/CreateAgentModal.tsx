@@ -29,6 +29,9 @@ interface CreateAgentModalProps {
   onRequestProjects: () => void;
   onCreateWorktree: (projectId: string, branchName: string) => void;
   onUnregisterProject: (projectId: string) => void;
+  /** Pre-select a project+worktree — selecting a type will immediately submit */
+  initialProjectId?: string;
+  initialWorktreePath?: string;
 }
 
 type Step = 'type' | 'project';
@@ -82,6 +85,8 @@ export function CreateAgentModal({
   onRequestProjects,
   onCreateWorktree,
   onUnregisterProject,
+  initialProjectId,
+  initialWorktreePath,
 }: CreateAgentModalProps) {
   const [step, setStep] = useState<Step>('type');
   const [selectedType, setSelectedType] = useState<AgentType>('claude');
@@ -99,10 +104,15 @@ export function CreateAgentModal({
   }, [onClose]);
 
   const handleTypeSelect = useCallback((type: AgentType) => {
+    if (initialProjectId && initialWorktreePath) {
+      onSubmit({ agentType: type, projectId: initialProjectId, worktreePath: initialWorktreePath });
+      handleClose();
+      return;
+    }
     setSelectedType(type);
     setStep('project');
     onRequestProjects();
-  }, [onRequestProjects]);
+  }, [onRequestProjects, initialProjectId, initialWorktreePath, onSubmit, handleClose]);
 
   const handleWorktreeSelect = useCallback((projectId: string, worktreePath: string) => {
     onSubmit({ agentType: selectedType, projectId, worktreePath });

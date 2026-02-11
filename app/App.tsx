@@ -14,13 +14,15 @@ import {
 import { AgentProvider, useAgentState } from './state/AgentContext';
 import { SettingsProvider } from './state/SettingsContext';
 import { Dashboard, AgentDetailScreen, CreateAgentModal, SettingsScreen } from './components';
+import { GitScreen } from './components/GitScreen';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useNotifications } from './hooks/useNotifications';
 import { useCompletionChime } from './hooks/useCompletionChime';
 import { parseQRCode, clearCredentials, isPaired, type QRPairingData } from './utils/auth';
-import type { Project, AgentType } from './state/types';
+import type { Project, AgentType, GitLogCommit } from './state/types';
+import type { GitStatusData } from './components/GitTabContent';
 
-type Screen = 'pairing' | 'scanner' | 'dashboard' | 'agent' | 'settings';
+type Screen = 'pairing' | 'scanner' | 'dashboard' | 'agent' | 'settings' | 'git';
 
 // Inner app component that has access to AgentContext
 function AppInner() {
@@ -30,15 +32,31 @@ function AppInner() {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [permission, requestPermission] = useCameraPermissions();
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [createModalInitialProjectId, setCreateModalInitialProjectId] = useState<string | undefined>();
+  const [createModalInitialWorktreePath, setCreateModalInitialWorktreePath] = useState<string | undefined>();
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(false);
+  const [hasCreds, setHasCreds] = useState(false);
 
   const { state, dispatch, handleServerMessage, loadCachedMessages } = useAgentState();
   const { notifyTaskComplete } = useNotifications();
   const { play: playChime } = useCompletionChime();
 
+  // Git state — local to the active agent detail view
+  const [gitStatus, setGitStatus] = useState<GitStatusData | null>(null);
+  const [gitDiff, setGitDiff] = useState<string | null>(null);
+  const [gitLoading, setGitLoading] = useState(false);
+  const [gitDiffLoading, setGitDiffLoading] = useState(false);
+
+  // Git overview state — for the GitScreen dashboard view
+  const [gitDataMap, setGitDataMap] = useState<Map<string, GitStatusData>>(new Map());
+  const [gitLoadingAgents, setGitLoadingAgents] = useState<Set<string>>(new Set());
+
+  // Git log state — per-project commit history
+  const [gitLogMap, setGitLogMap] = useState<Map<string, GitLogCommit[]>>(new Map());
+  const [gitLogLoading, setGitLogLoading] = useState<Set<string>>(new Set());
+
   // Whether we have stored pairing credentials (checked on mount, updated on pair/unpair)
-  const [hasCreds, setHasCreds] = useState(false);
   useEffect(() => {
     isPaired().then(setHasCreds);
   }, []);
@@ -79,6 +97,49 @@ function AppInner() {
       setProjects(prev => prev.map(p =>
         p.id === msg.projectId ? { ...p, worktrees: msg.worktrees || [] } : p
       ));
+    }
+
+    // Git status response
+    if (msg.type === 'gitStatus' && msg.agentId) {
+      const gitData: GitStatusData = {
+        branch: (msg as any).branch || '',
+        ahead: (msg as any).ahead || 0,
+        behind: (msg as any).behind || 0,
+        files: (msg as any).files || [],
+      };
+      setGitStatus(gitData);
+      setGitLoading(false);
+      // Also update the git overview map (for GitScreen)
+      setGitDataMap(prev => {
+        const next = new Map(prev);
+        next.set(msg.agentId!, gitData);
+        return next;
+      });
+      setGitLoadingAgents(prev => {
+        const next = new Set(prev);
+        next.delete(msg.agentId!);
+        return next;
+      });
+    }
+
+    // Git diff response
+    if (msg.type === 'gitDiff' && msg.agentId) {
+      setGitDiff(msg.diff || '');
+      setGitDiffLoading(false);
+    }
+
+    // Git log response
+    if (msg.type === 'gitLog' && msg.projectPath) {
+      setGitLogMap(prev => {
+        const next = new Map(prev);
+        next.set(msg.projectPath!, msg.commits || []);
+        return next;
+      });
+      setGitLogLoading(prev => {
+        const next = new Set(prev);
+        next.delete(msg.projectPath!);
+        return next;
+      });
     }
 
     // Play chime + notify on agent result
@@ -187,6 +248,14 @@ function AppInner() {
 
   // Agent actions
   const handleCreateAgent = () => {
+    setCreateModalInitialProjectId(undefined);
+    setCreateModalInitialWorktreePath(undefined);
+    setShowCreateModal(true);
+  };
+
+  const handleCreateAgentForWorktree = (projectId: string, worktreePath: string) => {
+    setCreateModalInitialProjectId(projectId);
+    setCreateModalInitialWorktreePath(worktreePath);
     setShowCreateModal(true);
   };
 
@@ -245,6 +314,17 @@ function AppInner() {
     dispatch({ type: 'REMOVE_PERMISSION', agentId, requestId });
   };
 
+  const handleRequestGitStatus = useCallback((agentId: string) => {
+    setGitLoading(true);
+    send('getGitStatus', { agentId });
+  }, [send]);
+
+  const handleRequestGitDiff = useCallback((agentId: string, filePath: string) => {
+    setGitDiffLoading(true);
+    setGitDiff(null);
+    send('getGitDiff', { agentId, filePath });
+  }, [send]);
+
   const handleSetAutoApprove = (agentId: string, enabled: boolean) => {
     send('setAutoApprove', { agentId, enabled });
     dispatch({ type: 'SET_SESSION_INFO', agentId, autoApprove: enabled });
@@ -253,6 +333,8 @@ function AppInner() {
   const handleBackToDashboard = () => {
     setSelectedAgentId(null);
     dispatch({ type: 'SET_ACTIVE_AGENT', agentId: null });
+    setGitStatus(null);
+    setGitDiff(null);
     setScreen('dashboard');
   };
 
@@ -263,6 +345,34 @@ function AppInner() {
   const handleBackFromSettings = () => {
     setScreen('dashboard');
   };
+
+  const handleOpenGit = () => {
+    setScreen('git');
+  };
+
+  const handleBackFromGit = () => {
+    setScreen('dashboard');
+  };
+
+  // For GitScreen: request status for any agent (tracks loading state)
+  const handleGitScreenRequestStatus = useCallback((agentId: string) => {
+    setGitLoadingAgents(prev => {
+      const next = new Set(prev);
+      next.add(agentId);
+      return next;
+    });
+    send('getGitStatus', { agentId });
+  }, [send]);
+
+  // For GitScreen: request commit log for a project
+  const handleRequestGitLog = useCallback((projectPath: string) => {
+    setGitLogLoading(prev => {
+      const next = new Set(prev);
+      next.add(projectPath);
+      return next;
+    });
+    send('getGitLog', { projectPath });
+  }, [send]);
 
   // --- Screen rendering ---
 
@@ -344,7 +454,7 @@ function AppInner() {
   }
 
   // Dashboard + overlays (layered so dashboard is visible during swipe-back)
-  if (screen === 'dashboard' || (screen === 'agent' && selectedAgentId) || screen === 'settings') {
+  if (screen === 'dashboard' || (screen === 'agent' && selectedAgentId) || screen === 'settings' || screen === 'git') {
     return (
       <View style={styles.container}>
         <StatusBar style="light" />
@@ -358,6 +468,7 @@ function AppInner() {
             onDestroyAgent={handleDestroyAgent}
             onSendMessage={handleSendMessage}
             onOpenSettings={handleOpenSettings}
+            onOpenGit={handleOpenGit}
           />
         </View>
         {screen === 'agent' && selectedAgentId && (
@@ -372,6 +483,12 @@ function AppInner() {
               onRespondPermission={handleRespondPermission}
               onSetAutoApprove={handleSetAutoApprove}
               onResetPingTimer={resetPingTimer}
+              onRequestGitStatus={handleRequestGitStatus}
+              onRequestGitDiff={handleRequestGitDiff}
+              gitStatus={gitStatus}
+              gitDiff={gitDiff}
+              gitLoading={gitLoading}
+              gitDiffLoading={gitDiffLoading}
             />
           </View>
         )}
@@ -384,15 +501,37 @@ function AppInner() {
             />
           </View>
         )}
+        {screen === 'git' && (
+          <View style={styles.layerOverlay} pointerEvents="box-none">
+            <SafeAreaView style={styles.safeTop} />
+            <GitScreen
+              onBack={handleBackFromGit}
+              onRequestGitStatus={handleGitScreenRequestStatus}
+              onRequestGitLog={handleRequestGitLog}
+              onSelectAgent={handleSelectAgent}
+              onDestroyAgent={handleDestroyAgent}
+              onSendMessage={handleSendMessage}
+              onCreateWorktree={handleCreateWorktree}
+              onCreateAgentForWorktree={handleCreateAgentForWorktree}
+              gitDataMap={gitDataMap}
+              gitLogMap={gitLogMap}
+              gitLogLoading={gitLogLoading}
+              loadingAgentIds={gitLoadingAgents}
+              projects={projects}
+            />
+          </View>
+        )}
         <CreateAgentModal
-          visible={showCreateModal && screen === 'dashboard'}
+          visible={showCreateModal && (screen === 'dashboard' || screen === 'git')}
           projects={projects}
           projectsLoading={projectsLoading}
-          onClose={() => setShowCreateModal(false)}
+          onClose={() => { setShowCreateModal(false); setCreateModalInitialProjectId(undefined); setCreateModalInitialWorktreePath(undefined); }}
           onSubmit={handleCreateAgentSubmit}
           onRequestProjects={handleRequestProjects}
           onCreateWorktree={handleCreateWorktree}
           onUnregisterProject={handleUnregisterProject}
+          initialProjectId={createModalInitialProjectId}
+          initialWorktreePath={createModalInitialWorktreePath}
         />
       </View>
     );

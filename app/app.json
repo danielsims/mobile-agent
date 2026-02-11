@@ -42,7 +42,8 @@
           "microphonePermission": "Allow Mobile Agent to use the microphone for voice input",
           "speechRecognitionPermission": "Allow Mobile Agent to use speech recognition for voice input"
         }
-      ]
+      ],
+      "expo-web-browser"
     ]
   }
 }

@@ -26,6 +26,10 @@ import {
   removeWorktree,
   resolveProjectCwd,
   getProjectIcon,
+  getGitStatus,
+  getGitDiff,
+  getGitBranchInfo,
+  getGitLog,
 } from './projects.js';
 
 const MAX_CONCURRENT_AGENTS = 10;
@@ -414,6 +418,18 @@ export class Bridge {
         this._handleUnregisterProject(ws, msg, deviceId);
         break;
 
+      case 'getGitStatus':
+        this._handleGetGitStatus(ws, msg);
+        break;
+
+      case 'getGitDiff':
+        this._handleGetGitDiff(ws, msg);
+        break;
+
+      case 'getGitLog':
+        this._handleGetGitLog(ws, msg);
+        break;
+
       case 'ping':
         this._sendTo(ws, 'pong');
         break;
@@ -673,6 +689,77 @@ export class Bridge {
     } catch (e) {
       this._sendTo(ws, 'error', { error: e.message });
     }
+  }
+
+  // --- Git status/diff handlers ---
+
+  _handleGetGitStatus(ws, msg) {
+    const { agentId } = msg;
+    if (!agentId) {
+      this._sendTo(ws, 'error', { error: 'agentId required.' });
+      return;
+    }
+
+    const session = this.agents.get(agentId);
+    if (!session || !session.cwd) {
+      this._sendTo(ws, 'error', { error: 'Agent not found or no working directory.' });
+      return;
+    }
+
+    const branchInfo = getGitBranchInfo(session.cwd);
+    const files = getGitStatus(session.cwd);
+
+    this._sendTo(ws, 'gitStatus', {
+      agentId,
+      branch: branchInfo.branch,
+      ahead: branchInfo.ahead,
+      behind: branchInfo.behind,
+      files,
+    });
+  }
+
+  _handleGetGitDiff(ws, msg) {
+    const { agentId, filePath } = msg;
+    if (!agentId) {
+      this._sendTo(ws, 'error', { error: 'agentId required.' });
+      return;
+    }
+
+    const session = this.agents.get(agentId);
+    if (!session || !session.cwd) {
+      this._sendTo(ws, 'error', { error: 'Agent not found or no working directory.' });
+      return;
+    }
+
+    const diff = getGitDiff(session.cwd, filePath);
+
+    this._sendTo(ws, 'gitDiff', {
+      agentId,
+      filePath: filePath || null,
+      diff,
+    });
+  }
+
+  _handleGetGitLog(ws, msg) {
+    const { projectPath, maxCount } = msg;
+    console.log(`[GitLog] Request received — projectPath=${projectPath}`);
+    if (!projectPath) {
+      console.log('[GitLog] ERROR: no projectPath');
+      this._sendTo(ws, 'error', { error: 'projectPath required.' });
+      return;
+    }
+
+    const all = getProjects();
+    const isRegistered = Object.values(all).some(p => p.path === projectPath);
+    if (!isRegistered) {
+      console.log(`[GitLog] ERROR: path not registered. Registered: ${Object.values(all).map(p => p.path).join(', ')}`);
+      this._sendTo(ws, 'error', { error: 'Path is not a registered project.' });
+      return;
+    }
+
+    const commits = getGitLog(projectPath, maxCount || 100);
+    console.log(`[GitLog] Sending ${commits.length} commits for ${projectPath}`);
+    this._sendTo(ws, 'gitLog', { projectPath, commits });
   }
 
   // --- Broadcasting ---

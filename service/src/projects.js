@@ -349,6 +349,152 @@ export function getProjectIcon(projectPath) {
   return null;
 }
 
+// --- Git Status / Diff Queries ---
+
+/**
+ * Get git status (changed files) for a working directory.
+ * @param {string} cwd - Absolute path to the working directory
+ * @returns {Array<{ file: string, status: string }>}
+ */
+export function getGitStatus(cwd) {
+  try {
+    const output = execFileSync('git', ['status', '--porcelain=v1'], {
+      cwd,
+      encoding: 'utf-8',
+      timeout: 10000,
+    });
+
+    return output
+      .split('\n')
+      .filter(Boolean)
+      .map(line => {
+        const xy = line.slice(0, 2);
+        const file = line.slice(3);
+        // Porcelain v1: XY where X=index, Y=worktree
+        // Untracked files are '??', unmerged are 'UU'/'AA'/'DD' etc.
+        // We report a single semantic status matching VS Code's "Changes" view:
+        // - If untracked (??) → U (untracked)
+        // - If unmerged (U in either col, or DD/AA/AU/UA) → C (conflict)
+        // - Prefer worktree status (Y) when present, else index status (X)
+        const x = xy[0];
+        const y = xy[1];
+
+        let status;
+        if (x === '?' && y === '?') {
+          status = 'U'; // Untracked
+        } else if (x === 'U' || y === 'U' || (x === 'D' && y === 'D') || (x === 'A' && y === 'A')) {
+          status = 'C'; // Conflict / unmerged
+        } else if (y !== ' ') {
+          status = y; // Worktree change (unstaged)
+        } else {
+          status = x; // Index change (staged)
+        }
+
+        return { status, file };
+      });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Get unified diff for a specific file (or all files if no filePath).
+ * @param {string} cwd - Absolute path to the working directory
+ * @param {string} [filePath] - Optional file path relative to repo root
+ * @returns {string} Raw unified diff output
+ */
+export function getGitDiff(cwd, filePath) {
+  try {
+    const args = ['diff', 'HEAD'];
+    if (filePath) args.push('--', filePath);
+
+    return execFileSync('git', args, {
+      cwd,
+      encoding: 'utf-8',
+      timeout: 15000,
+    });
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Get branch info including ahead/behind counts relative to upstream.
+ * @param {string} cwd - Absolute path to the working directory
+ * @returns {{ branch: string, ahead: number, behind: number }}
+ */
+export function getGitBranchInfo(cwd) {
+  const result = { branch: '', ahead: 0, behind: 0 };
+
+  try {
+    result.branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd,
+      encoding: 'utf-8',
+      timeout: 5000,
+    }).trim();
+  } catch {
+    return result;
+  }
+
+  try {
+    const counts = execFileSync('git', ['rev-list', '--left-right', '--count', `${result.branch}...@{upstream}`], {
+      cwd,
+      encoding: 'utf-8',
+      timeout: 5000,
+    }).trim();
+
+    const [ahead, behind] = counts.split('\t').map(Number);
+    result.ahead = ahead || 0;
+    result.behind = behind || 0;
+  } catch {
+    // No upstream configured — that's fine
+  }
+
+  return result;
+}
+
+// --- Git Log ---
+
+/**
+ * Get structured commit log for a repository.
+ * @param {string} cwd - Absolute path to the working directory
+ * @param {number} [maxCount=100] - Maximum number of commits
+ * @returns {Array<{ hash, abbrevHash, parents, subject, author, relativeTime, refs }>}
+ */
+export function getGitLog(cwd, maxCount = 100) {
+  try {
+    const SEP = '\x00';
+    const output = execFileSync('git', [
+      'log',
+      '--all',
+      `--max-count=${maxCount}`,
+      `--format=%H${SEP}%h${SEP}%P${SEP}%s${SEP}%an${SEP}%ar${SEP}%D`,
+    ], {
+      cwd,
+      encoding: 'utf-8',
+      timeout: 15000,
+    });
+
+    return output
+      .split('\n')
+      .filter(Boolean)
+      .map(line => {
+        const [hash, abbrevHash, parentStr, subject, author, relativeTime, refStr] = line.split(SEP);
+        return {
+          hash,
+          abbrevHash,
+          parents: parentStr ? parentStr.split(' ').filter(Boolean) : [],
+          subject,
+          author,
+          relativeTime,
+          refs: refStr ? refStr.split(', ').filter(Boolean) : [],
+        };
+      });
+  } catch {
+    return [];
+  }
+}
+
 // --- Persistence ---
 
 function writeProjects() {
