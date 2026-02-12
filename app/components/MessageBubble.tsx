@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { View, Text, ScrollView, StyleSheet, Platform, TouchableOpacity } from 'react-native';
+import * as Haptics from 'expo-haptics';
 import { StreamdownRN } from 'streamdown-rn';
 import type { AgentMessage, ContentBlock } from '../state/types';
 import { ShimmerText } from './ShimmerText';
@@ -8,6 +9,9 @@ interface MessageBubbleProps {
   message: AgentMessage;
   toolResultMap?: Map<string, string>;
   animateThinking?: boolean;
+  pendingPermissionToolNames?: Set<string>;
+  onRespondQuestion?: (answers: Record<string, string>, toolInput: Record<string, unknown>) => void;
+  onDenyQuestion?: () => void;
 }
 
 // Extract markdown string from content blocks
@@ -81,6 +85,188 @@ function DiffView({ filePath, oldStr, newStr }: { filePath?: string; oldStr: str
 // Check if a tool_use block is an Edit with old_string/new_string
 function isEditWithDiff(name: string, input: Record<string, unknown>): boolean {
   return name === 'Edit' && typeof input.old_string === 'string' && typeof input.new_string === 'string';
+}
+
+// --- TodoWrite card: renders todo items as a checklist ---
+function TodoWriteCard({ block }: { block: ContentBlock & { type: 'tool_use' } }) {
+  const todos: Array<{ content: string; status: string; activeForm?: string }> =
+    Array.isArray(block.input?.todos) ? (block.input.todos as Array<{ content: string; status: string; activeForm?: string }>) : [];
+
+  if (todos.length === 0) return null;
+
+  return (
+    <View style={styles.todoCard}>
+      <Text style={styles.todoTitle}>Tasks</Text>
+      {todos.map((todo, i) => {
+        const isComplete = todo.status === 'completed';
+        const isActive = todo.status === 'in_progress';
+        return (
+          <View key={i} style={styles.todoRow}>
+            <View style={[
+              styles.todoCircle,
+              isComplete && styles.todoCircleComplete,
+            ]}>
+              {isComplete && (
+                <View style={styles.todoCheck}>
+                  <View style={styles.todoCheckShort} />
+                  <View style={styles.todoCheckLong} />
+                </View>
+              )}
+            </View>
+            <Text style={[
+              styles.todoText,
+              isComplete && styles.todoTextComplete,
+              !isComplete && !isActive && styles.todoTextPending,
+            ]} numberOfLines={2}>
+              {isActive ? (todo.activeForm || todo.content) : todo.content}
+            </Text>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+// --- AskUserQuestion card: renders question options as tappable buttons ---
+// Interactive when pending (onRespond provided), read-only when answered.
+function AskUserQuestionCard({
+  block,
+  result,
+  onRespond,
+  onDeny,
+}: {
+  block: ContentBlock & { type: 'tool_use' };
+  result?: string | null;
+  onRespond?: (answers: Record<string, string>) => void;
+  onDeny?: () => void;
+}) {
+  const questions: Array<{
+    question: string;
+    header?: string;
+    options: Array<{ label: string; description?: string }>;
+    multiSelect?: boolean;
+  }> = Array.isArray(block.input?.questions) ? (block.input.questions as any[]) : [];
+
+  const [selections, setSelections] = useState<Record<number, Set<number>>>({});
+  const [submitted, setSubmitted] = useState(false);
+  const interactive = !!onRespond && !submitted;
+
+  if (questions.length === 0) return null;
+
+  // Parse the user's answer from the result string (for read-only mode)
+  const answerText = result ?? '';
+
+  const handleTapOption = (qi: number, oi: number, multiSelect?: boolean) => {
+    if (!interactive) return;
+    if (Platform.OS === 'ios') {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+    setSelections(prev => {
+      const updated = { ...prev };
+      if (multiSelect) {
+        const current = new Set(prev[qi] || []);
+        if (current.has(oi)) current.delete(oi);
+        else current.add(oi);
+        updated[qi] = current;
+      } else {
+        updated[qi] = new Set([oi]);
+        const answers: Record<string, string> = {};
+        questions.forEach((q, qIdx) => {
+          const selected = qIdx === qi ? new Set([oi]) : (prev[qIdx] || new Set());
+          const labels = Array.from(selected).map(idx => q.options[idx]?.label).filter(Boolean);
+          if (labels.length > 0) {
+            answers[q.question] = labels.join(', ');
+          }
+        });
+        setSubmitted(true);
+        setTimeout(() => {
+          if (Platform.OS === 'ios') {
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+          }
+          onRespond!(answers);
+        }, 150);
+      }
+      return updated;
+    });
+  };
+
+  const handleSubmitMulti = () => {
+    if (!onRespond) return;
+    const answers: Record<string, string> = {};
+    questions.forEach((q, qi) => {
+      const selected = selections[qi] || new Set();
+      const labels = Array.from(selected).map(idx => q.options[idx]?.label).filter(Boolean);
+      if (labels.length > 0) {
+        answers[q.question] = labels.join(', ');
+      }
+    });
+    if (Platform.OS === 'ios') {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    }
+    setSubmitted(true);
+    onRespond(answers);
+  };
+
+  const handleDeny = () => {
+    if (!onDeny) return;
+    if (Platform.OS === 'ios') {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+    onDeny();
+  };
+
+  const hasMultiSelect = questions.some(q => q.multiSelect);
+
+  return (
+    <View style={styles.questionCard}>
+      {interactive && (
+        <TouchableOpacity style={styles.questionDismissBtn} onPress={handleDeny} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} activeOpacity={0.5}>
+          <Text style={styles.questionDismissX}>{'\u00D7'}</Text>
+        </TouchableOpacity>
+      )}
+      {questions.map((q, qi) => {
+        return (
+          <View key={qi} style={qi > 0 ? { marginTop: 16 } : undefined}>
+            <Text style={styles.questionText}>{q.question}</Text>
+            <View style={styles.questionOptions}>
+              {q.options.map((opt, oi) => {
+                const isSelected = interactive
+                  ? (selections[qi]?.has(oi) ?? false)
+                  : answerText.includes(opt.label);
+                const Wrapper = interactive ? TouchableOpacity : View;
+                return (
+                  <Wrapper
+                    key={oi}
+                    style={[
+                      styles.questionOption,
+                      isSelected && styles.questionOptionSelected,
+                    ]}
+                    {...(interactive ? { onPress: () => handleTapOption(qi, oi, q.multiSelect), activeOpacity: 0.7 } : {})}
+                  >
+                    <Text style={[
+                      styles.questionOptionLabel,
+                      isSelected && styles.questionOptionLabelSelected,
+                    ]}>{opt.label}</Text>
+                    {opt.description && (
+                      <Text style={[
+                        styles.questionOptionDesc,
+                        isSelected && styles.questionOptionDescSelected,
+                      ]}>{opt.description}</Text>
+                    )}
+                  </Wrapper>
+                );
+              })}
+            </View>
+          </View>
+        );
+      })}
+      {interactive && hasMultiSelect && (
+        <TouchableOpacity style={styles.questionSubmitButton} onPress={handleSubmitMulti} activeOpacity={0.8}>
+          <Text style={styles.questionSubmitText}>Submit</Text>
+        </TouchableOpacity>
+      )}
+    </View>
+  );
 }
 
 // Collapsible tool invocation card
@@ -177,10 +363,16 @@ function ContentBlockView({
   block,
   resultMap,
   animateThinking = false,
+  pendingPermissionToolNames,
+  onRespondQuestion,
+  onDenyQuestion,
 }: {
   block: ContentBlock;
   resultMap?: Map<string, string>;
   animateThinking?: boolean;
+  pendingPermissionToolNames?: Set<string>;
+  onRespondQuestion?: (answers: Record<string, string>, toolInput: Record<string, unknown>) => void;
+  onDenyQuestion?: () => void;
 }) {
   const [expanded, setExpanded] = useState(block.type === 'thinking');
 
@@ -189,8 +381,25 @@ function ContentBlockView({
       return null; // Text blocks are rendered together via StreamdownRN
 
     case 'tool_use': {
+      const typedBlock = block as ContentBlock & { type: 'tool_use' };
       const result = resultMap?.get(block.id) ?? null;
-      return <ToolUseCard block={block as ContentBlock & { type: 'tool_use' }} result={result} />;
+
+      if (typedBlock.name === 'TodoWrite') {
+        return <TodoWriteCard block={typedBlock} />;
+      }
+      if (typedBlock.name === 'AskUserQuestion') {
+        const isPending = pendingPermissionToolNames?.has('AskUserQuestion');
+        return (
+          <AskUserQuestionCard
+            block={typedBlock}
+            result={result}
+            onRespond={isPending ? (answers) => onRespondQuestion?.(answers, typedBlock.input as Record<string, unknown>) : undefined}
+            onDeny={isPending ? onDenyQuestion : undefined}
+          />
+        );
+      }
+
+      return <ToolUseCard block={typedBlock} result={result} />;
     }
 
     case 'tool_result':
@@ -223,7 +432,7 @@ function ContentBlockView({
   }
 }
 
-export function MessageBubble({ message, toolResultMap, animateThinking = false }: MessageBubbleProps) {
+export function MessageBubble({ message, toolResultMap, animateThinking = false, pendingPermissionToolNames, onRespondQuestion, onDenyQuestion }: MessageBubbleProps) {
   const isUser = message.type === 'user';
   const isSystem = message.type === 'system';
 
@@ -271,6 +480,9 @@ export function MessageBubble({ message, toolResultMap, animateThinking = false 
             block={block}
             resultMap={toolResultMap}
             animateThinking={animateThinking}
+            pendingPermissionToolNames={pendingPermissionToolNames}
+            onRespondQuestion={onRespondQuestion}
+            onDenyQuestion={onDenyQuestion}
           />
         ))}
       </View>
@@ -516,5 +728,158 @@ const styles = StyleSheet.create({
     borderLeftWidth: StyleSheet.hairlineWidth,
     borderLeftColor: '#353535',
     fontStyle: 'italic',
+  },
+
+  // --- TodoWrite card ---
+  todoCard: {
+    backgroundColor: '#141414',
+    borderRadius: 8,
+    padding: 16,
+    marginVertical: 6,
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+  },
+  todoTitle: {
+    color: '#fafafa',
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 12,
+  },
+  todoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 6,
+    gap: 10,
+  },
+  todoCircle: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    borderWidth: 1.5,
+    borderColor: '#333',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  todoCircleComplete: {
+    backgroundColor: '#fff',
+    borderColor: '#fff',
+  },
+  todoCheck: {
+    width: 10,
+    height: 8,
+    position: 'relative',
+    marginTop: 1,
+  },
+  todoCheckShort: {
+    position: 'absolute',
+    top: 4,
+    left: 0,
+    width: 4,
+    height: 1.5,
+    backgroundColor: '#000',
+    borderRadius: 1,
+    transform: [{ rotate: '45deg' }],
+  },
+  todoCheckLong: {
+    position: 'absolute',
+    top: 3,
+    left: 2,
+    width: 8,
+    height: 1.5,
+    backgroundColor: '#000',
+    borderRadius: 1,
+    transform: [{ rotate: '-45deg' }],
+  },
+  todoText: {
+    color: '#e5e5e5',
+    fontSize: 13,
+    fontWeight: '500',
+    flex: 1,
+  },
+  todoTextComplete: {
+    color: '#555',
+    textDecorationLine: 'line-through',
+  },
+  todoTextPending: {
+    color: '#666',
+  },
+
+  // --- AskUserQuestion card ---
+  questionCard: {
+    backgroundColor: '#141414',
+    borderRadius: 8,
+    padding: 16,
+    marginVertical: 6,
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+  },
+  questionText: {
+    color: '#fafafa',
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 16,
+  },
+  questionOptions: {
+    gap: 8,
+  },
+  questionOption: {
+    borderWidth: 1,
+    borderColor: '#333',
+    borderRadius: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    backgroundColor: 'transparent',
+  },
+  questionOptionSelected: {
+    backgroundColor: '#fff',
+    borderColor: '#fff',
+  },
+  questionOptionLabel: {
+    color: '#e5e5e5',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  questionOptionLabelSelected: {
+    color: '#000',
+    fontWeight: '600',
+  },
+  questionOptionDesc: {
+    color: '#888',
+    fontSize: 12,
+    marginTop: 2,
+    lineHeight: 17,
+  },
+  questionOptionDescSelected: {
+    color: '#444',
+  },
+  questionDismissBtn: {
+    position: 'absolute',
+    top: -8,
+    right: -8,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1,
+  },
+  questionDismissX: {
+    color: '#000',
+    fontSize: 16,
+    lineHeight: 17,
+    fontWeight: '600',
+  },
+  questionSubmitButton: {
+    marginTop: 12,
+    paddingVertical: 10,
+    borderRadius: 6,
+    alignItems: 'center',
+    backgroundColor: '#fff',
+  },
+  questionSubmitText: {
+    color: '#000',
+    fontWeight: '600',
+    fontSize: 14,
   },
 });
