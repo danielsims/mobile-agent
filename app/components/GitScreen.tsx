@@ -12,7 +12,6 @@ import {
   Dimensions,
   Platform,
   Keyboard,
-  Alert,
   ActivityIndicator,
   RefreshControl,
   type NativeSyntheticEvent,
@@ -22,7 +21,6 @@ import Svg, { Path } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
 import { useAgentState } from '../state/AgentContext';
 import { useSettings } from '../state/SettingsContext';
-import { AgentCard } from './AgentCard';
 import { BottomModal } from './BottomModal';
 import { FileTypeIcon } from './FileTypeIcon';
 import { SourceTabContent } from './SourceTabContent';
@@ -193,7 +191,7 @@ function TrashIcon({ size = 16, color = '#ef4444' }: { size?: number; color?: st
 type GitScreenTab = 'diff' | 'source' | 'commits';
 const GIT_TABS: GitScreenTab[] = ['diff', 'source', 'commits'];
 
-export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelectAgent, onDestroyAgent, onSendMessage, onCreateAgentForWorktree, onRemoveWorktree, onRefresh, onRequestWorktreeStatus, skills = [], gitDataMap, worktreeGitData, worktreeGitLoading, gitLogMap, gitLogLoading, loadingAgentIds, projects }: GitScreenProps) {
+export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelectAgent, onSendMessage, onCreateAgentForWorktree, onRemoveWorktree, onRefresh, onRequestWorktreeStatus, skills = [], worktreeGitData, gitLogMap, gitLogLoading, loadingAgentIds, projects }: GitScreenProps) {
   const { state } = useAgentState();
   const { settings } = useSettings();
   const [expandedNewWorktree, setExpandedNewWorktree] = useState<string | null>(null);
@@ -221,7 +219,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
   // Stop refreshing spinner when projects data updates
   useEffect(() => {
     if (refreshing) setRefreshing(false);
-  }, [projects]);
+  }, [projects, refreshing]);
 
   const handleRefresh = useCallback(() => {
     setRefreshing(true);
@@ -249,7 +247,6 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
   const {
     transcript,
     isListening,
-    start: startListening,
     stop: stopListening,
     abort: abortListening,
     clear: clearTranscript,
@@ -267,13 +264,6 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
     return () => { showSub.remove(); hideSub.remove(); };
   }, []);
 
-  const handleChatOpen = useCallback((agentId: string) => {
-    if (voiceAgentId) { abortListening(); setVoiceAgentId(null); }
-    setChatAgentId(agentId);
-    setChatText('');
-    setTimeout(() => inlineInputRef.current?.focus(), 100);
-  }, [voiceAgentId, abortListening]);
-
   const handleChatSend = useCallback(() => {
     const trimmed = chatText.trim();
     if (!trimmed || !chatAgentId || !onSendMessage) return;
@@ -290,17 +280,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
     Keyboard.dismiss();
   }, []);
 
-  const handleVoiceOpen = useCallback(async (agentId: string) => {
-    if (chatAgentId) { setChatAgentId(null); setChatText(''); Keyboard.dismiss(); }
-    setVoiceAgentId(agentId);
-    setVoiceText('');
-    clearTranscript();
-    const started = await startListening();
-    if (!started) {
-      setVoiceAgentId(null);
-      Alert.alert('Speech Recognition', 'Could not start speech recognition. Check permissions in Settings.');
-    }
-  }, [chatAgentId, clearTranscript, startListening]);
+
 
   const handleVoiceSend = useCallback(() => {
     const trimmed = voiceText.trim();
