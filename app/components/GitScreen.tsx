@@ -53,7 +53,6 @@ interface GitScreenProps {
   onSelectAgent: (agentId: string) => void;
   onDestroyAgent?: (agentId: string) => void;
   onSendMessage?: (agentId: string, text: string) => void;
-  onCreateWorktree?: (projectId: string, branchName: string) => void;
   onCreateAgentForWorktree?: (projectId: string, worktreePath: string, pendingPrompt?: string) => void;
   onRemoveWorktree?: (projectId: string, worktreePath: string) => void;
   onRefresh?: () => void;
@@ -194,7 +193,7 @@ function TrashIcon({ size = 16, color = '#ef4444' }: { size?: number; color?: st
 type GitScreenTab = 'diff' | 'source' | 'commits';
 const GIT_TABS: GitScreenTab[] = ['diff', 'source', 'commits'];
 
-export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelectAgent, onDestroyAgent, onSendMessage, onCreateWorktree, onCreateAgentForWorktree, onRemoveWorktree, onRefresh, onRequestWorktreeStatus, skills = [], gitDataMap, worktreeGitData, worktreeGitLoading, gitLogMap, gitLogLoading, loadingAgentIds, projects }: GitScreenProps) {
+export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelectAgent, onDestroyAgent, onSendMessage, onCreateAgentForWorktree, onRemoveWorktree, onRefresh, onRequestWorktreeStatus, skills = [], gitDataMap, worktreeGitData, worktreeGitLoading, gitLogMap, gitLogLoading, loadingAgentIds, projects }: GitScreenProps) {
   const { state } = useAgentState();
   const { settings } = useSettings();
   const [expandedNewWorktree, setExpandedNewWorktree] = useState<string | null>(null);
@@ -346,12 +345,26 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
 
   const handleCreateWorktree = useCallback((projectId: string) => {
     const trimmed = newBranchName.trim();
-    if (!trimmed || !onCreateWorktree) return;
-    onCreateWorktree(projectId, trimmed);
+    if (!trimmed) return;
+
+    // Find the create-worktree skill and build the prompt with the branch name
+    const createSkill = skills.find(s => s.name === 'create-worktree');
+    const prompt = createSkill
+      ? `${createSkill.body}\n\nCreate a worktree for branch: \`${trimmed}\``
+      : `Create a new git worktree for branch: \`${trimmed}\``;
+
+    // Find the project to get the main worktree path
+    const project = projects.find(p => p.id === projectId);
+    const mainWorktree = project?.worktrees.find(wt => wt.isMain);
+    const worktreePath = mainWorktree?.path || project?.path || '';
+
     setNewBranchName('');
     setExpandedNewWorktree(null);
     Keyboard.dismiss();
-  }, [newBranchName, onCreateWorktree]);
+
+    // Route through agent creation with the skill prompt
+    onCreateAgentForWorktree?.(projectId, worktreePath, prompt);
+  }, [newBranchName, skills, projects, onCreateAgentForWorktree]);
 
   // Slide in from the LEFT
   const swipeX = useRef(new Animated.Value(-SCREEN_WIDTH)).current;

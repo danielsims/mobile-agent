@@ -693,7 +693,6 @@ function AppInner() {
               onSelectAgent={handleSelectAgent}
               onDestroyAgent={handleDestroyAgent}
               onSendMessage={handleSendMessage}
-              onCreateWorktree={handleCreateWorktree}
               onCreateAgentForWorktree={handleCreateAgentForWorktree}
               onRemoveWorktree={handleRemoveWorktree}
               onRefresh={handleRequestProjects}
