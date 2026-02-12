@@ -492,7 +492,7 @@ export function AgentDetailScreen({
     );
   }
 
-  const isDisabled = connectionStatus !== 'connected' || agent.status === 'exited';
+  const isDisabled = connectionStatus !== 'connected';
   const permissions = Array.from(agent.pendingPermissions.values());
   const modelDisplayName = formatModelName(agent.model, agent.type);
 
@@ -737,7 +737,7 @@ export function AgentDetailScreen({
                   showStop={agent.status === 'running'}
                   onVoice={handleVoiceOpen}
                   onPlus={() => setShowPlusModal(true)}
-                  disabled={isDisabled || permissions.length > 0}
+                  disabled={isDisabled}
                   placeholder={agent.status === 'running' ? 'Agent is working...' : 'Ask anything...'}
                   shimmer={agent.status === 'running'}
                   onActivity={onResetPingTimer}
