@@ -1,44 +1,20 @@
-import { useCallback, useRef, useEffect } from 'react';
-import { Audio } from 'expo-av';
+import { useCallback } from 'react';
+import { useAudioPlayer } from 'expo-audio';
 
 /**
  * Hook for playing a completion chime when Claude finishes responding
  */
 export function useCompletionChime() {
-  const soundRef = useRef<Audio.Sound | null>(null);
-
-  // Preload the sound on mount
-  useEffect(() => {
-    const loadSound = async () => {
-      try {
-        const { sound } = await Audio.Sound.createAsync(
-          require('../assets/chime.wav')
-        );
-        soundRef.current = sound;
-      } catch (err) {
-        console.error('[Chime] Failed to load sound:', err);
-      }
-    };
-    loadSound();
-
-    return () => {
-      if (soundRef.current) {
-        soundRef.current.unloadAsync();
-      }
-    };
-  }, []);
+  const player = useAudioPlayer(require('../assets/chime.wav'));
 
   const play = useCallback(async () => {
     try {
-      if (soundRef.current) {
-        // Reset to start and play
-        await soundRef.current.setPositionAsync(0);
-        await soundRef.current.playAsync();
-      }
+      await player.seekTo(0);
+      player.play();
     } catch (err) {
       console.error('[Chime] Failed to play:', err);
     }
-  }, []);
+  }, [player]);
 
   return { play };
 }
