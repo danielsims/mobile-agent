@@ -254,6 +254,12 @@ export interface ServerMessage {
   // skillContent
   skill?: Skill;
 
+  // skillSearchResults
+  searchResults?: Array<{ name: string; description: string; packageRef: string; url?: string }>;
+
+  // skillInstallProgress
+  installStatus?: string;
+
   // error
   error?: string;
 }

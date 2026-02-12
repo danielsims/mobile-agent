@@ -315,14 +315,14 @@ export function SkillsScreen({
             ) : null}
 
             {/* Package ref + view on skills.sh for search results */}
-            {isSearchResult && (
+            {isSearchResult && selected.kind === 'search' && (
               <View style={detailStyles.searchMeta}>
-                <Text style={detailStyles.packageRef}>{(selected as any).result.packageRef}</Text>
-                {(selected as any).result.url ? (
+                <Text style={detailStyles.packageRef}>{selected.result.packageRef}</Text>
+                {selected.result.url ? (
                   <TouchableOpacity
                     style={detailStyles.viewDetailsButton}
                     activeOpacity={0.7}
-                    onPress={() => WebBrowser.openBrowserAsync((selected as any).result.url)}
+                    onPress={() => selected.result.url && WebBrowser.openBrowserAsync(selected.result.url)}
                   >
                     <Text style={detailStyles.viewDetailsButtonText}>View Details</Text>
                   </TouchableOpacity>
