@@ -372,6 +372,12 @@ export function CreateAgentModal({
                       autoFocus
                       keyboardAppearance="dark"
                       onSubmitEditing={() => handleCreateWorktree(project.id)}
+                      onBlur={() => {
+                        setTimeout(() => {
+                          setExpandedNewWorktree((cur) => cur === project.id ? null : cur);
+                          setNewBranchName('');
+                        }, 150);
+                      }}
                       returnKeyType="done"
                     />
                     <TouchableOpacity
