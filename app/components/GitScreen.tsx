@@ -22,11 +22,12 @@ import * as Haptics from 'expo-haptics';
 import { useAgentState } from '../state/AgentContext';
 import { useSettings } from '../state/SettingsContext';
 import { AgentCard } from './AgentCard';
+import { BottomModal } from './BottomModal';
 import { FileTypeIcon } from './FileTypeIcon';
 import { SourceTabContent } from './SourceTabContent';
 import { CommitsTabContent } from './CommitsTabContent';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
-import type { Project, GitLogCommit, AgentState, AgentType } from '../state/types';
+import type { Project, GitLogCommit, AgentState, AgentType, Skill } from '../state/types';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
 const SWIPE_THRESHOLD = SCREEN_WIDTH * 0.25;
@@ -52,7 +53,9 @@ interface GitScreenProps {
   onDestroyAgent?: (agentId: string) => void;
   onSendMessage?: (agentId: string, text: string) => void;
   onCreateWorktree?: (projectId: string, branchName: string) => void;
-  onCreateAgentForWorktree?: (projectId: string, worktreePath: string) => void;
+  onCreateAgentForWorktree?: (projectId: string, worktreePath: string, pendingPrompt?: string) => void;
+  onRemoveWorktree?: (projectId: string, worktreePath: string) => void;
+  skills?: Skill[];
   gitDataMap: Map<string, AgentGitData>;
   gitLogMap: Map<string, GitLogCommit[]>;
   gitLogLoading: Set<string>;
@@ -156,15 +159,46 @@ function StackedAgentAvatars({ agents, size = 20 }: { agents: AgentState[]; size
   );
 }
 
+function CommitIcon({ size = 16, color = '#ccc' }: { size?: number; color?: string }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M12 16a4 4 0 100-8 4 4 0 000 8zM12 3v5M12 16v5"
+        stroke={color}
+        strokeWidth={2}
+        strokeLinecap="round"
+      />
+    </Svg>
+  );
+}
+
+function TrashIcon({ size = 16, color = '#ef4444' }: { size?: number; color?: string }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14"
+        stroke={color}
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
+
 type GitScreenTab = 'diff' | 'source' | 'commits';
 const GIT_TABS: GitScreenTab[] = ['diff', 'source', 'commits'];
 
-export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelectAgent, onDestroyAgent, onSendMessage, onCreateWorktree, onCreateAgentForWorktree, gitDataMap, gitLogMap, gitLogLoading, loadingAgentIds, projects }: GitScreenProps) {
+export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelectAgent, onDestroyAgent, onSendMessage, onCreateWorktree, onCreateAgentForWorktree, onRemoveWorktree, skills = [], gitDataMap, gitLogMap, gitLogLoading, loadingAgentIds, projects }: GitScreenProps) {
   const { state } = useAgentState();
   const { settings } = useSettings();
   const [expandedWorktree, setExpandedWorktree] = useState<string | null>(null);
   const [expandedNewWorktree, setExpandedNewWorktree] = useState<string | null>(null);
   const [newBranchName, setNewBranchName] = useState('');
+  const [selectedWorktree, setSelectedWorktree] = useState<{ projectId: string; path: string; branch: string; isMain: boolean } | null>(null);
+  const [modalStep, setModalStep] = useState<'actions' | 'pickAgent' | 'confirmRemove'>('actions');
+  const [pendingSkillPrompt, setPendingSkillPrompt] = useState<string | null>(null);
+  const [removeConfirmText, setRemoveConfirmText] = useState('');
 
   // Tab state
   const [activeTab, setActiveTab] = useState<GitScreenTab>('diff');
@@ -495,6 +529,12 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                           // Toggle expanded agent card(s)
                           setExpandedWorktree(isExpanded ? null : wt.path);
                         }}
+                        onLongPress={() => {
+                          if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+                          setSelectedWorktree({ projectId: project.id, path: wt.path, branch: wt.branch, isMain: wt.isMain });
+                          setModalStep('actions');
+                          setRemoveConfirmText('');
+                        }}
                       >
                         <View style={[styles.branchDot, hasAgents && styles.branchDotActive, !hasAgents && styles.branchDotInactive]} />
                         <Text style={[styles.branchName, !hasAgents && styles.branchNameInactive]} numberOfLines={1}>
@@ -721,6 +761,152 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
             </View>
           </View>
         )}
+
+        <BottomModal
+          isVisible={!!selectedWorktree}
+          onClose={() => { setSelectedWorktree(null); setRemoveConfirmText(''); setPendingSkillPrompt(null); setModalStep('actions'); }}
+          title={modalStep === 'confirmRemove' ? 'Remove Worktree' : modalStep === 'pickAgent' ? 'Choose Agent' : selectedWorktree?.branch ?? ''}
+        >
+          {selectedWorktree && modalStep === 'actions' && (
+            <View style={actionStyles.container}>
+              {skills.filter(s => s.source === 'builtin' && s.name !== 'create-worktree').map(skill => (
+                <TouchableOpacity
+                  key={skill.name}
+                  style={actionStyles.row}
+                  activeOpacity={0.7}
+                  onPress={() => {
+                    if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                    setPendingSkillPrompt(skill.body);
+                    setModalStep('pickAgent');
+                  }}
+                >
+                  <View style={actionStyles.icon}>
+                    <CommitIcon size={16} color="#ccc" />
+                  </View>
+                  <View style={actionStyles.rowContent}>
+                    <Text style={actionStyles.label}>{skill.name}</Text>
+                    <Text style={actionStyles.description} numberOfLines={1}>{skill.description}</Text>
+                  </View>
+                </TouchableOpacity>
+              ))}
+
+              {!selectedWorktree.isMain && onRemoveWorktree && (
+                <>
+                  <View style={actionStyles.divider} />
+                  <TouchableOpacity
+                    style={actionStyles.row}
+                    activeOpacity={0.7}
+                    onPress={() => {
+                      if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                      setModalStep('confirmRemove');
+                    }}
+                  >
+                    <View style={actionStyles.iconDestructive}>
+                      <TrashIcon size={16} color="#ef4444" />
+                    </View>
+                    <View style={actionStyles.rowContent}>
+                      <Text style={actionStyles.labelDestructive}>Remove Worktree</Text>
+                      <Text style={actionStyles.description}>Delete worktree directory</Text>
+                    </View>
+                  </TouchableOpacity>
+                </>
+              )}
+            </View>
+          )}
+
+          {selectedWorktree && modalStep === 'pickAgent' && pendingSkillPrompt && (() => {
+            // Show agents that match this worktree's path, plus a "New Agent" option
+            const worktreeAgents = Array.from(state.agents.values()).filter(a => a.cwd === selectedWorktree.path);
+            return (
+              <View style={actionStyles.container}>
+                {worktreeAgents.map(agent => (
+                  <TouchableOpacity
+                    key={agent.id}
+                    style={actionStyles.row}
+                    activeOpacity={0.7}
+                    onPress={() => {
+                      if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                      const prompt = pendingSkillPrompt;
+                      setSelectedWorktree(null);
+                      setPendingSkillPrompt(null);
+                      onSendMessage?.(agent.id, prompt);
+                      onSelectAgent(agent.id);
+                    }}
+                  >
+                    <AgentAvatar type={agent.type} size={36} />
+                    <View style={actionStyles.rowContent}>
+                      <Text style={actionStyles.label} numberOfLines={1}>{agent.sessionName || 'Chat'}</Text>
+                      <Text style={actionStyles.description} numberOfLines={1}>
+                        {agent.gitBranch ? `${agent.projectName || ''} (${agent.gitBranch})` : agent.projectName || ''} · {agent.status === 'running' ? 'Running' : 'Idle'}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                ))}
+                <View style={actionStyles.divider} />
+                <TouchableOpacity
+                  style={actionStyles.row}
+                  activeOpacity={0.7}
+                  onPress={() => {
+                    if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                    const wt = selectedWorktree;
+                    const prompt = pendingSkillPrompt;
+                    setSelectedWorktree(null);
+                    setPendingSkillPrompt(null);
+                    onCreateAgentForWorktree?.(wt.projectId, wt.path, prompt ?? undefined);
+                  }}
+                >
+                  <View style={actionStyles.icon}>
+                    <Text style={{ color: '#ccc', fontSize: 18, fontWeight: '600' }}>+</Text>
+                  </View>
+                  <View style={actionStyles.rowContent}>
+                    <Text style={actionStyles.label}>New Agent</Text>
+                    <Text style={actionStyles.description}>Start a fresh chat in this worktree</Text>
+                  </View>
+                </TouchableOpacity>
+              </View>
+            );
+          })()}
+
+          {selectedWorktree && modalStep === 'confirmRemove' && (() => {
+            const confirmed = removeConfirmText === selectedWorktree.branch;
+            return (
+              <View style={removeStyles.container}>
+                <Text style={removeStyles.message}>
+                  This will delete the worktree directory. Uncommitted changes will be lost.
+                </Text>
+                <Text style={removeStyles.hint}>
+                  Type <Text style={removeStyles.branch}>{selectedWorktree.branch}</Text> to confirm.
+                </Text>
+                <TextInput
+                  style={removeStyles.input}
+                  value={removeConfirmText}
+                  onChangeText={setRemoveConfirmText}
+                  placeholder={selectedWorktree.branch}
+                  placeholderTextColor="#333"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  autoFocus
+                  keyboardAppearance="dark"
+                />
+                <TouchableOpacity
+                  style={[removeStyles.removeBtn, !confirmed && removeStyles.removeBtnDisabled]}
+                  activeOpacity={0.7}
+                  disabled={!confirmed}
+                  onPress={() => {
+                    if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                    onRemoveWorktree?.(selectedWorktree.projectId, selectedWorktree.path);
+                    setSelectedWorktree(null);
+                    setRemoveConfirmText('');
+                  }}
+                >
+                  <Text style={[removeStyles.removeBtnText, !confirmed && removeStyles.removeBtnTextDisabled]}>
+                    Remove Worktree
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            );
+          })()}
+        </BottomModal>
       </Animated.View>
     </View>
   );
@@ -1167,5 +1353,106 @@ const overlayStyles = StyleSheet.create({
     color: '#777',
     fontSize: 12,
     fontWeight: '500',
+  },
+});
+
+const actionStyles = StyleSheet.create({
+  container: {
+    paddingBottom: 4,
+  },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 14,
+  },
+  icon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  iconDestructive: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  rowContent: {
+    flex: 1,
+  },
+  label: {
+    color: '#e5e5e5',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  labelDestructive: {
+    color: '#ef4444',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  description: {
+    color: '#666',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  divider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    marginVertical: 4,
+  },
+});
+
+const removeStyles = StyleSheet.create({
+  container: {
+    gap: 12,
+    paddingBottom: 8,
+  },
+  message: {
+    color: '#999',
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  branch: {
+    color: '#e5e5e5',
+    fontWeight: '600',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  hint: {
+    color: '#666',
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  input: {
+    backgroundColor: '#1a1a1a',
+    color: '#e5e5e5',
+    fontSize: 14,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+  },
+  removeBtn: {
+    backgroundColor: '#dc2626',
+    paddingVertical: 14,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  removeBtnDisabled: {
+    backgroundColor: 'rgba(220, 38, 38, 0.15)',
+  },
+  removeBtnText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  removeBtnTextDisabled: {
+    color: 'rgba(255, 255, 255, 0.25)',
   },
 });

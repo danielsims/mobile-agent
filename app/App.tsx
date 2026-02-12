@@ -6,23 +6,24 @@ import {
   Text,
   View,
   TouchableOpacity,
-  SafeAreaView,
   ActivityIndicator,
   Alert,
 } from 'react-native';
+import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { AgentProvider, useAgentState } from './state/AgentContext';
 import { SettingsProvider } from './state/SettingsContext';
 import { Dashboard, AgentDetailScreen, CreateAgentModal, SettingsScreen } from './components';
 import { GitScreen } from './components/GitScreen';
+import { SkillsScreen, type SkillSearchResult } from './components/SkillsScreen';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useNotifications } from './hooks/useNotifications';
 import { useCompletionChime } from './hooks/useCompletionChime';
 import { parseQRCode, clearCredentials, isPaired, type QRPairingData } from './utils/auth';
-import type { Project, AgentType, GitLogCommit, ProviderModelOption } from './state/types';
+import type { Project, AgentType, GitLogCommit, ProviderModelOption, Skill } from './state/types';
 import type { GitStatusData } from './components/GitTabContent';
 
-type Screen = 'pairing' | 'scanner' | 'dashboard' | 'agent' | 'settings' | 'git';
+type Screen = 'pairing' | 'scanner' | 'dashboard' | 'agent' | 'settings' | 'git' | 'skills';
 const MODEL_PREFETCH_TYPES: AgentType[] = ['claude', 'codex', 'opencode'];
 
 // Inner app component that has access to AgentContext
@@ -59,6 +60,11 @@ function AppInner() {
   const [gitLogMap, setGitLogMap] = useState<Map<string, GitLogCommit[]>>(new Map());
   const [gitLogLoading, setGitLogLoading] = useState<Set<string>>(new Set());
 
+  // Skills state
+  const [skills, setSkills] = useState<Skill[]>([]);
+  const [skillSearchResults, setSkillSearchResults] = useState<SkillSearchResult[]>([]);
+  const [skillSearchLoading, setSkillSearchLoading] = useState(false);
+
   // Whether we have stored pairing credentials (checked on mount, updated on pair/unpair)
   useEffect(() => {
     isPaired().then(setHasCreds);
@@ -72,9 +78,25 @@ function AppInner() {
   const loadCachedMessagesRef = useRef(loadCachedMessages);
   loadCachedMessagesRef.current = loadCachedMessages;
   const sendRef = useRef<(type: string, data?: Record<string, unknown>) => boolean>(() => false);
+  const pendingSkillRef = useRef<{ worktreePath: string; prompt: string } | null>(null);
 
   const onWsMessage = useCallback((msg: import('./state/types').ServerMessage) => {
     handleServerMessageRef.current(msg);
+
+    // Fulfill pending worktree skill when a NEW agent is created
+    if (msg.type === 'agentCreated' && msg.agent) {
+      const pending = pendingSkillRef.current;
+      if (pending && msg.agent.cwd === pending.worktreePath) {
+        pendingSkillRef.current = null;
+        const newAgentId = msg.agent.id;
+        // Small delay to let the agent finish spawning before sending
+        setTimeout(() => {
+          sendRef.current('sendMessage', { agentId: newAgentId, text: pending.prompt });
+        }, 500);
+        setSelectedAgentId(newAgentId);
+        setScreen('agent');
+      }
+    }
 
     // On initial connect, load from cache then request history from server.
     // The agentHistory handler skips processing if cache already has data,
@@ -85,6 +107,7 @@ function AppInner() {
         sendRef.current('getHistory', { agentId: agent.id });
       }
       sendRef.current('listProjects');
+      sendRef.current('listSkills');
     }
 
     // Project list response
@@ -106,6 +129,13 @@ function AppInner() {
 
     // Worktree created — update projects list with new worktrees
     if (msg.type === 'worktreeCreated' && msg.projectId && msg.worktrees) {
+      setProjects(prev => prev.map(p =>
+        p.id === msg.projectId ? { ...p, worktrees: msg.worktrees || [] } : p
+      ));
+    }
+
+    // Worktree removed — update projects list with remaining worktrees
+    if (msg.type === 'worktreeRemoved' && msg.projectId && msg.worktrees) {
       setProjects(prev => prev.map(p =>
         p.id === msg.projectId ? { ...p, worktrees: msg.worktrees || [] } : p
       ));
@@ -154,6 +184,34 @@ function AppInner() {
         next.delete(projectPath);
         return next;
       });
+    }
+
+    // Skill list response
+    if (msg.type === 'skillList') {
+      setSkills(msg.skills || []);
+    }
+
+    // Skill search results
+    if (msg.type === 'skillSearchResults') {
+      setSkillSearchResults(((msg as any).results || []).map((r: any) => ({
+        name: r.name || '',
+        description: r.description || '',
+        packageRef: r.packageRef || '',
+        url: r.url || '',
+      })));
+      setSkillSearchLoading(false);
+    }
+
+    // Skill install progress
+    if (msg.type === 'skillInstallProgress') {
+      if ((msg as any).status === 'installed') {
+        setSkillSearchLoading(false);
+        // Re-fetch skills so the newly installed one appears immediately
+        sendRef.current('listSkills');
+      } else if ((msg as any).status === 'error') {
+        setSkillSearchLoading(false);
+        Alert.alert('Install Failed', (msg as any).error || 'Unknown error');
+      }
     }
 
     // Play chime + notify on agent result
@@ -275,7 +333,10 @@ function AppInner() {
     setShowCreateModal(true);
   };
 
-  const handleCreateAgentForWorktree = (projectId: string, worktreePath: string) => {
+  const handleCreateAgentForWorktree = (projectId: string, worktreePath: string, pendingPrompt?: string) => {
+    if (pendingPrompt) {
+      pendingSkillRef.current = { worktreePath, prompt: pendingPrompt };
+    }
     prefetchModelsForCreateFlow();
     setCreateModalInitialProjectId(projectId);
     setCreateModalInitialWorktreePath(worktreePath);
@@ -308,6 +369,10 @@ function AppInner() {
 
   const handleCreateWorktree = (projectId: string, branchName: string) => {
     send('createWorktree', { projectId, branchName });
+  };
+
+  const handleRemoveWorktree = (projectId: string, worktreePath: string) => {
+    send('removeWorktree', { projectId, worktreePath });
   };
 
   const handleUnregisterProject = (projectId: string) => {
@@ -389,6 +454,35 @@ function AppInner() {
   const handleBackFromGit = () => {
     setScreen('dashboard');
   };
+
+  const handleOpenSkills = () => {
+    send('listSkills'); // Refresh on open
+    setScreen('skills');
+  };
+
+  const handleBackFromSkills = () => {
+    setSkillSearchResults([]);
+    setSkillSearchLoading(false);
+    setScreen('dashboard');
+  };
+
+  const handleUpdateSkill = (name: string, body: string) => {
+    send('updateSkill', { name, body });
+  };
+
+  const handleInstallSkill = (packageRef: string) => {
+    setSkillSearchLoading(true);
+    send('installSkill', { packageRef });
+  };
+
+  const handleSearchSkills = useCallback((query: string) => {
+    setSkillSearchLoading(true);
+    setSkillSearchResults([]);
+    send('searchSkills', { query });
+  }, [send]);
+
+  // Note: pending worktree skill fulfillment is handled in onWsMessage
+  // when 'agentCreated' arrives, to avoid matching existing agents by cwd.
 
   // For GitScreen: request status for any agent (tracks loading state)
   const handleGitScreenRequestStatus = useCallback((agentId: string) => {
@@ -490,7 +584,7 @@ function AppInner() {
   }
 
   // Dashboard + overlays (layered so dashboard is visible during swipe-back)
-  if (screen === 'dashboard' || (screen === 'agent' && selectedAgentId) || screen === 'settings' || screen === 'git') {
+  if (screen === 'dashboard' || (screen === 'agent' && selectedAgentId) || screen === 'settings' || screen === 'git' || screen === 'skills') {
     return (
       <View style={styles.container}>
         <StatusBar style="light" />
@@ -505,15 +599,16 @@ function AppInner() {
             onSendMessage={handleSendMessage}
             onOpenSettings={handleOpenSettings}
             onOpenGit={handleOpenGit}
+            onOpenSkills={handleOpenSkills}
           />
         </View>
         {screen === 'agent' && selectedAgentId && (
           <View style={styles.layerOverlay} pointerEvents="box-none">
-            <SafeAreaView style={styles.safeTop} />
             <AgentDetailScreen
               agentId={selectedAgentId}
               connectionStatus={connectionStatus}
               projects={projects}
+              skills={skills}
               onBack={handleBackToDashboard}
               onSendMessage={handleSendMessage}
               onStopAgent={handleStopAgent}
@@ -538,6 +633,21 @@ function AppInner() {
             />
           </View>
         )}
+        {screen === 'skills' && (
+          <View style={styles.layerOverlay} pointerEvents="box-none">
+            <SafeAreaView style={styles.safeTop} />
+            <SkillsScreen
+              onBack={handleBackFromSkills}
+              skills={skills}
+              onUpdateSkill={handleUpdateSkill}
+              onInstallSkill={handleInstallSkill}
+              onSearchSkills={handleSearchSkills}
+              onClearSearchResults={() => setSkillSearchResults([])}
+              searchResults={skillSearchResults}
+              searchLoading={skillSearchLoading}
+            />
+          </View>
+        )}
         {screen === 'git' && (
           <View style={styles.layerOverlay} pointerEvents="box-none">
             <SafeAreaView style={styles.safeTop} />
@@ -550,6 +660,8 @@ function AppInner() {
               onSendMessage={handleSendMessage}
               onCreateWorktree={handleCreateWorktree}
               onCreateAgentForWorktree={handleCreateAgentForWorktree}
+              onRemoveWorktree={handleRemoveWorktree}
+              skills={skills}
               gitDataMap={gitDataMap}
               gitLogMap={gitLogMap}
               gitLogLoading={gitLogLoading}
@@ -594,11 +706,13 @@ function AppInner() {
 // Root component: wraps with providers
 export default function App() {
   return (
-    <SettingsProvider>
-      <AgentProvider>
-        <AppInner />
-      </AgentProvider>
-    </SettingsProvider>
+    <SafeAreaProvider>
+      <SettingsProvider>
+        <AgentProvider>
+          <AppInner />
+        </AgentProvider>
+      </SettingsProvider>
+    </SafeAreaProvider>
   );
 }
 

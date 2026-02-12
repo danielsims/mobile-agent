@@ -23,6 +23,7 @@ interface InputBarProps {
   onStop?: () => void;
   showStop?: boolean;
   onVoice?: () => void;
+  onPlus?: () => void;
   disabled?: boolean;
   placeholder?: string;
   onActivity?: () => void;
@@ -35,7 +36,7 @@ interface InputBarProps {
 // Throttle activity notifications to avoid excessive pings
 const ACTIVITY_THROTTLE = 5000;
 
-export function InputBar({ onSend, onStop, showStop = false, onVoice, disabled, placeholder = 'Ask anything...', onActivity, initialValue = '', onDraftChange, autoFocus, shimmer }: InputBarProps) {
+export function InputBar({ onSend, onStop, showStop = false, onVoice, onPlus, disabled, placeholder = 'Ask anything...', onActivity, initialValue = '', onDraftChange, autoFocus, shimmer }: InputBarProps) {
   const [text, setText] = useState(initialValue);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const inputRef = useRef<TextInput>(null);
@@ -134,6 +135,18 @@ export function InputBar({ onSend, onStop, showStop = false, onVoice, disabled, 
   return (
     <View style={styles.container}>
       <View style={styles.content}>
+        {onPlus && (
+          <TouchableOpacity
+            style={styles.plusBtn}
+            onPress={() => {
+              if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              onPlus();
+            }}
+            activeOpacity={0.7}
+          >
+            <PlusIcon size={20} color="#888" />
+          </TouchableOpacity>
+        )}
         <View style={styles.inputWrapper}>
           <TextInput
             ref={inputRef}
@@ -187,6 +200,14 @@ export function InputBar({ onSend, onStop, showStop = false, onVoice, disabled, 
 
       {!keyboardVisible && Platform.OS === 'ios' && <View style={styles.safeAreaFill} />}
     </View>
+  );
+}
+
+function PlusIcon({ size = 20, color = '#888' }: { size?: number; color?: string }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path d="M12 5v14M5 12h14" stroke={color} strokeWidth={2} strokeLinecap="round" />
+    </Svg>
   );
 }
 
@@ -274,6 +295,14 @@ const styles = StyleSheet.create({
   shimmerText: {
     fontSize: 16,
     color: '#999',
+  },
+  plusBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
   },
   micBtn: {
     width: 36,

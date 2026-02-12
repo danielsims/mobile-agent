@@ -1,4 +1,5 @@
 import React, { useCallback, useState, useEffect, useMemo, useRef } from 'react';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   View,
   Text,
@@ -18,10 +19,11 @@ import Svg, { Path } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
 import { useAgent, useAgentState } from '../state/AgentContext';
 import type { ConnectionStatus, PermissionRequest } from '../types';
-import type { AgentType, Project } from '../state/types';
+import type { AgentType, Project, Skill } from '../state/types';
 import { KeyboardScrollView } from './KeyboardScrollView';
 import { MessageBubble, buildToolResultMap } from './MessageBubble';
 import { InputBar } from './InputBar';
+import { BottomModal } from './BottomModal';
 import { CodeBlock } from './CodeBlock';
 import { GitTabContent, type GitStatusData } from './GitTabContent';
 import { ArtifactsTabContent } from './ArtifactsTabContent';
@@ -43,6 +45,7 @@ interface AgentDetailScreenProps {
   agentId: string;
   connectionStatus: ConnectionStatus;
   projects?: Project[];
+  skills?: Skill[];
   onBack: () => void;
   onSendMessage: (agentId: string, text: string) => void;
   onStopAgent?: (agentId: string) => void;
@@ -197,6 +200,7 @@ export function AgentDetailScreen({
   agentId,
   connectionStatus,
   projects,
+  skills = [],
   onBack,
   onSendMessage,
   onStopAgent,
@@ -212,11 +216,14 @@ export function AgentDetailScreen({
 }: AgentDetailScreenProps) {
   const agent = useAgent(agentId);
   const { dispatch } = useAgentState();
+  const insets = useSafeAreaInsets();
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [activeTab, setActiveTab] = useState<DetailTab>('chat');
   const tabScrollRef = useRef<ScrollView>(null);
   const INITIAL_MESSAGE_WINDOW = 30;
   const [messageWindow, setMessageWindow] = useState(INITIAL_MESSAGE_WINDOW);
+  const [showPlusModal, setShowPlusModal] = useState(false);
+  const [showSkillPicker, setShowSkillPicker] = useState(false);
 
   // Swipe-from-left-edge to go back (only on Chat tab)
   const swipeX = useRef(new Animated.Value(0)).current;
@@ -522,7 +529,7 @@ export function AgentDetailScreen({
 
       {/* Sliding detail content */}
       <Animated.View
-        style={[styles.container, { transform: [{ translateX: swipeX }] }]}
+        style={[styles.container, { paddingTop: insets.top, transform: [{ translateX: swipeX }] }]}
         {...panResponder.panHandlers}
       >
         {/* Header */}
@@ -729,6 +736,7 @@ export function AgentDetailScreen({
                   onStop={handleStop}
                   showStop={agent.status === 'running'}
                   onVoice={handleVoiceOpen}
+                  onPlus={() => setShowPlusModal(true)}
                   disabled={isDisabled || permissions.length > 0}
                   placeholder={agent.status === 'running' ? 'Agent is working...' : 'Ask anything...'}
                   shimmer={agent.status === 'running'}
@@ -759,6 +767,71 @@ export function AgentDetailScreen({
           </ScrollView>
         </View>
       </Animated.View>
+
+      {/* Plus button modal — actions */}
+      <BottomModal isVisible={showPlusModal} onClose={() => setShowPlusModal(false)} title="Actions">
+        <View style={plusModalStyles.list}>
+          <TouchableOpacity
+            style={plusModalStyles.row}
+            activeOpacity={0.7}
+            onPress={() => {
+              setShowPlusModal(false);
+              setShowSkillPicker(true);
+            }}
+          >
+            <View style={plusModalStyles.icon}>
+              <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+                <Path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" stroke="#ccc" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+              </Svg>
+            </View>
+            <View style={plusModalStyles.rowContent}>
+              <Text style={plusModalStyles.label}>Use Skill</Text>
+              <Text style={plusModalStyles.description}>Run an installed skill in this chat</Text>
+            </View>
+          </TouchableOpacity>
+        </View>
+      </BottomModal>
+
+      {/* Skill picker modal */}
+      <BottomModal isVisible={showSkillPicker} onClose={() => setShowSkillPicker(false)} title="Choose Skill">
+        <ScrollView style={plusModalStyles.scrollList} contentContainerStyle={plusModalStyles.list}>
+          {skills.filter(s => s.source !== 'builtin').length === 0 ? (
+            <Text style={plusModalStyles.emptyText}>No skills installed</Text>
+          ) : (
+            skills.filter(s => s.source !== 'builtin').map(skill => (
+              <TouchableOpacity
+                key={skill.name}
+                style={plusModalStyles.row}
+                activeOpacity={0.7}
+                onPress={() => {
+                  setShowSkillPicker(false);
+                  onSendMessage(agentId, skill.body);
+                }}
+              >
+                <View style={plusModalStyles.icon}>
+                  {skill.icon === 'commit' ? (
+                    <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+                      <Path d="M12 16a4 4 0 100-8 4 4 0 000 8zM12 3v5M12 16v5" stroke="#ccc" strokeWidth={2} strokeLinecap="round" />
+                    </Svg>
+                  ) : skill.icon === 'vercel' ? (
+                    <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+                      <Path d="M12 2L2 22h20L12 2z" fill="#ccc" />
+                    </Svg>
+                  ) : (
+                    <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+                      <Path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" stroke="#ccc" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+                    </Svg>
+                  )}
+                </View>
+                <View style={plusModalStyles.rowContent}>
+                  <Text style={plusModalStyles.label}>{skill.name}</Text>
+                  <Text style={plusModalStyles.description} numberOfLines={2}>{skill.description}</Text>
+                </View>
+              </TouchableOpacity>
+            ))
+          )}
+        </ScrollView>
+      </BottomModal>
     </View>
   );
 }
@@ -789,7 +862,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 12,
-    paddingTop: 4,
     paddingBottom: 10,
     borderBottomWidth: 1,
     borderBottomColor: '#1a1a1a',
@@ -1193,5 +1265,48 @@ const styles = StyleSheet.create({
     borderBottomWidth: 6,
     borderLeftColor: 'transparent',
     borderRightColor: 'transparent',
+  },
+});
+
+const plusModalStyles = StyleSheet.create({
+  scrollList: {
+    maxHeight: 400,
+  },
+  list: {
+    paddingBottom: 8,
+  },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    gap: 12,
+  },
+  icon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  rowContent: {
+    flex: 1,
+  },
+  label: {
+    color: '#e5e5e5',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  description: {
+    color: '#666',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  emptyText: {
+    color: '#555',
+    fontSize: 14,
+    textAlign: 'center',
+    paddingVertical: 20,
   },
 });

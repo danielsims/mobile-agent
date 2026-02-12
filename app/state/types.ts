@@ -162,6 +162,14 @@ export interface ProviderModelOption {
   note?: string;
 }
 
+export interface Skill {
+  name: string;
+  description: string;
+  icon: string | null;
+  source: 'builtin' | 'user';
+  body: string;
+}
+
 // --- Server Messages (new protocol) ---
 
 export interface ServerMessage {
@@ -237,6 +245,12 @@ export interface ServerMessage {
   // gitLog
   projectPath?: string;
   commits?: GitLogCommit[];
+
+  // skillList
+  skills?: Skill[];
+
+  // skillContent
+  skill?: Skill;
 
   // error
   error?: string;

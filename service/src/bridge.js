@@ -17,6 +17,7 @@ import {
 import { loadSessions, getSavedSessions, saveSession, removeSession } from './sessions.js';
 import { readTranscript } from './transcripts.js';
 import { listModelsForAgentType } from './models.js';
+import { initSkills, listSkills, getSkill, updateSkill, searchSkills, installSkill } from './skills.js';
 import {
   loadProjects,
   getProjects,
@@ -61,6 +62,7 @@ export class Bridge {
     const { publicKeyRaw } = initializeKeys();
     loadSessions();
     loadProjects();
+    initSkills();
     console.log(`Server public key: ${publicKeyRaw.toString('hex').slice(0, 16)}...`);
 
     return new Promise((resolve) => {
@@ -446,6 +448,26 @@ export class Bridge {
         this._handleGetGitLog(ws, msg);
         break;
 
+      case 'listSkills':
+        this._handleListSkills(ws);
+        break;
+
+      case 'getSkill':
+        this._handleGetSkill(ws, msg);
+        break;
+
+      case 'updateSkill':
+        this._handleUpdateSkill(ws, msg);
+        break;
+
+      case 'searchSkills':
+        this._handleSearchSkills(ws, msg);
+        break;
+
+      case 'installSkill':
+        this._handleInstallSkill(ws, msg);
+        break;
+
       case 'ping':
         this._sendTo(ws, 'pong');
         break;
@@ -810,6 +832,123 @@ export class Bridge {
     const commits = getGitLog(projectPath, maxCount || 100);
     console.log(`[GitLog] Sending ${commits.length} commits for ${projectPath}`);
     this._sendTo(ws, 'gitLog', { projectPath, commits });
+  }
+
+  // --- Skills ---
+
+  _handleListSkills(ws) {
+    try {
+      const skills = listSkills();
+      console.log(`[Skills] Sending ${skills.length} skill(s) to mobile`);
+      this._sendTo(ws, 'skillList', { skills });
+    } catch (e) {
+      console.error('[Skills] _handleListSkills failed:', e);
+      this._sendTo(ws, 'skillList', { skills: [] });
+    }
+  }
+
+  _handleGetSkill(ws, msg) {
+    const { name } = msg;
+    if (!name) {
+      this._sendTo(ws, 'error', { error: 'Skill name is required.' });
+      return;
+    }
+
+    try {
+      const skill = getSkill(name);
+      if (!skill) {
+        this._sendTo(ws, 'error', { error: `Skill "${name}" not found.` });
+        return;
+      }
+      this._sendTo(ws, 'skillContent', { skill });
+    } catch (e) {
+      console.error(`[Skills] _handleGetSkill failed for "${name}":`, e);
+      this._sendTo(ws, 'error', { error: `Failed to load skill "${name}".` });
+    }
+  }
+
+  _handleUpdateSkill(ws, msg) {
+    const { name, body } = msg;
+    if (!name || typeof body !== 'string') {
+      this._sendTo(ws, 'error', { error: 'Skill name and body are required.' });
+      return;
+    }
+    try {
+      const updated = updateSkill(name, body);
+      if (!updated) {
+        this._sendTo(ws, 'error', { error: `Skill "${name}" not found or not editable.` });
+        return;
+      }
+      this._sendTo(ws, 'skillContent', { skill: updated });
+      // Refresh the full list so the app has updated data
+      const skills = listSkills();
+      this._sendTo(ws, 'skillList', { skills });
+    } catch (e) {
+      console.error(`[Skills] _handleUpdateSkill failed for "${name}":`, e);
+      this._sendTo(ws, 'error', { error: `Failed to update skill "${name}".` });
+    }
+  }
+
+  async _handleSearchSkills(ws, msg) {
+    const { query } = msg;
+    if (!query) {
+      this._sendTo(ws, 'skillSearchResults', { results: [] });
+      return;
+    }
+
+    // Track the search generation so stale results from earlier searches are dropped
+    if (!this._skillSearchGen) this._skillSearchGen = 0;
+    const gen = ++this._skillSearchGen;
+
+    try {
+      console.log(`[Skills] Searching for "${query}"...`);
+      const result = await searchSkills(query);
+
+      // If a newer search was started while this one was in-flight, discard
+      if (gen !== this._skillSearchGen) {
+        console.log(`[Skills] Discarding stale search results for "${query}" (gen ${gen} < ${this._skillSearchGen})`);
+        return;
+      }
+
+      const results = result.results || [];
+      console.log(`[Skills] Search returned ${results.length} result(s), broadcasting to mobile`);
+      for (const client of this.mobileClients) {
+        this._sendTo(client, 'skillSearchResults', { results });
+      }
+    } catch (e) {
+      if (gen !== this._skillSearchGen) return;
+      console.error(`[Skills] _handleSearchSkills failed:`, e);
+      for (const client of this.mobileClients) {
+        this._sendTo(client, 'skillSearchResults', { results: [] });
+      }
+    }
+  }
+
+  async _handleInstallSkill(ws, msg) {
+    const { packageRef } = msg;
+    if (!packageRef) {
+      this._sendTo(ws, 'error', { error: 'Package reference is required.' });
+      return;
+    }
+    const broadcast = (type, data) => {
+      for (const client of this.mobileClients) this._sendTo(client, type, data);
+    };
+    try {
+      broadcast('skillInstallProgress', { packageRef, status: 'installing' });
+      console.log(`[Skills] Installing "${packageRef}"...`);
+      const result = await installSkill(packageRef);
+      if (result.success) {
+        console.log(`[Skills] Installed "${packageRef}" successfully`);
+        const skills = listSkills();
+        broadcast('skillList', { skills });
+        broadcast('skillInstallProgress', { packageRef, status: 'installed', output: result.output });
+      } else {
+        broadcast('skillInstallProgress', { packageRef, status: 'error', error: result.error });
+      }
+    } catch (e) {
+      console.error(`[Skills] _handleInstallSkill failed for "${packageRef}":`, e);
+      broadcast('skillInstallProgress', { packageRef, status: 'error', error: e.message });
+    }
   }
 
   // --- Broadcasting ---

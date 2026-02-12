@@ -43,7 +43,8 @@
           "speechRecognitionPermission": "Allow Mobile Agent to use speech recognition for voice input"
         }
       ],
-      "expo-web-browser"
+      "expo-web-browser",
+      "expo-audio"
     ]
   }
 }
