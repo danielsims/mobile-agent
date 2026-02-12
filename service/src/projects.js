@@ -174,17 +174,12 @@ export function listWorktrees(projectId) {
   if (current.path) worktrees.push(current);
 
   // Detect which branches are truly merged into main.
-  // "Merged" means the branch had unique work that is now reachable from main,
-  // NOT just that the branch happens to sit at the same commit as main (freshly created).
+  // "Merged" = branch had unique commits that are now reachable from main.
+  // A branch sitting at an ancestor of main with no unique work is NOT merged.
   const mainBranch = worktrees.find(wt => wt.path === project.path)?.branch;
   let mergedBranches = new Set();
-  let mainRef = null;
   try {
     if (mainBranch) {
-      mainRef = execFileSync('git', ['rev-parse', mainBranch], {
-        cwd: project.path, encoding: 'utf-8', timeout: 3000,
-      }).trim();
-
       const merged = execFileSync('git', ['branch', '--merged', mainBranch], {
         cwd: project.path, encoding: 'utf-8', timeout: 5000,
       });
@@ -205,16 +200,20 @@ export function listWorktrees(projectId) {
       let status = 'active';
       if (isMain) {
         status = 'main';
-      } else if (mergedBranches.has(branch)) {
-        // Only mark as "merged" if the branch tip differs from main —
-        // a branch sitting at the exact same commit as main is just newly created.
+      } else if (mergedBranches.has(branch) && mainBranch) {
+        // git branch --merged includes branches with no unique work (just an
+        // ancestor of main). Only mark "merged" if the branch actually diverged
+        // with its own commits that are now reachable from main.
         try {
-          const branchRef = execFileSync('git', ['rev-parse', branch], {
+          const mergeBase = execFileSync('git', ['merge-base', mainBranch, branch], {
             cwd: project.path, encoding: 'utf-8', timeout: 3000,
           }).trim();
-          status = (branchRef !== mainRef) ? 'merged' : 'active';
+          const uniqueCount = execFileSync('git', ['rev-list', '--count', `${mergeBase}..${branch}`], {
+            cwd: project.path, encoding: 'utf-8', timeout: 3000,
+          }).trim();
+          status = (parseInt(uniqueCount, 10) > 0) ? 'merged' : 'active';
         } catch {
-          status = 'merged'; // can't resolve, trust git branch --merged
+          status = 'active'; // can't determine, default to active
         }
       }
       return { path: wt.path, branch, isMain, status };
