@@ -864,7 +864,10 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                 {filteredSkills.length > 0 && (
                   <>
                     <View style={actionStyles.divider} />
-                    {filteredSkills.map(skill => (
+                    {filteredSkills.map(skill => {
+                      // Build skill prompt with worktree context so the agent knows which branch to act on
+                      const skillPrompt = `${skill.body}\n\nWorktree branch: \`${selectedWorktree.branch}\`\nWorktree path: \`${selectedWorktree.path}\``;
+                      return (
                       <TouchableOpacity
                         key={skill.name}
                         style={actionStyles.row}
@@ -874,9 +877,9 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                           if (worktreeAgents.length === 0) {
                             const wt = selectedWorktree;
                             setSelectedWorktree(null);
-                            onCreateAgentForWorktree?.(wt.projectId, wt.path, skill.body);
+                            onCreateAgentForWorktree?.(wt.projectId, wt.path, skillPrompt);
                           } else {
-                            setPendingSkillPrompt(skill.body);
+                            setPendingSkillPrompt(skillPrompt);
                             setModalStep('pickAgent');
                           }
                         }}
@@ -889,7 +892,8 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                           <Text style={actionStyles.description} numberOfLines={1}>{skill.description}</Text>
                         </View>
                       </TouchableOpacity>
-                    ))}
+                    );
+                    })}
                   </>
                 )}
 
