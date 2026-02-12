@@ -518,6 +518,14 @@ export class Bridge {
     // Spawn the CLI process in the selected directory (or $HOME by default)
     session.spawn(this.port, null, cwd);
 
+    // Override projectName with the actual project name (not the worktree dir basename)
+    if (msg.projectId) {
+      try {
+        const project = getProject(msg.projectId);
+        if (project) session.projectName = project.name;
+      } catch { /* ignore */ }
+    }
+
     this._broadcastToMobile('agentCreated', { agent: session.getSnapshot() });
   }
 

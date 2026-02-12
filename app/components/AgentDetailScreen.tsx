@@ -391,8 +391,12 @@ export function AgentDetailScreen({
         if (p.worktrees?.some(wt => agent.cwd === wt.path)) return p;
       }
     }
-    if (agent.projectName) {
-      return projects.find(p => p.name === agent.projectName) || null;
+    const { projectName } = agent;
+    if (projectName) {
+      return projects.find(p =>
+        p.name === projectName ||
+        projectName.startsWith(p.name + '--')
+      ) || null;
     }
     return null;
   }, [agent, projects]);
