@@ -52,6 +52,7 @@ interface GitScreenProps {
   onDestroyAgent?: (agentId: string) => void;
   onSendMessage?: (agentId: string, text: string) => void;
   onCreateAgentForWorktree?: (projectId: string, worktreePath: string, pendingPrompt?: string) => void;
+  onCreateWorktree?: (projectId: string, branchName: string) => void;
   onRemoveWorktree?: (projectId: string, worktreePath: string) => void;
   onRefresh?: () => void;
   onRequestWorktreeStatus?: (worktreePath: string) => void;
@@ -191,11 +192,12 @@ function TrashIcon({ size = 16, color = '#ef4444' }: { size?: number; color?: st
 type GitScreenTab = 'diff' | 'source' | 'commits';
 const GIT_TABS: GitScreenTab[] = ['diff', 'source', 'commits'];
 
-export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelectAgent, onSendMessage, onCreateAgentForWorktree, onRemoveWorktree, onRefresh, onRequestWorktreeStatus, skills = [], worktreeGitData, gitLogMap, gitLogLoading, loadingAgentIds, projects }: GitScreenProps) {
+export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelectAgent, onSendMessage, onCreateAgentForWorktree, onCreateWorktree, onRemoveWorktree, onRefresh, onRequestWorktreeStatus, skills = [], worktreeGitData, gitLogMap, gitLogLoading, loadingAgentIds, projects }: GitScreenProps) {
   const { state } = useAgentState();
   const { settings } = useSettings();
   const [expandedNewWorktree, setExpandedNewWorktree] = useState<string | null>(null);
   const [newBranchName, setNewBranchName] = useState('');
+  const createBtnPressedRef = useRef(false);
   const [selectedWorktree, setSelectedWorktree] = useState<{ projectId: string; path: string; branch: string; isMain: boolean } | null>(null);
   const [modalStep, setModalStep] = useState<'actions' | 'pickAgent' | 'confirmRemove'>('actions');
   const [pendingSkillPrompt, setPendingSkillPrompt] = useState<string | null>(null);
@@ -327,24 +329,12 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
     const trimmed = newBranchName.trim();
     if (!trimmed) return;
 
-    // Find the create-worktree skill and build the prompt with the branch name
-    const createSkill = skills.find(s => s.name === 'create-worktree');
-    const prompt = createSkill
-      ? `${createSkill.body}\n\nCreate a worktree for branch: \`${trimmed}\``
-      : `Create a new git worktree for branch: \`${trimmed}\``;
-
-    // Find the project to get the main worktree path
-    const project = projects.find(p => p.id === projectId);
-    const mainWorktree = project?.worktrees.find(wt => wt.isMain);
-    const worktreePath = mainWorktree?.path || project?.path || '';
-
     setNewBranchName('');
     setExpandedNewWorktree(null);
     Keyboard.dismiss();
 
-    // Route through agent creation with the skill prompt
-    onCreateAgentForWorktree?.(projectId, worktreePath, prompt);
-  }, [newBranchName, skills, projects, onCreateAgentForWorktree]);
+    onCreateWorktree?.(projectId, trimmed);
+  }, [newBranchName, onCreateWorktree]);
 
   // Slide in from the LEFT
   const swipeX = useRef(new Animated.Value(-SCREEN_WIDTH)).current;
@@ -512,6 +502,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
               <ScrollView
                 style={styles.content}
                 contentContainerStyle={styles.contentInner}
+                keyboardShouldPersistTaps="handled"
                 refreshControl={
                   <RefreshControl
                     refreshing={refreshing}
@@ -605,7 +596,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                   );
                 })}
 
-                {onCreateAgentForWorktree && (
+                {onCreateWorktree && (
                   expandedNewWorktree === project.id ? (
                     <View style={styles.newWorktreeExpanded}>
                       <TextInput
@@ -620,16 +611,21 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                         keyboardAppearance="dark"
                         onSubmitEditing={() => handleCreateWorktree(project.id)}
                         onBlur={() => {
-                          // Delay collapse so a "Create" button press can register first
+                          // Delay collapse so a "Create" button press can register first.
+                          // On iOS, onBlur fires on touch DOWN but onPress fires on touch UP
+                          // (~200ms+). If the Create button was pressed (onPressIn), skip collapse.
                           setTimeout(() => {
-                            setExpandedNewWorktree((cur) => cur === project.id ? null : cur);
-                            setNewBranchName('');
+                            if (!createBtnPressedRef.current) {
+                              setExpandedNewWorktree((cur) => cur === project.id ? null : cur);
+                            }
+                            createBtnPressedRef.current = false;
                           }, 150);
                         }}
                         returnKeyType="done"
                       />
                       <TouchableOpacity
                         style={[styles.newWorktreeCreateBtn, newBranchName.trim() && styles.newWorktreeCreateBtnActive]}
+                        onPressIn={() => { createBtnPressedRef.current = true; }}
                         onPress={() => handleCreateWorktree(project.id)}
                         disabled={!newBranchName.trim()}
                         activeOpacity={0.7}

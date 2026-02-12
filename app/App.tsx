@@ -135,11 +135,15 @@ function AppInner() {
       setModelsLoadingType(prev => (prev === agentType ? null : prev));
     }
 
-    // Worktree created — update projects list with new worktrees
+    // Worktree created — update projects list and fetch status for the new worktree
     if (msg.type === 'worktreeCreated' && msg.projectId && msg.worktrees) {
       setProjects(prev => prev.map(p =>
         p.id === msg.projectId ? { ...p, worktrees: msg.worktrees || [] } : p
       ));
+      // Request git status for the newly created worktree so it renders immediately
+      if (msg.worktree?.path) {
+        sendRef.current('getWorktreeStatus', { worktreePath: msg.worktree.path });
+      }
     }
 
     // Worktree removed — update projects list with remaining worktrees
@@ -699,6 +703,7 @@ function AppInner() {
               onDestroyAgent={handleDestroyAgent}
               onSendMessage={handleSendMessage}
               onCreateAgentForWorktree={handleCreateAgentForWorktree}
+              onCreateWorktree={handleCreateWorktree}
               onRemoveWorktree={handleRemoveWorktree}
               onRefresh={handleRequestProjects}
               onRequestWorktreeStatus={handleRequestWorktreeStatus}

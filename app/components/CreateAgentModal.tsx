@@ -115,22 +115,23 @@ export function CreateAgentModal({
   }, [onClose]);
 
   const handleTypeSelect = useCallback((type: AgentType) => {
-    if (initialProjectId && initialWorktreePath) {
-      onSubmit({ agentType: type, projectId: initialProjectId, worktreePath: initialWorktreePath });
-      onClose();
-      return;
-    }
     setSelectedType(type);
     setSelectedModel('');
     onRequestModels(type);
     setStep('model');
-  }, [initialProjectId, initialWorktreePath, onSubmit, onClose, onRequestModels]);
+  }, [onRequestModels]);
 
   const handleModelSelect = useCallback((model: string) => {
+    // If project/worktree is pre-filled (e.g. from Git worktrees tab), skip the project picker
+    if (initialProjectId && initialWorktreePath) {
+      onSubmit({ agentType: selectedType, model: model || undefined, projectId: initialProjectId, worktreePath: initialWorktreePath });
+      onClose();
+      return;
+    }
     setSelectedModel(model);
     setStep('project');
     onRequestProjects();
-  }, [onRequestProjects]);
+  }, [initialProjectId, initialWorktreePath, selectedType, onSubmit, onClose, onRequestProjects]);
 
   const handleWorktreeSelect = useCallback((projectId: string, worktreePath: string) => {
     onSubmit({
