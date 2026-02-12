@@ -31,29 +31,49 @@ function formatToolName(name: string): string {
   return name;
 }
 
-// Minimal tool icon — two horizontal bars (terminal/code style)
-function ToolIcon({ size = 11, color = '#666' }: { size?: number; color?: string }) {
-  const barH = Math.max(1.5, size * 0.15);
-  return (
-    <View style={{ width: size, height: size, justifyContent: 'center', gap: size * 0.22 }}>
-      <View style={{ width: size * 0.55, height: barH, backgroundColor: color, borderRadius: barH / 2 }} />
-      <View style={{ width: size * 0.85, height: barH, backgroundColor: color, borderRadius: barH / 2 }} />
-    </View>
-  );
+// Shorten a file path to just filename or parent/filename
+function shortPath(filePath: string): string {
+  const parts = filePath.split('/').filter(Boolean);
+  if (parts.length <= 2) return parts.join('/');
+  return parts.slice(-2).join('/');
 }
 
-// Extract a short description from tool input for the card header.
-// Checks common field names across tools (Bash, Read, Write, Grep, Glob, Task, etc.)
-function extractToolDescription(input: Record<string, unknown>): string | null {
-  const candidates = ['description', 'file_path', 'command', 'pattern', 'query', 'url', 'prompt', 'subject'];
-  for (const key of candidates) {
-    const val = input[key];
-    if (typeof val === 'string' && val.length > 0) {
-      // Trim to a reasonable header length
-      return val.length > 80 ? val.slice(0, 80) + '...' : val;
+function truncate(str: string, max: number): string {
+  return str.length > max ? str.slice(0, max) + '\u2026' : str;
+}
+
+// Tool display config — maps tool names to label + title
+function getToolDisplay(name: string, input: Record<string, unknown>): { label: string; title: string } {
+  const str = (key: string) => typeof input[key] === 'string' ? input[key] as string : '';
+
+  switch (name) {
+    case 'Read':
+      return { label: 'Read', title: shortPath(str('file_path')) };
+    case 'Write':
+      return { label: 'Write', title: shortPath(str('file_path')) };
+    case 'Edit':
+      return { label: 'Edit', title: shortPath(str('file_path')) };
+    case 'Bash':
+      return { label: 'Run', title: str('description') || truncate(str('command'), 60) };
+    case 'Grep':
+      return { label: 'Search', title: truncate(str('pattern'), 50) };
+    case 'Glob':
+      return { label: 'Find files', title: truncate(str('pattern'), 50) };
+    case 'WebSearch':
+      return { label: 'Web', title: truncate(str('query'), 60) };
+    case 'WebFetch':
+      return { label: 'Fetch', title: truncate(str('url'), 50) };
+    case 'Task':
+      return { label: 'Agent', title: str('description') || truncate(str('prompt') || 'Subagent', 50) };
+    default: {
+      const formatted = formatToolName(name);
+      const candidates = ['description', 'file_path', 'command', 'pattern', 'query', 'url', 'prompt'];
+      for (const key of candidates) {
+        if (str(key)) return { label: formatted, title: truncate(str(key), 60) };
+      }
+      return { label: formatted, title: formatted };
     }
   }
-  return null;
 }
 
 // Diff view for Edit tool — shows old_string/new_string as red/green lines
@@ -269,12 +289,12 @@ function AskUserQuestionCard({
   );
 }
 
-// Collapsible tool invocation card
+// Tool card — consistent collapsed card, tappable to expand details
 function ToolUseCard({ block, result }: { block: ContentBlock & { type: 'tool_use' }; result?: string | null }) {
   const [expanded, setExpanded] = useState(false);
-  const fallbackName = formatToolName(block.name);
-  const title = extractToolDescription(block.input) || fallbackName;
+  const display = getToolDisplay(block.name, block.input as Record<string, unknown>);
   const isCompleted = result != null;
+  const hasDiff = isEditWithDiff(block.name, block.input);
 
   return (
     <View style={styles.toolCard}>
@@ -284,58 +304,44 @@ function ToolUseCard({ block, result }: { block: ContentBlock & { type: 'tool_us
         activeOpacity={0.7}
       >
         <View style={styles.toolHeaderLeft}>
-          <ToolIcon size={11} color="#666" />
-          <Text style={styles.toolName} numberOfLines={1}>{title}</Text>
+          <Text style={styles.toolLabel}>{display.label}</Text>
+          {isCompleted ? (
+            <Text style={styles.toolTitle} numberOfLines={1}>{display.title}</Text>
+          ) : (
+            <ShimmerText text={display.title} style={styles.toolTitle} duration={1700} />
+          )}
+        </View>
+        <View style={styles.toolHeaderRight}>
           <View style={[styles.toolBadge, !isCompleted && styles.toolBadgeRunning]}>
             <View style={[styles.toolBadgeDot, !isCompleted && styles.toolBadgeDotRunning]} />
-            <Text style={[styles.toolBadgeText, !isCompleted && styles.toolBadgeTextRunning]}>
-              {isCompleted ? 'Completed' : 'Running'}
-            </Text>
           </View>
-        </View>
-        <View style={[styles.toolChevronBox, expanded && styles.toolChevronBoxOpen]}>
-          <View style={styles.toolChevronArrow} />
+          <View style={[styles.toolChevron, expanded && styles.toolChevronOpen]}>
+            <View style={styles.toolChevronArrow} />
+          </View>
         </View>
       </TouchableOpacity>
 
       {expanded && (
         <View style={styles.toolBody}>
-          {isEditWithDiff(block.name, block.input) ? (
-            <>
-              <Text style={styles.toolSectionLabel}>DIFF</Text>
-              <ScrollView style={styles.toolCodeScroll} nestedScrollEnabled>
-                <View style={styles.toolCodeBlock}>
-                  <DiffView
-                    filePath={typeof block.input.file_path === 'string' ? block.input.file_path : undefined}
-                    oldStr={block.input.old_string as string}
-                    newStr={block.input.new_string as string}
-                  />
-                </View>
-              </ScrollView>
-            </>
-          ) : (
-            <>
-              <Text style={styles.toolSectionLabel}>INPUT</Text>
-              <ScrollView style={styles.toolCodeScroll} nestedScrollEnabled>
-                <View style={styles.toolCodeBlock}>
-                  <Text style={styles.toolCodeText}>
-                    {JSON.stringify(block.input, null, 2)}
-                  </Text>
-                </View>
-              </ScrollView>
-            </>
+          {hasDiff && (
+            <ScrollView style={styles.toolDetailScroll} nestedScrollEnabled>
+              <DiffView
+                oldStr={block.input.old_string as string}
+                newStr={block.input.new_string as string}
+              />
+            </ScrollView>
+          )}
+          {!hasDiff && (
+            <ScrollView style={styles.toolDetailScroll} nestedScrollEnabled>
+              <Text style={styles.toolDetailText}>
+                {JSON.stringify(block.input, null, 2)}
+              </Text>
+            </ScrollView>
           )}
           {result != null && (
-            <>
-              <Text style={[styles.toolSectionLabel, { marginTop: 10 }]}>OUTPUT</Text>
-              <ScrollView style={styles.toolCodeScroll} nestedScrollEnabled>
-                <View style={styles.toolCodeBlock}>
-                  <Text style={styles.toolCodeText}>
-                    {result}
-                  </Text>
-                </View>
-              </ScrollView>
-            </>
+            <ScrollView style={[styles.toolDetailScroll, { marginTop: 8 }]} nestedScrollEnabled>
+              <Text style={styles.toolDetailText}>{result}</Text>
+            </ScrollView>
           )}
         </View>
       )}
@@ -530,42 +536,53 @@ const styles = StyleSheet.create({
 
   // --- Tool use card ---
   toolCard: {
-    borderWidth: 1,
-    borderColor: '#252525',
+    backgroundColor: '#141414',
     borderRadius: 8,
     marginVertical: 6,
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
     overflow: 'hidden',
   },
   toolHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+    padding: 14,
+    gap: 10,
   },
   toolHeaderLeft: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
     flex: 1,
+    minWidth: 0,
   },
-  toolName: {
-    color: '#ccc',
+  toolLabel: {
+    color: '#555',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  toolTitle: {
+    color: '#e5e5e5',
     fontSize: 13,
     fontWeight: '500',
     flexShrink: 1,
   },
-  toolBadge: {
+  toolHeaderRight: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(34,197,94,0.1)',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 10,
-    gap: 5,
+    gap: 8,
+  },
+  toolBadge: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: 'rgba(34,197,94,0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   toolBadgeRunning: {
-    backgroundColor: 'rgba(245,158,11,0.12)',
+    backgroundColor: 'rgba(245,158,11,0.15)',
   },
   toolBadgeDot: {
     width: 5,
@@ -576,58 +593,41 @@ const styles = StyleSheet.create({
   toolBadgeDotRunning: {
     backgroundColor: '#f59e0b',
   },
-  toolBadgeText: {
-    color: '#22c55e',
-    fontSize: 10,
-    fontWeight: '500',
-  },
-  toolBadgeTextRunning: {
-    color: '#f59e0b',
-  },
-  toolChevronBox: {
-    width: 20,
-    height: 20,
+  toolChevron: {
+    width: 16,
+    height: 16,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  toolChevronBoxOpen: {
+  toolChevronOpen: {
     transform: [{ rotate: '180deg' }],
   },
   toolChevronArrow: {
-    width: 7,
-    height: 7,
+    width: 6,
+    height: 6,
     borderRightWidth: 1.5,
     borderBottomWidth: 1.5,
-    borderColor: '#555',
+    borderColor: '#444',
     transform: [{ rotate: '45deg' }],
     marginTop: -3,
   },
   toolBody: {
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#252525',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    borderTopColor: '#2a2a2a',
+    padding: 14,
+    paddingTop: 12,
   },
-  toolSectionLabel: {
-    color: '#555',
-    fontSize: 10,
-    fontWeight: '600',
-    letterSpacing: 1,
-    marginBottom: 8,
-  },
-  toolCodeScroll: {
-    maxHeight: 500,
-  },
-  toolCodeBlock: {
-    backgroundColor: 'rgba(255,255,255,0.03)',
+  toolDetailScroll: {
+    maxHeight: 200,
+    backgroundColor: '#0f0f0f',
     borderRadius: 6,
     padding: 10,
   },
-  toolCodeText: {
-    color: '#888',
-    fontSize: 11,
+  toolDetailText: {
+    color: '#777',
+    fontSize: 12,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    lineHeight: 16,
+    lineHeight: 18,
   },
 
   // --- Diff view ---

@@ -1146,7 +1146,6 @@ const styles = StyleSheet.create({
   chatContent: {
     padding: 16,
     paddingBottom: 16,
-    justifyContent: 'flex-end' as const,
   },
   placeholder: {
     color: '#555',
