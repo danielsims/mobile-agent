@@ -170,13 +170,52 @@ export function listWorktrees(projectId) {
   }
   if (current.path) worktrees.push(current);
 
+  // Detect which branches are truly merged into main.
+  // "Merged" means the branch had unique work that is now reachable from main,
+  // NOT just that the branch happens to sit at the same commit as main (freshly created).
+  const mainBranch = worktrees.find(wt => wt.path === project.path)?.branch;
+  let mergedBranches = new Set();
+  let mainRef = null;
+  try {
+    if (mainBranch) {
+      mainRef = execFileSync('git', ['rev-parse', mainBranch], {
+        cwd: project.path, encoding: 'utf-8', timeout: 3000,
+      }).trim();
+
+      const merged = execFileSync('git', ['branch', '--merged', mainBranch], {
+        cwd: project.path, encoding: 'utf-8', timeout: 5000,
+      });
+      for (const line of merged.split('\n')) {
+        const name = line.replace(/^[*+]?\s+/, '').trim();
+        if (name && name !== mainBranch) mergedBranches.add(name);
+      }
+    }
+  } catch {
+    // If merged check fails, just skip status detection
+  }
+
   return worktrees
     .filter(wt => !wt.bare)
-    .map(wt => ({
-      path: wt.path,
-      branch: wt.branch || '(unknown)',
-      isMain: wt.path === project.path,
-    }));
+    .map(wt => {
+      const branch = wt.branch || '(unknown)';
+      const isMain = wt.path === project.path;
+      let status = 'active';
+      if (isMain) {
+        status = 'main';
+      } else if (mergedBranches.has(branch)) {
+        // Only mark as "merged" if the branch tip differs from main —
+        // a branch sitting at the exact same commit as main is just newly created.
+        try {
+          const branchRef = execFileSync('git', ['rev-parse', branch], {
+            cwd: project.path, encoding: 'utf-8', timeout: 3000,
+          }).trim();
+          status = (branchRef !== mainRef) ? 'merged' : 'active';
+        } catch {
+          status = 'merged'; // can't resolve, trust git branch --merged
+        }
+      }
+      return { path: wt.path, branch, isMain, status };
+    });
 }
 
 /**
