@@ -604,7 +604,6 @@ function AppInner() {
         </View>
         {screen === 'agent' && selectedAgentId && (
           <View style={styles.layerOverlay} pointerEvents="box-none">
-            <SafeAreaView style={styles.safeTop} />
             <AgentDetailScreen
               agentId={selectedAgentId}
               connectionStatus={connectionStatus}

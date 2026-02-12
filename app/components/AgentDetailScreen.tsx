@@ -1,4 +1,5 @@
 import React, { useCallback, useState, useEffect, useMemo, useRef } from 'react';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   View,
   Text,
@@ -215,6 +216,7 @@ export function AgentDetailScreen({
 }: AgentDetailScreenProps) {
   const agent = useAgent(agentId);
   const { dispatch } = useAgentState();
+  const insets = useSafeAreaInsets();
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [activeTab, setActiveTab] = useState<DetailTab>('chat');
   const tabScrollRef = useRef<ScrollView>(null);
@@ -527,7 +529,7 @@ export function AgentDetailScreen({
 
       {/* Sliding detail content */}
       <Animated.View
-        style={[styles.container, { transform: [{ translateX: swipeX }] }]}
+        style={[styles.container, { paddingTop: insets.top, transform: [{ translateX: swipeX }] }]}
         {...panResponder.panHandlers}
       >
         {/* Header */}
@@ -860,7 +862,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 12,
-    marginTop: -8,
     paddingBottom: 10,
     borderBottomWidth: 1,
     borderBottomColor: '#1a1a1a',
