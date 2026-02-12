@@ -466,11 +466,28 @@ export function getGitDiff(cwd, filePath) {
     const args = ['diff', 'HEAD'];
     if (filePath) args.push('--', filePath);
 
-    return execFileSync('git', args, {
+    const result = execFileSync('git', args, {
       cwd,
       encoding: 'utf-8',
       timeout: 15000,
     });
+
+    // git diff HEAD returns empty for untracked files — show full content as added
+    if (!result && filePath) {
+      try {
+        return execFileSync('git', ['diff', '--no-index', '/dev/null', filePath], {
+          cwd,
+          encoding: 'utf-8',
+          timeout: 15000,
+        });
+      } catch (e) {
+        // --no-index exits with code 1 when files differ (expected)
+        if (e.stdout) return e.stdout;
+        return '';
+      }
+    }
+
+    return result;
   } catch {
     return '';
   }
