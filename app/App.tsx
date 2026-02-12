@@ -56,6 +56,10 @@ function AppInner() {
   const [gitDataMap, setGitDataMap] = useState<Map<string, GitStatusData>>(new Map());
   const [gitLoadingAgents, setGitLoadingAgents] = useState<Set<string>>(new Set());
 
+  // Worktree-level git status — keyed by worktree path
+  const [worktreeGitData, setWorktreeGitData] = useState<Map<string, GitStatusData>>(new Map());
+  const [worktreeGitLoading, setWorktreeGitLoading] = useState<Set<string>>(new Set());
+
   // Git log state — per-project commit history
   const [gitLogMap, setGitLogMap] = useState<Map<string, GitLogCommit[]>>(new Map());
   const [gitLogLoading, setGitLogLoading] = useState<Set<string>>(new Set());
@@ -161,6 +165,27 @@ function AppInner() {
       setGitLoadingAgents(prev => {
         const next = new Set(prev);
         next.delete(agentId);
+        return next;
+      });
+    }
+
+    // Worktree-level git status response
+    if (msg.type === 'worktreeStatus' && msg.worktreePath) {
+      const wtPath = msg.worktreePath;
+      const gitData: GitStatusData = {
+        branch: msg.branch || '',
+        ahead: msg.ahead || 0,
+        behind: msg.behind || 0,
+        files: msg.files || [],
+      };
+      setWorktreeGitData(prev => {
+        const next = new Map(prev);
+        next.set(wtPath, gitData);
+        return next;
+      });
+      setWorktreeGitLoading(prev => {
+        const next = new Set(prev);
+        next.delete(wtPath);
         return next;
       });
     }
@@ -484,6 +509,16 @@ function AppInner() {
   // Note: pending worktree skill fulfillment is handled in onWsMessage
   // when 'agentCreated' arrives, to avoid matching existing agents by cwd.
 
+  // For GitScreen: request worktree-level git status
+  const handleRequestWorktreeStatus = useCallback((worktreePath: string) => {
+    setWorktreeGitLoading(prev => {
+      const next = new Set(prev);
+      next.add(worktreePath);
+      return next;
+    });
+    send('getWorktreeStatus', { worktreePath });
+  }, [send]);
+
   // For GitScreen: request status for any agent (tracks loading state)
   const handleGitScreenRequestStatus = useCallback((agentId: string) => {
     setGitLoadingAgents(prev => {
@@ -661,8 +696,12 @@ function AppInner() {
               onCreateWorktree={handleCreateWorktree}
               onCreateAgentForWorktree={handleCreateAgentForWorktree}
               onRemoveWorktree={handleRemoveWorktree}
+              onRefresh={handleRequestProjects}
+              onRequestWorktreeStatus={handleRequestWorktreeStatus}
               skills={skills}
               gitDataMap={gitDataMap}
+              worktreeGitData={worktreeGitData}
+              worktreeGitLoading={worktreeGitLoading}
               gitLogMap={gitLogMap}
               gitLogLoading={gitLogLoading}
               loadingAgentIds={gitLoadingAgents}
