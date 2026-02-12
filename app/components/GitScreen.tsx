@@ -12,8 +12,8 @@ import {
   Dimensions,
   Platform,
   Keyboard,
-  Alert,
   ActivityIndicator,
+  RefreshControl,
   type NativeSyntheticEvent,
   type NativeScrollEvent,
 } from 'react-native';
@@ -21,7 +21,6 @@ import Svg, { Path } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
 import { useAgentState } from '../state/AgentContext';
 import { useSettings } from '../state/SettingsContext';
-import { AgentCard } from './AgentCard';
 import { BottomModal } from './BottomModal';
 import { FileTypeIcon } from './FileTypeIcon';
 import { SourceTabContent } from './SourceTabContent';
@@ -52,11 +51,14 @@ interface GitScreenProps {
   onSelectAgent: (agentId: string) => void;
   onDestroyAgent?: (agentId: string) => void;
   onSendMessage?: (agentId: string, text: string) => void;
-  onCreateWorktree?: (projectId: string, branchName: string) => void;
   onCreateAgentForWorktree?: (projectId: string, worktreePath: string, pendingPrompt?: string) => void;
   onRemoveWorktree?: (projectId: string, worktreePath: string) => void;
+  onRefresh?: () => void;
+  onRequestWorktreeStatus?: (worktreePath: string) => void;
   skills?: Skill[];
   gitDataMap: Map<string, AgentGitData>;
+  worktreeGitData?: Map<string, AgentGitData>;
+  worktreeGitLoading?: Set<string>;
   gitLogMap: Map<string, GitLogCommit[]>;
   gitLogLoading: Set<string>;
   loadingAgentIds: Set<string>;
@@ -189,27 +191,47 @@ function TrashIcon({ size = 16, color = '#ef4444' }: { size?: number; color?: st
 type GitScreenTab = 'diff' | 'source' | 'commits';
 const GIT_TABS: GitScreenTab[] = ['diff', 'source', 'commits'];
 
-export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelectAgent, onDestroyAgent, onSendMessage, onCreateWorktree, onCreateAgentForWorktree, onRemoveWorktree, skills = [], gitDataMap, gitLogMap, gitLogLoading, loadingAgentIds, projects }: GitScreenProps) {
+export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelectAgent, onSendMessage, onCreateAgentForWorktree, onRemoveWorktree, onRefresh, onRequestWorktreeStatus, skills = [], worktreeGitData, gitLogMap, gitLogLoading, loadingAgentIds, projects }: GitScreenProps) {
   const { state } = useAgentState();
   const { settings } = useSettings();
-  const [expandedWorktree, setExpandedWorktree] = useState<string | null>(null);
   const [expandedNewWorktree, setExpandedNewWorktree] = useState<string | null>(null);
   const [newBranchName, setNewBranchName] = useState('');
   const [selectedWorktree, setSelectedWorktree] = useState<{ projectId: string; path: string; branch: string; isMain: boolean } | null>(null);
   const [modalStep, setModalStep] = useState<'actions' | 'pickAgent' | 'confirmRemove'>('actions');
   const [pendingSkillPrompt, setPendingSkillPrompt] = useState<string | null>(null);
   const [removeConfirmText, setRemoveConfirmText] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
 
   // Tab state
   const [activeTab, setActiveTab] = useState<GitScreenTab>('diff');
   const tabScrollRef = useRef<ScrollView>(null);
 
-  // Request git log for all projects when screen mounts / projects change
+  // Request git log and worktree status for all projects when screen mounts / projects change
   useEffect(() => {
     for (const project of projects) {
       onRequestGitLog(project.path);
+      for (const wt of project.worktrees) {
+        onRequestWorktreeStatus?.(wt.path);
+      }
     }
-  }, [projects, onRequestGitLog]);
+  }, [projects, onRequestGitLog, onRequestWorktreeStatus]);
+
+  // Stop refreshing spinner when projects data updates
+  useEffect(() => {
+    if (refreshing) setRefreshing(false);
+  }, [projects, refreshing]);
+
+  const handleRefresh = useCallback(() => {
+    setRefreshing(true);
+    onRefresh?.();
+    // Re-request worktree-level git status and logs
+    for (const project of projects) {
+      for (const wt of project.worktrees) {
+        onRequestWorktreeStatus?.(wt.path);
+      }
+      onRequestGitLog(project.path);
+    }
+  }, [onRefresh, projects, onRequestWorktreeStatus, onRequestGitLog]);
 
   // Chat/voice state
   const [chatAgentId, setChatAgentId] = useState<string | null>(null);
@@ -225,7 +247,6 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
   const {
     transcript,
     isListening,
-    start: startListening,
     stop: stopListening,
     abort: abortListening,
     clear: clearTranscript,
@@ -243,13 +264,6 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
     return () => { showSub.remove(); hideSub.remove(); };
   }, []);
 
-  const handleChatOpen = useCallback((agentId: string) => {
-    if (voiceAgentId) { abortListening(); setVoiceAgentId(null); }
-    setChatAgentId(agentId);
-    setChatText('');
-    setTimeout(() => inlineInputRef.current?.focus(), 100);
-  }, [voiceAgentId, abortListening]);
-
   const handleChatSend = useCallback(() => {
     const trimmed = chatText.trim();
     if (!trimmed || !chatAgentId || !onSendMessage) return;
@@ -266,17 +280,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
     Keyboard.dismiss();
   }, []);
 
-  const handleVoiceOpen = useCallback(async (agentId: string) => {
-    if (chatAgentId) { setChatAgentId(null); setChatText(''); Keyboard.dismiss(); }
-    setVoiceAgentId(agentId);
-    setVoiceText('');
-    clearTranscript();
-    const started = await startListening();
-    if (!started) {
-      setVoiceAgentId(null);
-      Alert.alert('Speech Recognition', 'Could not start speech recognition. Check permissions in Settings.');
-    }
-  }, [chatAgentId, clearTranscript, startListening]);
+
 
   const handleVoiceSend = useCallback(() => {
     const trimmed = voiceText.trim();
@@ -321,12 +325,26 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
 
   const handleCreateWorktree = useCallback((projectId: string) => {
     const trimmed = newBranchName.trim();
-    if (!trimmed || !onCreateWorktree) return;
-    onCreateWorktree(projectId, trimmed);
+    if (!trimmed) return;
+
+    // Find the create-worktree skill and build the prompt with the branch name
+    const createSkill = skills.find(s => s.name === 'create-worktree');
+    const prompt = createSkill
+      ? `${createSkill.body}\n\nCreate a worktree for branch: \`${trimmed}\``
+      : `Create a new git worktree for branch: \`${trimmed}\``;
+
+    // Find the project to get the main worktree path
+    const project = projects.find(p => p.id === projectId);
+    const mainWorktree = project?.worktrees.find(wt => wt.isMain);
+    const worktreePath = mainWorktree?.path || project?.path || '';
+
     setNewBranchName('');
     setExpandedNewWorktree(null);
     Keyboard.dismiss();
-  }, [newBranchName, onCreateWorktree]);
+
+    // Route through agent creation with the skill prompt
+    onCreateAgentForWorktree?.(projectId, worktreePath, prompt);
+  }, [newBranchName, skills, projects, onCreateAgentForWorktree]);
 
   // Slide in from the LEFT
   const swipeX = useRef(new Animated.Value(-SCREEN_WIDTH)).current;
@@ -491,14 +509,27 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
           >
             {/* Worktrees tab */}
             <View style={styles.tabPage}>
-              <ScrollView style={styles.content} contentContainerStyle={styles.contentInner}>
+              <ScrollView
+                style={styles.content}
+                contentContainerStyle={styles.contentInner}
+                refreshControl={
+                  <RefreshControl
+                    refreshing={refreshing}
+                    onRefresh={handleRefresh}
+                    tintColor="#555"
+                  />
+                }
+              >
                 {projects.length === 0 ? (
                   <View style={styles.emptyContainer}>
                     <Text style={styles.emptyText}>No projects registered</Text>
                     <Text style={styles.emptySubtext}>Register a project to see git status here</Text>
                   </View>
-                ) : (
-                  projects.map(project => (
+                ) : (() => {
+                  // Wait for ALL worktree statuses before showing real data — avoids per-row flicker
+                  const allPaths = projects.flatMap(p => p.worktrees.map(wt => wt.path));
+                  const allLoaded = allPaths.length > 0 && allPaths.every(p => worktreeGitData?.has(p));
+                  const result: React.ReactNode[] = projects.map(project => (
               <View key={project.id} style={styles.projectSection}>
                 <View style={styles.sectionHeader}>
                   <ProjectIcon project={project} />
@@ -508,78 +539,56 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                 {project.worktrees.map(wt => {
                   const agents = cwdToAgents.get(wt.path) || [];
                   const hasAgents = agents.length > 0;
-                  // Use first agent for git data (all share the same worktree)
-                  const primaryAgent = agents[0] || null;
-                  const gitData = primaryAgent ? gitDataMap.get(primaryAgent.id) : null;
-                  const isLoading = agents.some(a => loadingAgentIds.has(a.id));
-                  const files = gitData?.files || [];
-                  const isExpanded = expandedWorktree === wt.path;
+                  // Use worktree-level git data (works with or without agents)
+                  const wtGitData = worktreeGitData?.get(wt.path);
+                  const isLoading = !allLoaded;
+                  const files = wtGitData?.files || [];
 
                   return (
                     <View key={wt.path}>
                       <TouchableOpacity
-                        style={[styles.worktreeRow, isExpanded && styles.worktreeRowExpanded]}
+                        style={styles.worktreeRow}
                         activeOpacity={0.7}
                         onPress={() => {
                           if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                          if (!hasAgents) {
-                            onCreateAgentForWorktree?.(project.id, wt.path);
-                            return;
-                          }
-                          // Toggle expanded agent card(s)
-                          setExpandedWorktree(isExpanded ? null : wt.path);
-                        }}
-                        onLongPress={() => {
-                          if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
                           setSelectedWorktree({ projectId: project.id, path: wt.path, branch: wt.branch, isMain: wt.isMain });
                           setModalStep('actions');
                           setRemoveConfirmText('');
                         }}
                       >
-                        <View style={[styles.branchDot, hasAgents && styles.branchDotActive, !hasAgents && styles.branchDotInactive]} />
-                        <Text style={[styles.branchName, !hasAgents && styles.branchNameInactive]} numberOfLines={1}>
+                        <View style={[
+                          styles.branchDot,
+                          isLoading ? styles.branchDotLoading
+                            : wt.isMain ? styles.branchDotMain
+                            : wt.status === 'merged' ? styles.branchDotMerged
+                            : files.length > 0 ? styles.branchDotDirty
+                            : styles.branchDotClean,
+                        ]} />
+                        <Text style={styles.branchName} numberOfLines={1}>
                           {wt.branch}
                         </Text>
-                        {wt.isMain && <Text style={styles.mainBadge}>main</Text>}
-                        <View style={styles.worktreeRight}>
-                          {hasAgents && <StackedAgentAvatars agents={agents} size={20} />}
-                          {isLoading ? (
-                            <ActivityIndicator color="#333" size="small" />
-                          ) : hasAgents ? (
-                            <Text style={styles.fileCountBadge}>
-                              {files.length > 0 ? `${files.length} file${files.length !== 1 ? 's' : ''}` : 'clean'}
-                            </Text>
-                          ) : (
-                            <Text style={styles.noAgentBadge}>no agent</Text>
-                          )}
-                        </View>
+                        {isLoading ? (
+                          <View style={styles.worktreeRight}>
+                            <View style={styles.skeletonBadge} />
+                            <View style={styles.skeletonCircle} />
+                            <View style={styles.skeletonCircle} />
+                            <View style={styles.skeletonFileCount} />
+                          </View>
+                        ) : (
+                          <>
+                            {wt.isMain && <Text style={styles.mainBadge}>main</Text>}
+                            {wt.status === 'merged' && <Text style={styles.mergedBadge}>merged</Text>}
+                            <View style={styles.worktreeRight}>
+                              {hasAgents && <StackedAgentAvatars agents={agents} size={20} />}
+                              <Text style={styles.fileCountBadge}>
+                                {files.length > 0 ? `${files.length} file${files.length !== 1 ? 's' : ''}` : 'clean'}
+                              </Text>
+                            </View>
+                          </>
+                        )}
                       </TouchableOpacity>
 
-                      {isExpanded && hasAgents && (
-                        <View style={styles.spaceContainer}>
-                          <View style={agents.length <= 2 ? styles.spaceStack : styles.spaceGrid}>
-                            {agents.map(agent => (
-                              <View key={agent.id} style={agents.length <= 2 ? styles.spaceCardStacked : styles.spaceCardGrid}>
-                                <AgentCard
-                                  agent={agent}
-                                  projects={projects}
-                                  layout="page"
-                                  onPress={() => {
-                                    animateBack();
-                                    setTimeout(() => onSelectAgent(agent.id), 300);
-                                  }}
-                                  onLongPress={() => {}}
-                                  onDestroy={onDestroyAgent ? () => onDestroyAgent(agent.id) : undefined}
-                                  onChat={onSendMessage ? () => handleChatOpen(agent.id) : undefined}
-                                  onVoice={onSendMessage ? () => handleVoiceOpen(agent.id) : undefined}
-                                />
-                              </View>
-                            ))}
-                          </View>
-                        </View>
-                      )}
-
-                      {!isExpanded && files.length > 0 && (
+                      {files.length > 0 && (
                         <View style={styles.fileList}>
                           {files.map((f, i) => (
                             <View key={`${f.file}-${i}`} style={styles.fileRow}>
@@ -596,7 +605,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                   );
                 })}
 
-                {onCreateWorktree && (
+                {onCreateAgentForWorktree && (
                   expandedNewWorktree === project.id ? (
                     <View style={styles.newWorktreeExpanded}>
                       <TextInput
@@ -610,6 +619,13 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                         autoFocus
                         keyboardAppearance="dark"
                         onSubmitEditing={() => handleCreateWorktree(project.id)}
+                        onBlur={() => {
+                          // Delay collapse so a "Create" button press can register first
+                          setTimeout(() => {
+                            setExpandedNewWorktree((cur) => cur === project.id ? null : cur);
+                            setNewBranchName('');
+                          }, 150);
+                        }}
                         returnKeyType="done"
                       />
                       <TouchableOpacity
@@ -638,8 +654,17 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                   )
                 )}
               </View>
-            ))
-          )}
+            ));
+            result.push(
+              <View key="__legend" style={styles.legend}>
+                <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#3b82f6' }]} /><Text style={styles.legendLabel}>Main</Text></View>
+                <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#f59e0b' }]} /><Text style={styles.legendLabel}>Changes</Text></View>
+                <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#22c55e' }]} /><Text style={styles.legendLabel}>Clean</Text></View>
+                <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#8b5cf6' }]} /><Text style={styles.legendLabel}>Merged</Text></View>
+              </View>
+            );
+            return result;
+          })()}
               </ScrollView>
             </View>
 
@@ -767,55 +792,119 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
           onClose={() => { setSelectedWorktree(null); setRemoveConfirmText(''); setPendingSkillPrompt(null); setModalStep('actions'); }}
           title={modalStep === 'confirmRemove' ? 'Remove Worktree' : modalStep === 'pickAgent' ? 'Choose Agent' : selectedWorktree?.branch ?? ''}
         >
-          {selectedWorktree && modalStep === 'actions' && (
-            <View style={actionStyles.container}>
-              {skills.filter(s => s.source === 'builtin' && s.name !== 'create-worktree').map(skill => (
+          {selectedWorktree && modalStep === 'actions' && (() => {
+            const worktreeAgents = Array.from(state.agents.values()).filter(a => a.cwd === selectedWorktree.path);
+            const filteredSkills = skills.filter(s => s.source === 'builtin' && s.name !== 'create-worktree');
+            return (
+              <View style={actionStyles.container}>
+                {/* New chat */}
                 <TouchableOpacity
-                  key={skill.name}
                   style={actionStyles.row}
                   activeOpacity={0.7}
                   onPress={() => {
                     if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-                    setPendingSkillPrompt(skill.body);
-                    setModalStep('pickAgent');
+                    const wt = selectedWorktree;
+                    setSelectedWorktree(null);
+                    onCreateAgentForWorktree?.(wt.projectId, wt.path);
                   }}
                 >
                   <View style={actionStyles.icon}>
-                    <CommitIcon size={16} color="#ccc" />
+                    <Text style={{ color: '#ccc', fontSize: 18, fontWeight: '600' }}>+</Text>
                   </View>
                   <View style={actionStyles.rowContent}>
-                    <Text style={actionStyles.label}>{skill.name}</Text>
-                    <Text style={actionStyles.description} numberOfLines={1}>{skill.description}</Text>
+                    <Text style={actionStyles.label}>New Chat</Text>
+                    <Text style={actionStyles.description}>Start a fresh chat in this worktree</Text>
                   </View>
                 </TouchableOpacity>
-              ))}
 
-              {!selectedWorktree.isMain && onRemoveWorktree && (
-                <>
-                  <View style={actionStyles.divider} />
+                {/* Existing chats */}
+                {worktreeAgents.map(agent => (
                   <TouchableOpacity
+                    key={agent.id}
                     style={actionStyles.row}
                     activeOpacity={0.7}
                     onPress={() => {
-                      if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                      setModalStep('confirmRemove');
+                      if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                      setSelectedWorktree(null);
+                      animateBack();
+                      setTimeout(() => onSelectAgent(agent.id), 300);
                     }}
                   >
-                    <View style={actionStyles.iconDestructive}>
-                      <TrashIcon size={16} color="#ef4444" />
-                    </View>
+                    <AgentAvatar type={agent.type} size={36} />
                     <View style={actionStyles.rowContent}>
-                      <Text style={actionStyles.labelDestructive}>Remove Worktree</Text>
-                      <Text style={actionStyles.description}>Delete worktree directory</Text>
+                      <Text style={actionStyles.label} numberOfLines={1}>{agent.sessionName || 'Chat'}</Text>
+                      <Text style={actionStyles.description} numberOfLines={1}>
+                        {agent.type} · {agent.status === 'running' ? 'Running' : 'Idle'}
+                      </Text>
                     </View>
                   </TouchableOpacity>
-                </>
-              )}
-            </View>
-          )}
+                ))}
 
+                {/* Skills */}
+                {filteredSkills.length > 0 && (
+                  <>
+                    <View style={actionStyles.divider} />
+                    {filteredSkills.map(skill => {
+                      // Build skill prompt with worktree context so the agent knows which branch to act on
+                      const skillPrompt = `${skill.body}\n\nWorktree branch: \`${selectedWorktree.branch}\`\nWorktree path: \`${selectedWorktree.path}\``;
+                      return (
+                      <TouchableOpacity
+                        key={skill.name}
+                        style={actionStyles.row}
+                        activeOpacity={0.7}
+                        onPress={() => {
+                          if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                          if (worktreeAgents.length === 0) {
+                            const wt = selectedWorktree;
+                            setSelectedWorktree(null);
+                            onCreateAgentForWorktree?.(wt.projectId, wt.path, skillPrompt);
+                          } else {
+                            setPendingSkillPrompt(skillPrompt);
+                            setModalStep('pickAgent');
+                          }
+                        }}
+                      >
+                        <View style={actionStyles.icon}>
+                          <CommitIcon size={16} color="#ccc" />
+                        </View>
+                        <View style={actionStyles.rowContent}>
+                          <Text style={actionStyles.label}>{skill.name}</Text>
+                          <Text style={actionStyles.description} numberOfLines={1}>{skill.description}</Text>
+                        </View>
+                      </TouchableOpacity>
+                    );
+                    })}
+                  </>
+                )}
+
+                {/* Remove worktree */}
+                {!selectedWorktree.isMain && onRemoveWorktree && (
+                  <>
+                    <View style={actionStyles.divider} />
+                    <TouchableOpacity
+                      style={actionStyles.row}
+                      activeOpacity={0.7}
+                      onPress={() => {
+                        if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                        setModalStep('confirmRemove');
+                      }}
+                    >
+                      <View style={actionStyles.iconDestructive}>
+                        <TrashIcon size={16} color="#ef4444" />
+                      </View>
+                      <View style={actionStyles.rowContent}>
+                        <Text style={actionStyles.labelDestructive}>Remove Worktree</Text>
+                        <Text style={actionStyles.description}>Delete worktree directory</Text>
+                      </View>
+                    </TouchableOpacity>
+                  </>
+                )}
+              </View>
+            );
+          })()}
+
+          {/* Pick agent for skill — only shown when there are existing agents */}
           {selectedWorktree && modalStep === 'pickAgent' && pendingSkillPrompt && (() => {
-            // Show agents that match this worktree's path, plus a "New Agent" option
             const worktreeAgents = Array.from(state.agents.values()).filter(a => a.cwd === selectedWorktree.path);
             return (
               <View style={actionStyles.container}>
@@ -837,7 +926,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                     <View style={actionStyles.rowContent}>
                       <Text style={actionStyles.label} numberOfLines={1}>{agent.sessionName || 'Chat'}</Text>
                       <Text style={actionStyles.description} numberOfLines={1}>
-                        {agent.gitBranch ? `${agent.projectName || ''} (${agent.gitBranch})` : agent.projectName || ''} · {agent.status === 'running' ? 'Running' : 'Idle'}
+                        {agent.type} · {agent.status === 'running' ? 'Running' : 'Idle'}
                       </Text>
                     </View>
                   </TouchableOpacity>
@@ -859,8 +948,8 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                     <Text style={{ color: '#ccc', fontSize: 18, fontWeight: '600' }}>+</Text>
                   </View>
                   <View style={actionStyles.rowContent}>
-                    <Text style={actionStyles.label}>New Agent</Text>
-                    <Text style={actionStyles.description}>Start a fresh chat in this worktree</Text>
+                    <Text style={actionStyles.label}>New Chat</Text>
+                    <Text style={actionStyles.description}>Start a fresh chat with this skill</Text>
                   </View>
                 </TouchableOpacity>
               </View>
@@ -869,11 +958,24 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
 
           {selectedWorktree && modalStep === 'confirmRemove' && (() => {
             const confirmed = removeConfirmText === selectedWorktree.branch;
+            const affectedAgents = Array.from(state.agents.values()).filter(a => a.cwd === selectedWorktree.path);
             return (
               <View style={removeStyles.container}>
                 <Text style={removeStyles.message}>
                   This will delete the worktree directory. Uncommitted changes will be lost.
                 </Text>
+                {affectedAgents.length > 0 && (
+                  <View style={removeStyles.affectedAgents}>
+                    <View style={removeStyles.affectedRow}>
+                      <StackedAgentAvatars agents={affectedAgents} size={24} />
+                      <Text style={removeStyles.affectedText}>
+                        {affectedAgents.length === 1
+                          ? `${affectedAgents[0].sessionName || 'Chat'} will also be closed`
+                          : `${affectedAgents.length} chats will also be closed`}
+                      </Text>
+                    </View>
+                  </View>
+                )}
                 <Text style={removeStyles.hint}>
                   Type <Text style={removeStyles.branch}>{selectedWorktree.branch}</Text> to confirm.
                 </Text>
@@ -1059,11 +1161,20 @@ const styles = StyleSheet.create({
     borderRadius: 3,
     backgroundColor: '#555',
   },
-  branchDotActive: {
-    backgroundColor: '#22c55e',
-  },
-  branchDotInactive: {
+  branchDotLoading: {
     backgroundColor: '#333',
+  },
+  branchDotMain: {
+    backgroundColor: '#3b82f6', // blue — main branch
+  },
+  branchDotDirty: {
+    backgroundColor: '#f59e0b', // amber — uncommitted changes
+  },
+  branchDotClean: {
+    backgroundColor: '#22c55e', // green — clean working tree
+  },
+  branchDotMerged: {
+    backgroundColor: '#8b5cf6', // purple — merged into main
   },
   branchName: {
     color: '#ccc',
@@ -1071,14 +1182,21 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     flex: 1,
   },
-  branchNameInactive: {
-    color: '#444',
-  },
   mainBadge: {
     color: '#555',
     fontSize: 10,
     fontWeight: '500',
     backgroundColor: 'rgba(255,255,255,0.06)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  mergedBadge: {
+    color: '#8b5cf6',
+    fontSize: 10,
+    fontWeight: '500',
+    backgroundColor: 'rgba(139,92,246,0.1)',
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 4,
@@ -1104,11 +1222,25 @@ const styles = StyleSheet.create({
   fileCountBadge: {
     color: '#555',
     fontSize: 11,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
-  noAgentBadge: {
-    color: '#333',
-    fontSize: 11,
+  skeletonBadge: {
+    width: 38,
+    height: 16,
+    borderRadius: 4,
+    backgroundColor: '#1f1f1f',
+  },
+  skeletonCircle: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#1f1f1f',
+    marginLeft: -6,
+  },
+  skeletonFileCount: {
+    width: 36,
+    height: 12,
+    borderRadius: 3,
+    backgroundColor: '#1f1f1f',
   },
   worktreeRowExpanded: {
     borderBottomWidth: 0,
@@ -1172,6 +1304,28 @@ const styles = StyleSheet.create({
     color: '#444',
     fontSize: 13,
     fontWeight: '500',
+  },
+  legend: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 14,
+    paddingVertical: 16,
+    paddingHorizontal: 14,
+  },
+  legendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  legendDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+  },
+  legendLabel: {
+    color: '#444',
+    fontSize: 11,
   },
   newWorktreeExpanded: {
     flexDirection: 'row',
@@ -1420,7 +1574,6 @@ const removeStyles = StyleSheet.create({
   branch: {
     color: '#e5e5e5',
     fontWeight: '600',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   hint: {
     color: '#666',
@@ -1431,7 +1584,6 @@ const removeStyles = StyleSheet.create({
     backgroundColor: '#1a1a1a',
     color: '#e5e5e5',
     fontSize: 14,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     paddingVertical: 12,
     paddingHorizontal: 14,
     borderRadius: 10,
@@ -1454,5 +1606,21 @@ const removeStyles = StyleSheet.create({
   },
   removeBtnTextDisabled: {
     color: 'rgba(255, 255, 255, 0.25)',
+  },
+  affectedAgents: {
+    backgroundColor: 'rgba(239, 68, 68, 0.08)',
+    borderRadius: 8,
+    padding: 10,
+  },
+  affectedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  affectedText: {
+    color: '#ef4444',
+    fontSize: 13,
+    fontWeight: '500',
+    flex: 1,
   },
 });

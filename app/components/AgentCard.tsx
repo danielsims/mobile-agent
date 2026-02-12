@@ -294,21 +294,26 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
   }
 
   // Show project favicon if available, otherwise fall back to agent type icon
+  const { cwd: agentCwd, projectName: agentProjectName } = agent;
   const matchedProject = useMemo(() => {
     if (!projects?.length) return null;
     // Match by cwd against project path and worktree paths
-    if (agent.cwd) {
+    if (agentCwd) {
       for (const p of projects) {
-        if (agent.cwd === p.path) return p;
-        if (p.worktrees?.some(wt => agent.cwd === wt.path)) return p;
+        if (agentCwd === p.path) return p;
+        if (p.worktrees?.some(wt => agentCwd === wt.path)) return p;
       }
     }
-    // Fallback: match by projectName (handles main worktree case)
-    if (agent.projectName) {
-      return projects.find(p => p.name === agent.projectName) || null;
+    // Fallback: match by projectName — worktree dirs use the pattern "project--branch"
+    // so also check if projectName starts with the project name
+    if (agentProjectName) {
+      return projects.find(p =>
+        p.name === agentProjectName ||
+        agentProjectName.startsWith(p.name + '--')
+      ) || null;
     }
     return null;
-  }, [agent.cwd, agent.projectName, projects]);
+  }, [agentCwd, agentProjectName, projects]);
 
   const iconSize = isFull ? 32 : 28;
   const iconElement = matchedProject ? (

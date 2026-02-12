@@ -4,10 +4,11 @@
 //
 // Follows the same pattern as sessions.js / auth.js.
 
-import { existsSync, readFileSync, writeFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, statSync, unlinkSync } from 'node:fs';
 import { join, resolve, basename, dirname, sep } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import { logAudit } from './auth.js';
 
 const DATA_DIR = join(process.env.HOME, '.mobile-agent');
@@ -22,7 +23,9 @@ const ICON_FILENAMES = [
   'logo.svg',
 ];
 
-const MAX_ICON_SIZE = 32 * 1024; // 32KB limit for base64 icons
+const MAX_ICON_READ_SIZE = 2 * 1024 * 1024; // 2MB - allow reading large app icons (e.g. Expo 1024x1024)
+const ICON_RESIZE_THRESHOLD = 64 * 1024; // Resize icons larger than 64KB before base64 encoding
+const ICON_RESIZE_PX = 128; // Resize to 128x128 for display
 const ICON_SEARCH_DEPTH = 5; // Max directory depth for recursive search
 
 // Branch name validation: alphanumeric, hyphens, underscores, dots, slashes
@@ -170,13 +173,52 @@ export function listWorktrees(projectId) {
   }
   if (current.path) worktrees.push(current);
 
+  // Detect which branches are truly merged into main.
+  // "Merged" means the branch had unique work that is now reachable from main,
+  // NOT just that the branch happens to sit at the same commit as main (freshly created).
+  const mainBranch = worktrees.find(wt => wt.path === project.path)?.branch;
+  let mergedBranches = new Set();
+  let mainRef = null;
+  try {
+    if (mainBranch) {
+      mainRef = execFileSync('git', ['rev-parse', mainBranch], {
+        cwd: project.path, encoding: 'utf-8', timeout: 3000,
+      }).trim();
+
+      const merged = execFileSync('git', ['branch', '--merged', mainBranch], {
+        cwd: project.path, encoding: 'utf-8', timeout: 5000,
+      });
+      for (const line of merged.split('\n')) {
+        const name = line.replace(/^[*+]?\s+/, '').trim();
+        if (name && name !== mainBranch) mergedBranches.add(name);
+      }
+    }
+  } catch {
+    // If merged check fails, just skip status detection
+  }
+
   return worktrees
     .filter(wt => !wt.bare)
-    .map(wt => ({
-      path: wt.path,
-      branch: wt.branch || '(unknown)',
-      isMain: wt.path === project.path,
-    }));
+    .map(wt => {
+      const branch = wt.branch || '(unknown)';
+      const isMain = wt.path === project.path;
+      let status = 'active';
+      if (isMain) {
+        status = 'main';
+      } else if (mergedBranches.has(branch)) {
+        // Only mark as "merged" if the branch tip differs from main —
+        // a branch sitting at the exact same commit as main is just newly created.
+        try {
+          const branchRef = execFileSync('git', ['rev-parse', branch], {
+            cwd: project.path, encoding: 'utf-8', timeout: 3000,
+          }).trim();
+          status = (branchRef !== mainRef) ? 'merged' : 'active';
+        } catch {
+          status = 'merged'; // can't resolve, trust git branch --merged
+        }
+      }
+      return { path: wt.path, branch, isMain, status };
+    });
 }
 
 /**
@@ -325,13 +367,12 @@ export function getProjectIcon(projectPath) {
     return priority(nameA) - priority(nameB);
   });
 
-  // Try each match until we find one that's readable and small enough
+  // Try each match until we find one that's readable
   for (const iconPath of matches) {
     try {
       const stat = statSync(iconPath);
-      if (!stat.isFile() || stat.size > MAX_ICON_SIZE || stat.size === 0) continue;
+      if (!stat.isFile() || stat.size > MAX_ICON_READ_SIZE || stat.size === 0) continue;
 
-      const data = readFileSync(iconPath);
       const ext = iconPath.split('.').pop().toLowerCase();
 
       let mime;
@@ -341,6 +382,24 @@ export function getProjectIcon(projectPath) {
       else if (ext === 'jpg' || ext === 'jpeg') mime = 'image/jpeg';
       else continue;
 
+      // Large raster images (e.g. Expo 1024x1024 icons) — resize via macOS
+      // sips to a small thumbnail before base64 encoding
+      if (stat.size > ICON_RESIZE_THRESHOLD && (ext === 'png' || ext === 'jpg' || ext === 'jpeg')) {
+        try {
+          const tmpPath = join(tmpdir(), `mobile-agent-icon-${randomBytes(4).toString('hex')}.${ext}`);
+          execFileSync('sips', [
+            '-z', String(ICON_RESIZE_PX), String(ICON_RESIZE_PX),
+            iconPath, '--out', tmpPath,
+          ], { timeout: 10000, stdio: 'pipe' });
+          const resizedData = readFileSync(tmpPath);
+          try { unlinkSync(tmpPath); } catch {}
+          return `data:${mime};base64,${resizedData.toString('base64')}`;
+        } catch {
+          // sips unavailable (non-macOS) — use original
+        }
+      }
+
+      const data = readFileSync(iconPath);
       return `data:${mime};base64,${data.toString('base64')}`;
     } catch {
       continue;

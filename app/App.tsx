@@ -56,6 +56,10 @@ function AppInner() {
   const [gitDataMap, setGitDataMap] = useState<Map<string, GitStatusData>>(new Map());
   const [gitLoadingAgents, setGitLoadingAgents] = useState<Set<string>>(new Set());
 
+  // Worktree-level git status — keyed by worktree path
+  const [worktreeGitData, setWorktreeGitData] = useState<Map<string, GitStatusData>>(new Map());
+  const [worktreeGitLoading, setWorktreeGitLoading] = useState<Set<string>>(new Set());
+
   // Git log state — per-project commit history
   const [gitLogMap, setGitLogMap] = useState<Map<string, GitLogCommit[]>>(new Map());
   const [gitLogLoading, setGitLogLoading] = useState<Set<string>>(new Set());
@@ -79,20 +83,24 @@ function AppInner() {
   loadCachedMessagesRef.current = loadCachedMessages;
   const sendRef = useRef<(type: string, data?: Record<string, unknown>) => boolean>(() => false);
   const pendingSkillRef = useRef<{ worktreePath: string; prompt: string } | null>(null);
+  const navigateOnCreateRef = useRef(false);
 
   const onWsMessage = useCallback((msg: import('./state/types').ServerMessage) => {
     handleServerMessageRef.current(msg);
 
-    // Fulfill pending worktree skill when a NEW agent is created
+    // Navigate to and optionally send a skill prompt to a newly created agent
     if (msg.type === 'agentCreated' && msg.agent) {
+      const newAgentId = msg.agent.id;
       const pending = pendingSkillRef.current;
       if (pending && msg.agent.cwd === pending.worktreePath) {
         pendingSkillRef.current = null;
-        const newAgentId = msg.agent.id;
         // Small delay to let the agent finish spawning before sending
         setTimeout(() => {
           sendRef.current('sendMessage', { agentId: newAgentId, text: pending.prompt });
         }, 500);
+      }
+      if (navigateOnCreateRef.current) {
+        navigateOnCreateRef.current = false;
         setSelectedAgentId(newAgentId);
         setScreen('agent');
       }
@@ -165,6 +173,27 @@ function AppInner() {
       });
     }
 
+    // Worktree-level git status response
+    if (msg.type === 'worktreeStatus' && msg.worktreePath) {
+      const wtPath = msg.worktreePath;
+      const gitData: GitStatusData = {
+        branch: msg.branch || '',
+        ahead: msg.ahead || 0,
+        behind: msg.behind || 0,
+        files: msg.files || [],
+      };
+      setWorktreeGitData(prev => {
+        const next = new Map(prev);
+        next.set(wtPath, gitData);
+        return next;
+      });
+      setWorktreeGitLoading(prev => {
+        const next = new Set(prev);
+        next.delete(wtPath);
+        return next;
+      });
+    }
+
     // Git diff response
     if (msg.type === 'gitDiff' && msg.agentId) {
       setGitDiff(msg.diff || '');
@@ -193,7 +222,7 @@ function AppInner() {
 
     // Skill search results
     if (msg.type === 'skillSearchResults') {
-      setSkillSearchResults(((msg as any).results || []).map((r: any) => ({
+      setSkillSearchResults((msg.searchResults || []).map((r) => ({
         name: r.name || '',
         description: r.description || '',
         packageRef: r.packageRef || '',
@@ -204,13 +233,13 @@ function AppInner() {
 
     // Skill install progress
     if (msg.type === 'skillInstallProgress') {
-      if ((msg as any).status === 'installed') {
+      if (msg.installStatus === 'installed') {
         setSkillSearchLoading(false);
         // Re-fetch skills so the newly installed one appears immediately
         sendRef.current('listSkills');
-      } else if ((msg as any).status === 'error') {
+      } else if (msg.installStatus === 'error') {
         setSkillSearchLoading(false);
-        Alert.alert('Install Failed', (msg as any).error || 'Unknown error');
+        Alert.alert('Install Failed', msg.error || 'Unknown error');
       }
     }
 
@@ -337,6 +366,7 @@ function AppInner() {
     if (pendingPrompt) {
       pendingSkillRef.current = { worktreePath, prompt: pendingPrompt };
     }
+    navigateOnCreateRef.current = true;
     prefetchModelsForCreateFlow();
     setCreateModalInitialProjectId(projectId);
     setCreateModalInitialWorktreePath(worktreePath);
@@ -483,6 +513,16 @@ function AppInner() {
 
   // Note: pending worktree skill fulfillment is handled in onWsMessage
   // when 'agentCreated' arrives, to avoid matching existing agents by cwd.
+
+  // For GitScreen: request worktree-level git status
+  const handleRequestWorktreeStatus = useCallback((worktreePath: string) => {
+    setWorktreeGitLoading(prev => {
+      const next = new Set(prev);
+      next.add(worktreePath);
+      return next;
+    });
+    send('getWorktreeStatus', { worktreePath });
+  }, [send]);
 
   // For GitScreen: request status for any agent (tracks loading state)
   const handleGitScreenRequestStatus = useCallback((agentId: string) => {
@@ -658,11 +698,14 @@ function AppInner() {
               onSelectAgent={handleSelectAgent}
               onDestroyAgent={handleDestroyAgent}
               onSendMessage={handleSendMessage}
-              onCreateWorktree={handleCreateWorktree}
               onCreateAgentForWorktree={handleCreateAgentForWorktree}
               onRemoveWorktree={handleRemoveWorktree}
+              onRefresh={handleRequestProjects}
+              onRequestWorktreeStatus={handleRequestWorktreeStatus}
               skills={skills}
               gitDataMap={gitDataMap}
+              worktreeGitData={worktreeGitData}
+              worktreeGitLoading={worktreeGitLoading}
               gitLogMap={gitLogMap}
               gitLogLoading={gitLogLoading}
               loadingAgentIds={gitLoadingAgents}

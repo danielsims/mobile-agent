@@ -444,6 +444,10 @@ export class Bridge {
         this._handleGetGitDiff(ws, msg);
         break;
 
+      case 'getWorktreeStatus':
+        this._handleGetWorktreeStatus(ws, msg);
+        break;
+
       case 'getGitLog':
         this._handleGetGitLog(ws, msg);
         break;
@@ -513,6 +517,14 @@ export class Bridge {
 
     // Spawn the CLI process in the selected directory (or $HOME by default)
     session.spawn(this.port, null, cwd);
+
+    // Override projectName with the actual project name (not the worktree dir basename)
+    if (msg.projectId) {
+      try {
+        const project = getProject(msg.projectId);
+        if (project) session.projectName = project.name;
+      } catch { /* ignore */ }
+    }
 
     this._broadcastToMobile('agentCreated', { agent: session.getSnapshot() });
   }
@@ -788,6 +800,49 @@ export class Bridge {
       behind: branchInfo.behind,
       files,
     });
+  }
+
+  _handleGetWorktreeStatus(ws, msg) {
+    const { worktreePath } = msg;
+    if (!worktreePath) {
+      this._sendTo(ws, 'error', { error: 'worktreePath required.' });
+      return;
+    }
+
+    // Verify the path belongs to a registered project worktree
+    const all = getProjects();
+    const isRegistered = Object.values(all).some(p =>
+      p.path === worktreePath || worktreePath.startsWith(p.path.replace(/\/?$/, '/'))
+    );
+    if (!isRegistered) {
+      // Also check worktree paths
+      let found = false;
+      for (const [id] of Object.entries(all)) {
+        try {
+          const wts = listWorktrees(id);
+          if (wts.some(wt => wt.path === worktreePath)) { found = true; break; }
+        } catch {}
+      }
+      if (!found) {
+        this._sendTo(ws, 'error', { error: 'Worktree path not registered.' });
+        return;
+      }
+    }
+
+    try {
+      const branchInfo = getGitBranchInfo(worktreePath);
+      const files = getGitStatus(worktreePath);
+
+      this._sendTo(ws, 'worktreeStatus', {
+        worktreePath,
+        branch: branchInfo.branch,
+        ahead: branchInfo.ahead,
+        behind: branchInfo.behind,
+        files,
+      });
+    } catch (e) {
+      this._sendTo(ws, 'error', { error: e.message });
+    }
   }
 
   _handleGetGitDiff(ws, msg) {

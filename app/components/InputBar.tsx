@@ -3,6 +3,7 @@ import {
   View,
   TextInput,
   TouchableOpacity,
+  Pressable,
   StyleSheet,
   Platform,
   Keyboard,
@@ -147,7 +148,14 @@ export function InputBar({ onSend, onStop, showStop = false, onVoice, onPlus, di
             <PlusIcon size={20} color="#888" />
           </TouchableOpacity>
         )}
-        <View style={styles.inputWrapper}>
+        <Pressable
+          style={styles.inputWrapper}
+          onPress={() => {
+            if (!disabled) {
+              inputRef.current?.focus();
+            }
+          }}
+        >
           <TextInput
             ref={inputRef}
             style={styles.input}
@@ -170,7 +178,7 @@ export function InputBar({ onSend, onStop, showStop = false, onVoice, onPlus, di
               <ShimmerText text={placeholder} style={styles.shimmerText} />
             </View>
           )}
-        </View>
+        </Pressable>
 
         {onVoice && (
           <TouchableOpacity

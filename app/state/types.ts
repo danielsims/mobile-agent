@@ -136,6 +136,7 @@ export interface Worktree {
   path: string;
   branch: string;
   isMain: boolean;
+  status: 'main' | 'active' | 'merged';
 }
 
 export interface Project {
@@ -232,7 +233,8 @@ export interface ServerMessage {
   worktree?: Worktree;
   worktrees?: Worktree[];
 
-  // gitStatus
+  // gitStatus / worktreeStatus
+  worktreePath?: string;
   branch?: string;
   files?: Array<{ file: string; status: string }>;
   ahead?: number;
@@ -251,6 +253,12 @@ export interface ServerMessage {
 
   // skillContent
   skill?: Skill;
+
+  // skillSearchResults
+  searchResults?: Array<{ name: string; description: string; packageRef: string; url?: string }>;
+
+  // skillInstallProgress
+  installStatus?: string;
 
   // error
   error?: string;

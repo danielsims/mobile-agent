@@ -391,8 +391,12 @@ export function AgentDetailScreen({
         if (p.worktrees?.some(wt => agent.cwd === wt.path)) return p;
       }
     }
-    if (agent.projectName) {
-      return projects.find(p => p.name === agent.projectName) || null;
+    const { projectName } = agent;
+    if (projectName) {
+      return projects.find(p =>
+        p.name === projectName ||
+        projectName.startsWith(p.name + '--')
+      ) || null;
     }
     return null;
   }, [agent, projects]);
@@ -492,7 +496,7 @@ export function AgentDetailScreen({
     );
   }
 
-  const isDisabled = connectionStatus !== 'connected' || agent.status === 'exited';
+  const isDisabled = connectionStatus !== 'connected';
   const permissions = Array.from(agent.pendingPermissions.values());
   const modelDisplayName = formatModelName(agent.model, agent.type);
 
@@ -737,7 +741,7 @@ export function AgentDetailScreen({
                   showStop={agent.status === 'running'}
                   onVoice={handleVoiceOpen}
                   onPlus={() => setShowPlusModal(true)}
-                  disabled={isDisabled || permissions.length > 0}
+                  disabled={isDisabled}
                   placeholder={agent.status === 'running' ? 'Agent is working...' : 'Ask anything...'}
                   shimmer={agent.status === 'running'}
                   onActivity={onResetPingTimer}
