@@ -56,6 +56,9 @@ interface GitScreenProps {
   onRemoveWorktree?: (projectId: string, worktreePath: string) => void;
   onRefresh?: () => void;
   onRequestWorktreeStatus?: (worktreePath: string) => void;
+  onRequestWorktreeDiff?: (worktreePath: string, filePath: string) => void;
+  worktreeDiff?: string | null;
+  worktreeDiffLoading?: boolean;
   skills?: Skill[];
   gitDataMap: Map<string, AgentGitData>;
   worktreeGitData?: Map<string, AgentGitData>;
@@ -96,6 +99,21 @@ function getStatusColor(status: string): string {
 
 function getStatusLetter(status: string): string {
   return normalizeStatus(status);
+}
+
+interface DiffLine {
+  type: 'header' | 'added' | 'removed' | 'context';
+  text: string;
+}
+
+function parseDiff(raw: string): DiffLine[] {
+  if (!raw) return [];
+  return raw.split('\n').map(line => {
+    if (line.startsWith('@@')) return { type: 'header' as const, text: line };
+    if (line.startsWith('+')) return { type: 'added' as const, text: line };
+    if (line.startsWith('-')) return { type: 'removed' as const, text: line };
+    return { type: 'context' as const, text: line };
+  });
 }
 
 function ProjectIcon({ project, size = 24 }: { project: Project; size?: number }) {
@@ -192,7 +210,7 @@ function TrashIcon({ size = 16, color = '#ef4444' }: { size?: number; color?: st
 type GitScreenTab = 'diff' | 'source' | 'commits';
 const GIT_TABS: GitScreenTab[] = ['diff', 'source', 'commits'];
 
-export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelectAgent, onSendMessage, onCreateAgentForWorktree, onCreateWorktree, onRemoveWorktree, onRefresh, onRequestWorktreeStatus, skills = [], worktreeGitData, gitLogMap, gitLogLoading, loadingAgentIds, projects }: GitScreenProps) {
+export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelectAgent, onSendMessage, onCreateAgentForWorktree, onCreateWorktree, onRemoveWorktree, onRefresh, onRequestWorktreeStatus, onRequestWorktreeDiff, worktreeDiff, worktreeDiffLoading, skills = [], worktreeGitData, gitLogMap, gitLogLoading, loadingAgentIds, projects }: GitScreenProps) {
   const { state } = useAgentState();
   const { settings } = useSettings();
   const [expandedNewWorktree, setExpandedNewWorktree] = useState<string | null>(null);
@@ -203,6 +221,30 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
   const [pendingSkillPrompt, setPendingSkillPrompt] = useState<string | null>(null);
   const [removeConfirmText, setRemoveConfirmText] = useState('');
   const [refreshing, setRefreshing] = useState(false);
+  const [diffView, setDiffView] = useState<{ worktreePath: string; filePath: string } | null>(null);
+  const diffSwipeX = useRef(new Animated.Value(0)).current;
+  const diffPanResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponderCapture: (_evt, gesture) =>
+        gesture.x0 < EDGE_WIDTH && gesture.dx > 10 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.5,
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderMove: (_evt, gesture) => {
+        if (gesture.dx > 0) diffSwipeX.setValue(gesture.dx);
+      },
+      onPanResponderRelease: (_evt, gesture) => {
+        if (gesture.dx > SWIPE_THRESHOLD) {
+          Animated.timing(diffSwipeX, { toValue: SCREEN_WIDTH, duration: 150, useNativeDriver: true }).start(() => {
+            setDiffView(null);
+          });
+        } else {
+          Animated.spring(diffSwipeX, { toValue: 0, useNativeDriver: true, tension: 80, friction: 10 }).start();
+        }
+      },
+      onPanResponderTerminate: () => {
+        Animated.spring(diffSwipeX, { toValue: 0, useNativeDriver: true }).start();
+      },
+    })
+  ).current;
 
   // Tab state
   const [activeTab, setActiveTab] = useState<GitScreenTab>('diff');
@@ -496,6 +538,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
             onMomentumScrollEnd={handleTabScroll}
             scrollEventThrottle={16}
             keyboardShouldPersistTaps="handled"
+            scrollEnabled={!diffView}
           >
             {/* Worktrees tab */}
             <View style={styles.tabPage}>
@@ -582,13 +625,23 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                       {files.length > 0 && (
                         <View style={styles.fileList}>
                           {files.map((f, i) => (
-                            <View key={`${f.file}-${i}`} style={styles.fileRow}>
+                            <TouchableOpacity
+                              key={`${f.file}-${i}`}
+                              style={styles.fileRow}
+                              activeOpacity={0.6}
+                              onPress={() => {
+                                if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                                diffSwipeX.setValue(0);
+                                setDiffView({ worktreePath: wt.path, filePath: f.file });
+                                onRequestWorktreeDiff?.(wt.path, f.file);
+                              }}
+                            >
                               <FileTypeIcon filename={f.file} size={16} />
                               <Text style={styles.fileName} numberOfLines={1}>{f.file}</Text>
                               <Text style={[styles.fileStatus, { color: getStatusColor(f.status) }]}>
                                 {getStatusLetter(f.status)}
                               </Text>
-                            </View>
+                            </TouchableOpacity>
                           ))}
                         </View>
                       )}
@@ -654,14 +707,75 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
             result.push(
               <View key="__legend" style={styles.legend}>
                 <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#3b82f6' }]} /><Text style={styles.legendLabel}>Main</Text></View>
-                <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#f59e0b' }]} /><Text style={styles.legendLabel}>Changes</Text></View>
                 <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#22c55e' }]} /><Text style={styles.legendLabel}>Clean</Text></View>
+                <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#f59e0b' }]} /><Text style={styles.legendLabel}>Changes</Text></View>
                 <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#8b5cf6' }]} /><Text style={styles.legendLabel}>Merged</Text></View>
               </View>
             );
             return result;
           })()}
               </ScrollView>
+
+              {/* Diff view overlay */}
+              {diffView && (
+                <Animated.View style={[styles.diffOverlay, { transform: [{ translateX: diffSwipeX }] }]} {...diffPanResponder.panHandlers}>
+                  <View style={styles.diffHeader}>
+                    <TouchableOpacity
+                      onPress={() => {
+                        if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                        setDiffView(null);
+                      }}
+                      style={styles.diffBackBtn}
+                    >
+                      <View style={styles.diffBackChevron} />
+                      <Text style={styles.diffBackText}>Files</Text>
+                    </TouchableOpacity>
+                    <FileTypeIcon filename={diffView.filePath} size={14} />
+                    <Text style={styles.diffFilePath} numberOfLines={1}>{diffView.filePath}</Text>
+                  </View>
+
+                  {worktreeDiffLoading ? (
+                    <View style={styles.diffCentered}>
+                      <ActivityIndicator color="#555" size="small" />
+                    </View>
+                  ) : (() => {
+                    const diffLines = parseDiff(worktreeDiff || '');
+                    return diffLines.length === 0 ? (
+                      <View style={styles.diffCentered}>
+                        <Text style={styles.diffEmptyText}>No diff available</Text>
+                        <Text style={styles.diffEmptySubtext}>File may be untracked or binary</Text>
+                      </View>
+                    ) : (
+                      <ScrollView style={styles.diffScroll}>
+                        <View style={styles.diffContent}>
+                          {diffLines.map((line, i) => (
+                            <View
+                              key={i}
+                              style={[
+                                styles.diffLine,
+                                line.type === 'added' && styles.diffLineAdded,
+                                line.type === 'removed' && styles.diffLineRemoved,
+                                line.type === 'header' && styles.diffLineHunk,
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.diffLineText,
+                                  line.type === 'added' && styles.diffTextAdded,
+                                  line.type === 'removed' && styles.diffTextRemoved,
+                                  line.type === 'header' && styles.diffTextHunk,
+                                ]}
+                              >
+                                {line.text}
+                              </Text>
+                            </View>
+                          ))}
+                        </View>
+                      </ScrollView>
+                    );
+                  })()}
+                </Animated.View>
+              )}
             </View>
 
             {/* Source tab */}
@@ -1356,6 +1470,96 @@ const styles = StyleSheet.create({
   },
   newWorktreeCreateTextActive: {
     color: '#000',
+  },
+  // Diff overlay
+  diffOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#0a0a0a',
+  },
+  diffHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#1a1a1a',
+    gap: 8,
+  },
+  diffBackBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingRight: 4,
+  },
+  diffBackChevron: {
+    width: 8,
+    height: 8,
+    borderLeftWidth: 1.5,
+    borderBottomWidth: 1.5,
+    borderColor: '#888',
+    transform: [{ rotate: '45deg' }],
+    marginLeft: 2,
+  },
+  diffBackText: {
+    color: '#888',
+    fontSize: 13,
+  },
+  diffFilePath: {
+    flex: 1,
+    color: '#ccc',
+    fontSize: 12,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  diffCentered: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  diffEmptyText: {
+    color: '#555',
+    fontSize: 15,
+    fontWeight: '500',
+  },
+  diffEmptySubtext: {
+    color: '#3a3a3a',
+    fontSize: 12,
+    marginTop: 4,
+  },
+  diffScroll: {
+    flex: 1,
+  },
+  diffContent: {
+    paddingVertical: 4,
+  },
+  diffLine: {
+    paddingHorizontal: 12,
+    paddingVertical: 1,
+  },
+  diffLineAdded: {
+    backgroundColor: 'rgba(34,197,94,0.08)',
+  },
+  diffLineRemoved: {
+    backgroundColor: 'rgba(239,68,68,0.08)',
+  },
+  diffLineHunk: {
+    backgroundColor: 'rgba(59,130,246,0.06)',
+    marginTop: 4,
+    paddingVertical: 3,
+  },
+  diffLineText: {
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    lineHeight: 16,
+    color: '#999',
+  },
+  diffTextAdded: {
+    color: '#22c55e',
+  },
+  diffTextRemoved: {
+    color: '#ef4444',
+  },
+  diffTextHunk: {
+    color: '#3b82f6',
   },
 });
 

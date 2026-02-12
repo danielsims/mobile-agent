@@ -7,6 +7,9 @@ import {
   StyleSheet,
   Platform,
   ActivityIndicator,
+  PanResponder,
+  Animated,
+  Dimensions,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
@@ -33,6 +36,7 @@ interface GitTabContentProps {
   diffLoading: boolean;
   onRequestStatus: () => void;
   onRequestDiff: (filePath: string) => void;
+  onDiffViewChange?: (isOpen: boolean) => void;
 }
 
 // VS Code git decoration colors
@@ -90,6 +94,10 @@ function parseDiff(raw: string): DiffLine[] {
   });
 }
 
+const SCREEN_WIDTH = Dimensions.get('window').width;
+const EDGE_WIDTH = 30;
+const SWIPE_THRESHOLD = SCREEN_WIDTH * 0.25;
+
 export function GitTabContent({
   agentStatus,
   gitStatus,
@@ -98,9 +106,36 @@ export function GitTabContent({
   diffLoading,
   onRequestStatus,
   onRequestDiff,
+  onDiffViewChange,
 }: GitTabContentProps) {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const prevStatus = useRef<AgentStatus>(agentStatus);
+  const diffSwipeX = useRef(new Animated.Value(0)).current;
+  const onDiffViewChangeRef = useRef(onDiffViewChange);
+  onDiffViewChangeRef.current = onDiffViewChange;
+  const diffPanResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponderCapture: (_evt, gesture) =>
+        gesture.x0 < EDGE_WIDTH && gesture.dx > 10 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.5,
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderMove: (_evt, gesture) => {
+        if (gesture.dx > 0) diffSwipeX.setValue(gesture.dx);
+      },
+      onPanResponderRelease: (_evt, gesture) => {
+        if (gesture.dx > SWIPE_THRESHOLD) {
+          Animated.timing(diffSwipeX, { toValue: SCREEN_WIDTH, duration: 150, useNativeDriver: true }).start(() => {
+            setSelectedFile(null);
+            onDiffViewChangeRef.current?.(false);
+          });
+        } else {
+          Animated.spring(diffSwipeX, { toValue: 0, useNativeDriver: true, tension: 80, friction: 10 }).start();
+        }
+      },
+      onPanResponderTerminate: () => {
+        Animated.spring(diffSwipeX, { toValue: 0, useNativeDriver: true }).start();
+      },
+    })
+  ).current;
 
   // Fetch on mount
   useEffect(() => {
@@ -122,81 +157,27 @@ export function GitTabContent({
 
   const handleFilePress = (file: string) => {
     if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    diffSwipeX.setValue(0);
     setSelectedFile(file);
+    onDiffViewChange?.(true);
     onRequestDiff(file);
   };
 
   const handleBackToList = () => {
     if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setSelectedFile(null);
+    onDiffViewChange?.(false);
   };
 
-  // Diff view
-  if (selectedFile) {
-    const diffLines = parseDiff(gitDiff || '');
-
-    return (
-      <View style={styles.container}>
-        <View style={styles.diffHeader}>
-          <TouchableOpacity onPress={handleBackToList} style={styles.backBtn}>
-            <View style={styles.backChevron} />
-            <Text style={styles.backText}>Files</Text>
-          </TouchableOpacity>
-          <FileTypeIcon filename={selectedFile} size={14} />
-          <Text style={styles.diffFilePath} numberOfLines={1}>{selectedFile}</Text>
-        </View>
-
-        {diffLoading ? (
-          <View style={styles.centered}>
-            <ActivityIndicator color="#555" size="small" />
-          </View>
-        ) : diffLines.length === 0 ? (
-          <View style={styles.centered}>
-            <Text style={styles.emptyText}>No diff available</Text>
-            <Text style={styles.emptySubtext}>File may be untracked or binary</Text>
-          </View>
-        ) : (
-          <ScrollView style={styles.diffScroll}>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-              <View style={styles.diffContent}>
-                {diffLines.map((line, i) => (
-                  <View
-                    key={i}
-                    style={[
-                      styles.diffLine,
-                      line.type === 'added' && styles.diffLineAdded,
-                      line.type === 'removed' && styles.diffLineRemoved,
-                      line.type === 'header' && styles.diffLineHunk,
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.diffLineText,
-                        line.type === 'added' && styles.diffTextAdded,
-                        line.type === 'removed' && styles.diffTextRemoved,
-                        line.type === 'header' && styles.diffTextHunk,
-                      ]}
-                    >
-                      {line.text}
-                    </Text>
-                  </View>
-                ))}
-              </View>
-            </ScrollView>
-          </ScrollView>
-        )}
-      </View>
-    );
-  }
-
-  // File list view
   const files = gitStatus?.files || [];
   const branch = gitStatus?.branch || '';
   const ahead = gitStatus?.ahead || 0;
   const behind = gitStatus?.behind || 0;
+  const diffLines = selectedFile ? parseDiff(gitDiff || '') : [];
 
   return (
     <View style={styles.container}>
+      {/* File list — always rendered so it's visible behind the diff overlay */}
       <View style={styles.branchHeader}>
         <View style={styles.branchInfo}>
           <GitBranchIcon />
@@ -245,6 +226,61 @@ export function GitTabContent({
             </TouchableOpacity>
           ))}
         </ScrollView>
+      )}
+
+      {/* Diff overlay — absolute-positioned on top of the file list */}
+      {selectedFile && (
+        <Animated.View
+          style={[styles.diffOverlay, { transform: [{ translateX: diffSwipeX }] }]}
+          {...diffPanResponder.panHandlers}
+        >
+          <View style={styles.diffHeader}>
+            <TouchableOpacity onPress={handleBackToList} style={styles.backBtn}>
+              <View style={styles.backChevron} />
+              <Text style={styles.backText}>Files</Text>
+            </TouchableOpacity>
+            <FileTypeIcon filename={selectedFile} size={14} />
+            <Text style={styles.diffFilePath} numberOfLines={1}>{selectedFile}</Text>
+          </View>
+
+          {diffLoading ? (
+            <View style={styles.centered}>
+              <ActivityIndicator color="#555" size="small" />
+            </View>
+          ) : diffLines.length === 0 ? (
+            <View style={styles.centered}>
+              <Text style={styles.emptyText}>No diff available</Text>
+              <Text style={styles.emptySubtext}>File may be untracked or binary</Text>
+            </View>
+          ) : (
+            <ScrollView style={styles.diffScroll}>
+              <View style={styles.diffContent}>
+                {diffLines.map((line, i) => (
+                  <View
+                    key={i}
+                    style={[
+                      styles.diffLine,
+                      line.type === 'added' && styles.diffLineAdded,
+                      line.type === 'removed' && styles.diffLineRemoved,
+                      line.type === 'header' && styles.diffLineHunk,
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.diffLineText,
+                        line.type === 'added' && styles.diffTextAdded,
+                        line.type === 'removed' && styles.diffTextRemoved,
+                        line.type === 'header' && styles.diffTextHunk,
+                      ]}
+                    >
+                      {line.text}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            </ScrollView>
+          )}
+        </Animated.View>
       )}
     </View>
   );
@@ -383,6 +419,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 4,
   },
+  // Diff overlay — covers the file list when viewing a diff
+  diffOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#0a0a0a',
+  },
   diffHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -422,7 +463,6 @@ const styles = StyleSheet.create({
   },
   diffContent: {
     paddingVertical: 4,
-    minWidth: '100%',
   },
   diffLine: {
     paddingHorizontal: 12,

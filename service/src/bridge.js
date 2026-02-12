@@ -448,6 +448,10 @@ export class Bridge {
         this._handleGetWorktreeStatus(ws, msg);
         break;
 
+      case 'getWorktreeDiff':
+        this._handleGetWorktreeDiff(ws, msg);
+        break;
+
       case 'getGitLog':
         this._handleGetGitLog(ws, msg);
         break;
@@ -865,6 +869,17 @@ export class Bridge {
       filePath: filePath || null,
       diff,
     });
+  }
+
+  _handleGetWorktreeDiff(ws, msg) {
+    const { worktreePath, filePath } = msg;
+    if (!worktreePath || !filePath) {
+      this._sendTo(ws, 'error', { error: 'worktreePath and filePath required.' });
+      return;
+    }
+
+    const diff = getGitDiff(worktreePath, filePath);
+    this._sendTo(ws, 'worktreeDiff', { worktreePath, filePath, diff });
   }
 
   _handleGetGitLog(ws, msg) {

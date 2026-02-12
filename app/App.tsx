@@ -60,6 +60,10 @@ function AppInner() {
   const [worktreeGitData, setWorktreeGitData] = useState<Map<string, GitStatusData>>(new Map());
   const [worktreeGitLoading, setWorktreeGitLoading] = useState<Set<string>>(new Set());
 
+  // Worktree-level diff state
+  const [worktreeDiff, setWorktreeDiff] = useState<string | null>(null);
+  const [worktreeDiffLoading, setWorktreeDiffLoading] = useState(false);
+
   // Git log state — per-project commit history
   const [gitLogMap, setGitLogMap] = useState<Map<string, GitLogCommit[]>>(new Map());
   const [gitLogLoading, setGitLogLoading] = useState<Set<string>>(new Set());
@@ -202,6 +206,12 @@ function AppInner() {
     if (msg.type === 'gitDiff' && msg.agentId) {
       setGitDiff(msg.diff || '');
       setGitDiffLoading(false);
+    }
+
+    // Worktree diff response
+    if (msg.type === 'worktreeDiff') {
+      setWorktreeDiff(msg.diff || '');
+      setWorktreeDiffLoading(false);
     }
 
     // Git log response
@@ -528,6 +538,13 @@ function AppInner() {
     send('getWorktreeStatus', { worktreePath });
   }, [send]);
 
+  // For GitScreen: request worktree-level diff
+  const handleRequestWorktreeDiff = useCallback((worktreePath: string, filePath: string) => {
+    setWorktreeDiffLoading(true);
+    setWorktreeDiff(null);
+    send('getWorktreeDiff', { worktreePath, filePath });
+  }, [send]);
+
   // For GitScreen: request status for any agent (tracks loading state)
   const handleGitScreenRequestStatus = useCallback((agentId: string) => {
     setGitLoadingAgents(prev => {
@@ -707,6 +724,9 @@ function AppInner() {
               onRemoveWorktree={handleRemoveWorktree}
               onRefresh={handleRequestProjects}
               onRequestWorktreeStatus={handleRequestWorktreeStatus}
+              onRequestWorktreeDiff={handleRequestWorktreeDiff}
+              worktreeDiff={worktreeDiff}
+              worktreeDiffLoading={worktreeDiffLoading}
               skills={skills}
               gitDataMap={gitDataMap}
               worktreeGitData={worktreeGitData}

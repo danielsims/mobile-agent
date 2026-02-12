@@ -219,6 +219,7 @@ export function AgentDetailScreen({
   const insets = useSafeAreaInsets();
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [activeTab, setActiveTab] = useState<DetailTab>('chat');
+  const [gitDiffOpen, setGitDiffOpen] = useState(false);
   const tabScrollRef = useRef<ScrollView>(null);
   const INITIAL_MESSAGE_WINDOW = 30;
   const [messageWindow, setMessageWindow] = useState(INITIAL_MESSAGE_WINDOW);
@@ -648,6 +649,7 @@ export function AgentDetailScreen({
             onMomentumScrollEnd={handleTabScroll}
             scrollEventThrottle={16}
             keyboardShouldPersistTaps="handled"
+            scrollEnabled={!gitDiffOpen}
           >
             {/* Chat tab */}
             <View style={[styles.tabPage, activeTab === 'chat' && keyboardHeight > 0 && { paddingBottom: keyboardHeight }]}>
@@ -761,6 +763,7 @@ export function AgentDetailScreen({
                 diffLoading={gitDiffLoading}
                 onRequestStatus={handleRequestGitStatus}
                 onRequestDiff={handleRequestGitDiff}
+                onDiffViewChange={setGitDiffOpen}
               />
             </View>
 
