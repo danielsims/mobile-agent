@@ -32,6 +32,7 @@ interface DashboardProps {
   onSendMessage: (agentId: string, text: string) => void;
   onOpenSettings: () => void;
   onOpenGit?: () => void;
+  onOpenSkills?: () => void;
 }
 
 const AGENTS_PER_PAGE = 3;
@@ -47,9 +48,10 @@ interface BottomPillNavProps {
   onOpenSettings: () => void;
   onCreateAgent: () => void;
   onOpenGit?: () => void;
+  onOpenSkills?: () => void;
 }
 
-function BottomPillNav({ currentPage, totalPages, connectionStatus, onOpenSettings, onCreateAgent, onOpenGit }: BottomPillNavProps) {
+function BottomPillNav({ currentPage, totalPages, connectionStatus, onOpenSettings, onCreateAgent, onOpenGit, onOpenSkills }: BottomPillNavProps) {
   const isConnected = connectionStatus === 'connected';
   const hasGit = !!onOpenGit;
 
@@ -80,12 +82,26 @@ function BottomPillNav({ currentPage, totalPages, connectionStatus, onOpenSettin
             <View style={pillStyles.divider} />
           </>
         )}
+        {onOpenSkills && (
+          <>
+            <TouchableOpacity onPress={() => {
+              if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              onOpenSkills();
+            }} style={pillStyles.sideSection} activeOpacity={0.7}>
+              <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+                <Path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" stroke="#999" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+              </Svg>
+              <Text style={pillStyles.sectionLabel}>Skills</Text>
+            </TouchableOpacity>
+            <View style={pillStyles.divider} />
+          </>
+        )}
         <TouchableOpacity onPress={() => {
           if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
           onCreateAgent();
         }} style={pillStyles.centerSection} activeOpacity={0.7}>
           <Text style={pillStyles.addIcon}>+</Text>
-          <Text style={pillStyles.sectionLabel}>New Agent</Text>
+          <Text style={pillStyles.sectionLabel}>Agent</Text>
         </TouchableOpacity>
         {hasGit && <View style={pillStyles.divider} />}
         <TouchableOpacity onPress={onOpenSettings} style={pillStyles.sideSection} activeOpacity={0.7}>
@@ -114,6 +130,7 @@ export function Dashboard({
   onSendMessage,
   onOpenSettings,
   onOpenGit,
+  onOpenSkills,
 }: DashboardProps) {
   const { state } = useAgentState();
   const { settings } = useSettings();
@@ -495,6 +512,7 @@ export function Dashboard({
         onOpenSettings={onOpenSettings}
         onCreateAgent={onCreateAgent}
         onOpenGit={onOpenGit}
+        onOpenSkills={onOpenSkills}
       />
 
       {inlineInput}
@@ -691,17 +709,19 @@ const pillStyles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.06)',
   },
   sideSection: {
-    width: 56,
+    minWidth: 70,
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 10,
+    paddingHorizontal: 14,
     gap: 3,
   },
   centerSection: {
+    minWidth: 70,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 24,
     paddingVertical: 10,
+    paddingHorizontal: 14,
     gap: 3,
   },
   sectionLabel: {
@@ -742,6 +762,7 @@ const pillStyles = StyleSheet.create({
   dotsRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 5,
   },
   dot: {
@@ -755,5 +776,6 @@ const pillStyles = StyleSheet.create({
   },
   dotsAbove: {
     marginBottom: 8,
+    alignSelf: 'center',
   },
 });
