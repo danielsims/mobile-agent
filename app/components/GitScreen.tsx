@@ -549,7 +549,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                   // Wait for ALL worktree statuses before showing real data — avoids per-row flicker
                   const allPaths = projects.flatMap(p => p.worktrees.map(wt => wt.path));
                   const allLoaded = allPaths.length > 0 && allPaths.every(p => worktreeGitData?.has(p));
-                  return projects.map(project => (
+                  const result: React.ReactNode[] = projects.map(project => (
               <View key={project.id} style={styles.projectSection}>
                 <View style={styles.sectionHeader}>
                   <ProjectIcon project={project} />
@@ -625,7 +625,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                   );
                 })}
 
-                {onCreateWorktree && (
+                {onCreateAgentForWorktree && (
                   expandedNewWorktree === project.id ? (
                     <View style={styles.newWorktreeExpanded}>
                       <TextInput
@@ -675,6 +675,15 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                 )}
               </View>
             ));
+            result.push(
+              <View key="__legend" style={styles.legend}>
+                <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#3b82f6' }]} /><Text style={styles.legendLabel}>Main</Text></View>
+                <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#f59e0b' }]} /><Text style={styles.legendLabel}>Changes</Text></View>
+                <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#22c55e' }]} /><Text style={styles.legendLabel}>Clean</Text></View>
+                <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#8b5cf6' }]} /><Text style={styles.legendLabel}>Merged</Text></View>
+              </View>
+            );
+            return result;
           })()}
               </ScrollView>
             </View>
@@ -1311,6 +1320,28 @@ const styles = StyleSheet.create({
     color: '#444',
     fontSize: 13,
     fontWeight: '500',
+  },
+  legend: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 14,
+    paddingVertical: 16,
+    paddingHorizontal: 14,
+  },
+  legendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  legendDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+  },
+  legendLabel: {
+    color: '#444',
+    fontSize: 11,
   },
   newWorktreeExpanded: {
     flexDirection: 'row',
