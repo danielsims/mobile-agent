@@ -20,6 +20,8 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
 
 interface InputBarProps {
   onSend: (text: string) => void;
+  onStop?: () => void;
+  showStop?: boolean;
   onVoice?: () => void;
   disabled?: boolean;
   placeholder?: string;
@@ -33,7 +35,7 @@ interface InputBarProps {
 // Throttle activity notifications to avoid excessive pings
 const ACTIVITY_THROTTLE = 5000;
 
-export function InputBar({ onSend, onVoice, disabled, placeholder = 'Ask anything...', onActivity, initialValue = '', onDraftChange, autoFocus, shimmer }: InputBarProps) {
+export function InputBar({ onSend, onStop, showStop = false, onVoice, disabled, placeholder = 'Ask anything...', onActivity, initialValue = '', onDraftChange, autoFocus, shimmer }: InputBarProps) {
   const [text, setText] = useState(initialValue);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const inputRef = useRef<TextInput>(null);
@@ -115,7 +117,19 @@ export function InputBar({ onSend, onVoice, disabled, placeholder = 'Ask anythin
     inputRef.current?.focus();
   };
 
-  const canSend = text.trim().length > 0 && !disabled;
+  const canStop = Boolean(onStop) && showStop && !disabled;
+  const canSend = text.trim().length > 0 && !disabled && !canStop;
+
+  const handlePrimaryAction = async () => {
+    if (canStop) {
+      if (Platform.OS === 'ios') {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      }
+      onStop?.();
+      return;
+    }
+    await handleSend();
+  };
 
   return (
     <View style={styles.container}>
@@ -156,13 +170,17 @@ export function InputBar({ onSend, onVoice, disabled, placeholder = 'Ask anythin
         )}
 
         <TouchableOpacity
-          style={[styles.sendBtn, canSend && styles.sendBtnActive]}
-          onPress={handleSend}
-          disabled={!canSend}
+          style={[styles.sendBtn, (canSend || canStop) && styles.sendBtnActive]}
+          onPress={handlePrimaryAction}
+          disabled={!canSend && !canStop}
           activeOpacity={0.7}
         >
           <View style={styles.sendIcon}>
-            <ArrowUpIcon color={canSend ? '#000' : '#555'} />
+            {canStop ? (
+              <StopIcon color="#000" />
+            ) : (
+              <ArrowUpIcon color={canSend ? '#000' : '#555'} />
+            )}
           </View>
         </TouchableOpacity>
       </View>
@@ -197,6 +215,19 @@ function ArrowUpIcon({ color }: { color: string }) {
       <View style={[styles.arrowStem, { backgroundColor: color }]} />
       <View style={[styles.arrowHead, { borderBottomColor: color }]} />
     </View>
+  );
+}
+
+function StopIcon({ color }: { color: string }) {
+  return (
+    <View
+      style={{
+        width: 10,
+        height: 10,
+        borderRadius: 2,
+        backgroundColor: color,
+      }}
+    />
   );
 }
 

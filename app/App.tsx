@@ -19,10 +19,11 @@ import { useWebSocket } from './hooks/useWebSocket';
 import { useNotifications } from './hooks/useNotifications';
 import { useCompletionChime } from './hooks/useCompletionChime';
 import { parseQRCode, clearCredentials, isPaired, type QRPairingData } from './utils/auth';
-import type { Project, AgentType, GitLogCommit } from './state/types';
+import type { Project, AgentType, GitLogCommit, ProviderModelOption } from './state/types';
 import type { GitStatusData } from './components/GitTabContent';
 
 type Screen = 'pairing' | 'scanner' | 'dashboard' | 'agent' | 'settings' | 'git';
+const MODEL_PREFETCH_TYPES: AgentType[] = ['claude', 'codex', 'opencode'];
 
 // Inner app component that has access to AgentContext
 function AppInner() {
@@ -36,6 +37,8 @@ function AppInner() {
   const [createModalInitialWorktreePath, setCreateModalInitialWorktreePath] = useState<string | undefined>();
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(false);
+  const [modelsByType, setModelsByType] = useState<Record<string, ProviderModelOption[]>>({});
+  const [modelsLoadingType, setModelsLoadingType] = useState<AgentType | null>(null);
   const [hasCreds, setHasCreds] = useState(false);
 
   const { state, dispatch, handleServerMessage, loadCachedMessages } = useAgentState();
@@ -92,6 +95,15 @@ function AppInner() {
       setProjectsLoading(false);
     }
 
+    if (msg.type === 'modelList' && msg.agentType) {
+      const agentType = msg.agentType;
+      setModelsByType(prev => ({
+        ...prev,
+        [agentType]: msg.models || [],
+      }));
+      setModelsLoadingType(prev => (prev === agentType ? null : prev));
+    }
+
     // Worktree created — update projects list with new worktrees
     if (msg.type === 'worktreeCreated' && msg.projectId && msg.worktrees) {
       setProjects(prev => prev.map(p =>
@@ -101,23 +113,24 @@ function AppInner() {
 
     // Git status response
     if (msg.type === 'gitStatus' && msg.agentId) {
+      const agentId = msg.agentId;
       const gitData: GitStatusData = {
-        branch: (msg as any).branch || '',
-        ahead: (msg as any).ahead || 0,
-        behind: (msg as any).behind || 0,
-        files: (msg as any).files || [],
+        branch: msg.branch || '',
+        ahead: msg.ahead || 0,
+        behind: msg.behind || 0,
+        files: msg.files || [],
       };
       setGitStatus(gitData);
       setGitLoading(false);
       // Also update the git overview map (for GitScreen)
       setGitDataMap(prev => {
         const next = new Map(prev);
-        next.set(msg.agentId!, gitData);
+        next.set(agentId, gitData);
         return next;
       });
       setGitLoadingAgents(prev => {
         const next = new Set(prev);
-        next.delete(msg.agentId!);
+        next.delete(agentId);
         return next;
       });
     }
@@ -130,14 +143,15 @@ function AppInner() {
 
     // Git log response
     if (msg.type === 'gitLog' && msg.projectPath) {
+      const projectPath = msg.projectPath;
       setGitLogMap(prev => {
         const next = new Map(prev);
-        next.set(msg.projectPath!, msg.commits || []);
+        next.set(projectPath, msg.commits || []);
         return next;
       });
       setGitLogLoading(prev => {
         const next = new Set(prev);
-        next.delete(msg.projectPath!);
+        next.delete(projectPath);
         return next;
       });
     }
@@ -247,13 +261,22 @@ function AppInner() {
   };
 
   // Agent actions
+  const prefetchModelsForCreateFlow = useCallback(() => {
+    for (const type of MODEL_PREFETCH_TYPES) {
+      if (Object.prototype.hasOwnProperty.call(modelsByType, type)) continue;
+      send('listModels', { agentType: type });
+    }
+  }, [modelsByType, send]);
+
   const handleCreateAgent = () => {
+    prefetchModelsForCreateFlow();
     setCreateModalInitialProjectId(undefined);
     setCreateModalInitialWorktreePath(undefined);
     setShowCreateModal(true);
   };
 
   const handleCreateAgentForWorktree = (projectId: string, worktreePath: string) => {
+    prefetchModelsForCreateFlow();
     setCreateModalInitialProjectId(projectId);
     setCreateModalInitialWorktreePath(worktreePath);
     setShowCreateModal(true);
@@ -261,11 +284,13 @@ function AppInner() {
 
   const handleCreateAgentSubmit = (config: {
     agentType: AgentType;
+    model?: string;
     projectId?: string;
     worktreePath?: string;
   }) => {
     send('createAgent', {
       agentType: config.agentType,
+      model: config.model,
       projectId: config.projectId,
       worktreePath: config.worktreePath,
     });
@@ -274,6 +299,11 @@ function AppInner() {
   const handleRequestProjects = () => {
     setProjectsLoading(true);
     send('listProjects');
+  };
+
+  const handleRequestModels = (agentType: AgentType) => {
+    setModelsLoadingType(agentType);
+    send('listModels', { agentType });
   };
 
   const handleCreateWorktree = (projectId: string, branchName: string) => {
@@ -307,6 +337,12 @@ function AppInner() {
 
   const handleSendMessage = (agentId: string, text: string) => {
     send('sendMessage', { agentId, text });
+  };
+
+  const handleStopAgent = (agentId: string) => {
+    send('interruptAgent', { agentId });
+    // Optimistic: unblock input immediately while backend performs interrupt.
+    dispatch({ type: 'UPDATE_AGENT_STATUS', agentId, status: 'idle' });
   };
 
   const handleRespondPermission = (agentId: string, requestId: string, behavior: 'allow' | 'deny') => {
@@ -480,6 +516,7 @@ function AppInner() {
               projects={projects}
               onBack={handleBackToDashboard}
               onSendMessage={handleSendMessage}
+              onStopAgent={handleStopAgent}
               onRespondPermission={handleRespondPermission}
               onSetAutoApprove={handleSetAutoApprove}
               onResetPingTimer={resetPingTimer}
@@ -525,9 +562,12 @@ function AppInner() {
           visible={showCreateModal && (screen === 'dashboard' || screen === 'git')}
           projects={projects}
           projectsLoading={projectsLoading}
+          modelsByType={modelsByType}
+          modelsLoadingType={modelsLoadingType}
           onClose={() => { setShowCreateModal(false); setCreateModalInitialProjectId(undefined); setCreateModalInitialWorktreePath(undefined); }}
           onSubmit={handleCreateAgentSubmit}
           onRequestProjects={handleRequestProjects}
+          onRequestModels={handleRequestModels}
           onCreateWorktree={handleCreateWorktree}
           onUnregisterProject={handleUnregisterProject}
           initialProjectId={createModalInitialProjectId}

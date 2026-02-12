@@ -1,9 +1,9 @@
 import React, { useMemo } from 'react';
 import { SvgXml } from 'react-native-svg';
-import { getIcon, themeIcons } from 'seti-icons';
+import { themeIcons } from 'seti-icons';
 
 // Seti dark theme — VS Code's default file icon color palette
-const SETI_DARK_THEME: Record<string, string> = {
+const SETI_DARK_THEME = {
   blue: '#519aba',
   grey: '#4d5a5e',
   'grey-light': '#6d8086',
@@ -26,7 +26,7 @@ interface FileTypeIconProps {
 
 export function FileTypeIcon({ filename, size = 16 }: FileTypeIconProps) {
   const { svg, color } = useMemo(() => {
-    const basename = filename.includes('/') ? filename.split('/').pop()! : filename;
+    const basename = filename.includes('/') ? (filename.split('/').pop() ?? filename) : filename;
     return getThemedIcon(basename);
   }, [filename]);
 

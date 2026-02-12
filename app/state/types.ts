@@ -96,6 +96,8 @@ export type AgentAction =
   | { type: 'UPDATE_AGENT_STATUS'; agentId: string; status: AgentStatus }
   | { type: 'ADD_MESSAGE'; agentId: string; message: AgentMessage }
   | { type: 'APPEND_STREAM_CONTENT'; agentId: string; text: string }
+  | { type: 'FINALIZE_ASSISTANT_MESSAGE'; agentId: string; content: ContentBlock[]; timestamp: number }
+  | { type: 'MERGE_TOOL_RESULTS'; agentId: string; results: Array<{ toolUseId: string; content: string | unknown }> }
   | { type: 'SET_MESSAGES'; agentId: string; messages: AgentMessage[] }
   | { type: 'BATCH_SET_MESSAGES'; batch: Array<{ agentId: string; messages: AgentMessage[] }> }
   | { type: 'ADD_PERMISSION'; agentId: string; permission: PermissionRequest }
@@ -154,6 +156,12 @@ export interface GitLogCommit {
   refs: string[];
 }
 
+export interface ProviderModelOption {
+  value: string;
+  label: string;
+  note?: string;
+}
+
 // --- Server Messages (new protocol) ---
 
 export interface ServerMessage {
@@ -173,6 +181,7 @@ export interface ServerMessage {
 
   // assistantMessage
   content?: ContentBlock[];
+  results?: Array<{ toolUseId: string; content: string | unknown }>;
 
   // permissionRequest
   requestId?: string;
@@ -206,12 +215,17 @@ export interface ServerMessage {
   // projectList
   projects?: Project[];
 
+  // modelList
+  agentType?: AgentType;
+  models?: ProviderModelOption[];
+
   // worktreeCreated / worktreeRemoved
   projectId?: string;
   worktree?: Worktree;
   worktrees?: Worktree[];
 
   // gitStatus
+  branch?: string;
   files?: Array<{ file: string; status: string }>;
   ahead?: number;
   behind?: number;

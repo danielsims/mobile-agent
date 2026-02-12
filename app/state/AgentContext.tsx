@@ -66,6 +66,7 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
 
   // Per-agent streaming throttle: accumulate stream chunks and flush every 50ms
   const pendingStreamsRef = useRef<Map<string, string>>(new Map());
+  const streamSeenRef = useRef<Set<string>>(new Set());
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const flushStreams = useCallback(() => {
@@ -110,6 +111,8 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
       case 'agentDestroyed': {
         if (msg.agentId) {
           cacheLoadedRef.current.delete(msg.agentId);
+          streamSeenRef.current.delete(msg.agentId);
+          pendingStreamsRef.current.delete(msg.agentId);
           clearMessages(msg.agentId);
           dispatch({ type: 'REMOVE_AGENT', agentId: msg.agentId });
         }
@@ -165,6 +168,7 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
           const pending = pendingStreamsRef.current;
           const current = pending.get(msg.agentId) || '';
           pending.set(msg.agentId, current + msg.text);
+          streamSeenRef.current.add(msg.agentId);
           scheduleFlush();
         }
         break;
@@ -172,6 +176,9 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
 
       case 'assistantMessage': {
         if (msg.agentId && msg.content) {
+          const timestamp = msg.ts || Date.now();
+          const hadStream = streamSeenRef.current.has(msg.agentId);
+
           // Flush any pending stream content first
           const pending = pendingStreamsRef.current;
           if (pending.has(msg.agentId)) {
@@ -182,14 +189,37 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
             });
             pending.delete(msg.agentId);
           }
+          streamSeenRef.current.delete(msg.agentId);
 
-          const message: AgentMessage = {
-            id: nextMsgId('assistant'),
-            type: 'assistant',
-            content: msg.content,
-            timestamp: msg.ts || Date.now(),
-          };
-          dispatch({ type: 'ADD_MESSAGE', agentId: msg.agentId, message });
+          if (hadStream) {
+            // Replace the streamed placeholder bubble with the final structured
+            // assistant message for this turn to avoid duplicate rendering.
+            dispatch({
+              type: 'FINALIZE_ASSISTANT_MESSAGE',
+              agentId: msg.agentId,
+              content: msg.content,
+              timestamp,
+            });
+          } else {
+            const message: AgentMessage = {
+              id: nextMsgId('assistant'),
+              type: 'assistant',
+              content: msg.content,
+              timestamp,
+            };
+            dispatch({ type: 'ADD_MESSAGE', agentId: msg.agentId, message });
+          }
+        }
+        break;
+      }
+
+      case 'toolResults': {
+        if (msg.agentId && Array.isArray(msg.results) && msg.results.length > 0) {
+          dispatch({
+            type: 'MERGE_TOOL_RESULTS',
+            agentId: msg.agentId,
+            results: msg.results,
+          });
         }
         break;
       }
@@ -212,6 +242,7 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
 
       case 'agentResult': {
         if (msg.agentId) {
+          streamSeenRef.current.delete(msg.agentId);
           dispatch({
             type: 'UPDATE_COST',
             agentId: msg.agentId,

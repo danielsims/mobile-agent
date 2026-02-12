@@ -16,6 +16,7 @@ import {
 } from './auth.js';
 import { loadSessions, getSavedSessions, saveSession, removeSession } from './sessions.js';
 import { readTranscript } from './transcripts.js';
+import { listModelsForAgentType } from './models.js';
 import {
   loadProjects,
   getProjects,
@@ -303,6 +304,7 @@ export class Bridge {
         saveSession(id, {
           sessionId: data.sessionId,
           type: session.type,
+          model: session.model,
           sessionName: session.sessionName,
           createdAt: session.createdAt,
           cwd: session.cwd,
@@ -313,7 +315,11 @@ export class Bridge {
       if (type === 'agentUpdated' && data.sessionName) {
         const saved = getSavedSessions();
         if (saved[id]) {
-          saveSession(id, { ...saved[id], sessionName: data.sessionName });
+          saveSession(id, {
+            ...saved[id],
+            model: session.model || saved[id].model || null,
+            sessionName: data.sessionName,
+          });
         }
       }
     });
@@ -337,7 +343,9 @@ export class Bridge {
         continue;
       }
 
-      const session = new AgentSession(agentId, info.type || 'claude');
+      const session = new AgentSession(agentId, info.type || 'claude', {
+        model: info.model || null,
+      });
       session.sessionId = info.sessionId;
       session.sessionName = info.sessionName || 'Restored Agent';
       session.createdAt = info.createdAt || Date.now();
@@ -390,6 +398,10 @@ export class Bridge {
         this._handleSendMessage(ws, msg, deviceId);
         break;
 
+      case 'interruptAgent':
+        this._handleInterruptAgent(ws, msg, deviceId);
+        break;
+
       case 'respondPermission':
         this._handleRespondPermission(ws, msg, deviceId);
         break;
@@ -404,6 +416,10 @@ export class Bridge {
 
       case 'listProjects':
         this._handleListProjects(ws);
+        break;
+
+      case 'listModels':
+        this._handleListModels(ws, msg);
         break;
 
       case 'createWorktree':
@@ -454,6 +470,7 @@ export class Bridge {
 
     const agentId = uuidv4();
     const type = msg.agentType || 'claude';
+    const model = typeof msg.model === 'string' && msg.model.trim() ? msg.model.trim() : null;
 
     // Resolve working directory from project/worktree selection
     let cwd = null;
@@ -466,16 +483,33 @@ export class Bridge {
       }
     }
 
-    const session = new AgentSession(agentId, type);
+    const session = new AgentSession(agentId, type, { model });
 
     this._setupAgentBroadcast(session);
     this.agents.set(agentId, session);
-    logAudit('agent_created', { agentId: agentId.slice(0, 8), type, deviceId, cwd: cwd || '~' });
+    logAudit('agent_created', { agentId: agentId.slice(0, 8), type, model: model || 'auto', deviceId, cwd: cwd || '~' });
 
     // Spawn the CLI process in the selected directory (or $HOME by default)
     session.spawn(this.port, null, cwd);
 
     this._broadcastToMobile('agentCreated', { agent: session.getSnapshot() });
+  }
+
+  async _handleListModels(ws, msg) {
+    const agentType = msg.agentType || 'claude';
+    try {
+      const models = await listModelsForAgentType(agentType);
+      this._sendTo(ws, 'modelList', {
+        agentType,
+        models,
+      });
+    } catch (e) {
+      console.error(`[models] listModels failed for ${agentType}:`, e.message);
+      this._sendTo(ws, 'modelList', {
+        agentType,
+        models: [{ value: 'auto', label: 'Auto (Recommended)', note: 'Use provider default model' }],
+      });
+    }
   }
 
   _handleDestroyAgent(ws, msg, deviceId) {
@@ -515,6 +549,22 @@ export class Bridge {
 
     // Echo the user message to all mobile clients
     this._broadcastToMobile('userMessage', { agentId: msg.agentId, content: text });
+  }
+
+  async _handleInterruptAgent(ws, msg, deviceId) {
+    const session = this.agents.get(msg.agentId);
+    if (!session) {
+      this._sendTo(ws, 'error', { error: 'Agent not found.' });
+      return;
+    }
+
+    const interrupted = await session.interrupt();
+    if (!interrupted) {
+      this._sendTo(ws, 'error', { error: 'Agent is not currently running.' });
+      return;
+    }
+
+    logAudit('agent_interrupted', { agentId: msg.agentId.slice(0, 8), deviceId });
   }
 
   _handleRespondPermission(ws, msg, deviceId) {

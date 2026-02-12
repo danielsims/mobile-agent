@@ -174,6 +174,64 @@ export function agentReducer(state: AppState, action: AgentAction): AppState {
       });
     }
 
+    case 'FINALIZE_ASSISTANT_MESSAGE': {
+      return updateAgent(state, action.agentId, (agent) => {
+        const msgs = [...agent.messages];
+        const last = msgs[msgs.length - 1];
+
+        if (last && last.type === 'assistant' && typeof last.content === 'string') {
+          msgs[msgs.length - 1] = {
+            ...last,
+            content: action.content,
+            timestamp: action.timestamp,
+          };
+        } else {
+          msgs.push({
+            id: nextMessageId(),
+            type: 'assistant',
+            content: action.content,
+            timestamp: action.timestamp,
+          });
+        }
+
+        return {
+          ...agent,
+          messages: msgs,
+          lastOutput: deriveLastOutput(msgs, agent.lastOutput),
+        };
+      });
+    }
+
+    case 'MERGE_TOOL_RESULTS': {
+      return updateAgent(state, action.agentId, (agent) => {
+        // Find the most recent assistant message and append tool_result blocks
+        // so that ToolUseCard can show them as completed.
+        const msgs = [...agent.messages];
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          const msg = msgs[i];
+          if (msg.type === 'assistant' && Array.isArray(msg.content)) {
+            const updated = [...msg.content];
+            for (const r of action.results) {
+              // Avoid duplicates — only add if not already present
+              const exists = updated.some(
+                b => b.type === 'tool_result' && 'toolUseId' in b && b.toolUseId === r.toolUseId,
+              );
+              if (!exists) {
+                updated.push({
+                  type: 'tool_result',
+                  toolUseId: r.toolUseId,
+                  content: typeof r.content === 'string' ? r.content : JSON.stringify(r.content),
+                });
+              }
+            }
+            msgs[i] = { ...msg, content: updated };
+            break;
+          }
+        }
+        return { ...agent, messages: msgs };
+      });
+    }
+
     case 'SET_MESSAGES': {
       return updateAgent(state, action.agentId, (agent) => ({
         ...agent,

@@ -26,7 +26,6 @@ export interface GitStatusData {
 }
 
 interface GitTabContentProps {
-  agentId: string;
   agentStatus: AgentStatus;
   gitStatus: GitStatusData | null;
   gitDiff: string | null;
@@ -92,7 +91,6 @@ function parseDiff(raw: string): DiffLine[] {
 }
 
 export function GitTabContent({
-  agentId,
   agentStatus,
   gitStatus,
   gitDiff,

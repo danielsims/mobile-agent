@@ -13,7 +13,7 @@ const DATA_DIR = join(process.env.HOME, '.mobile-agent');
 const SESSIONS_PATH = join(DATA_DIR, 'sessions.json');
 
 // In-memory state
-let sessions = {}; // agentId -> { sessionId, type, sessionName, createdAt, cwd }
+let sessions = {}; // agentId -> { sessionId, type, model, sessionName, createdAt, cwd }
 
 /**
  * Load saved sessions from disk. Called on bridge startup.
@@ -40,6 +40,7 @@ export function saveSession(agentId, info) {
   sessions[agentId] = {
     sessionId: info.sessionId,
     type: info.type || 'claude',
+    model: info.model || null,
     sessionName: info.sessionName || null,
     createdAt: info.createdAt || Date.now(),
     cwd: info.cwd || null,
@@ -59,7 +60,7 @@ export function removeSession(agentId) {
 
 /**
  * Get all saved sessions.
- * @returns {Object} agentId -> { sessionId, type, sessionName, createdAt, cwd }
+ * @returns {Object} agentId -> { sessionId, type, model, sessionName, createdAt, cwd }
  */
 export function getSavedSessions() {
   return { ...sessions };
