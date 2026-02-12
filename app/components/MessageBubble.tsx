@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { View, Text, ScrollView, StyleSheet, Platform, TouchableOpacity } from 'react-native';
+import * as Haptics from 'expo-haptics';
 import { StreamdownRN } from 'streamdown-rn';
 import type { AgentMessage, ContentBlock } from '../state/types';
 import { ShimmerText } from './ShimmerText';
@@ -8,6 +9,9 @@ interface MessageBubbleProps {
   message: AgentMessage;
   toolResultMap?: Map<string, string>;
   animateThinking?: boolean;
+  pendingPermissionToolNames?: Set<string>;
+  onRespondQuestion?: (answers: Record<string, string>, toolInput: Record<string, unknown>) => void;
+  onDenyQuestion?: () => void;
 }
 
 // Extract markdown string from content blocks
@@ -27,29 +31,49 @@ function formatToolName(name: string): string {
   return name;
 }
 
-// Minimal tool icon — two horizontal bars (terminal/code style)
-function ToolIcon({ size = 11, color = '#666' }: { size?: number; color?: string }) {
-  const barH = Math.max(1.5, size * 0.15);
-  return (
-    <View style={{ width: size, height: size, justifyContent: 'center', gap: size * 0.22 }}>
-      <View style={{ width: size * 0.55, height: barH, backgroundColor: color, borderRadius: barH / 2 }} />
-      <View style={{ width: size * 0.85, height: barH, backgroundColor: color, borderRadius: barH / 2 }} />
-    </View>
-  );
+// Shorten a file path to just filename or parent/filename
+function shortPath(filePath: string): string {
+  const parts = filePath.split('/').filter(Boolean);
+  if (parts.length <= 2) return parts.join('/');
+  return parts.slice(-2).join('/');
 }
 
-// Extract a short description from tool input for the card header.
-// Checks common field names across tools (Bash, Read, Write, Grep, Glob, Task, etc.)
-function extractToolDescription(input: Record<string, unknown>): string | null {
-  const candidates = ['description', 'file_path', 'command', 'pattern', 'query', 'url', 'prompt', 'subject'];
-  for (const key of candidates) {
-    const val = input[key];
-    if (typeof val === 'string' && val.length > 0) {
-      // Trim to a reasonable header length
-      return val.length > 80 ? val.slice(0, 80) + '...' : val;
+function truncate(str: string, max: number): string {
+  return str.length > max ? str.slice(0, max) + '\u2026' : str;
+}
+
+// Tool display config — maps tool names to label + title
+function getToolDisplay(name: string, input: Record<string, unknown>): { label: string; title: string } {
+  const str = (key: string) => typeof input[key] === 'string' ? input[key] as string : '';
+
+  switch (name) {
+    case 'Read':
+      return { label: 'Read', title: shortPath(str('file_path')) };
+    case 'Write':
+      return { label: 'Write', title: shortPath(str('file_path')) };
+    case 'Edit':
+      return { label: 'Edit', title: shortPath(str('file_path')) };
+    case 'Bash':
+      return { label: 'Run', title: str('description') || truncate(str('command'), 60) };
+    case 'Grep':
+      return { label: 'Search', title: truncate(str('pattern'), 50) };
+    case 'Glob':
+      return { label: 'Find files', title: truncate(str('pattern'), 50) };
+    case 'WebSearch':
+      return { label: 'Web', title: truncate(str('query'), 60) };
+    case 'WebFetch':
+      return { label: 'Fetch', title: truncate(str('url'), 50) };
+    case 'Task':
+      return { label: 'Agent', title: str('description') || truncate(str('prompt') || 'Subagent', 50) };
+    default: {
+      const formatted = formatToolName(name);
+      const candidates = ['description', 'file_path', 'command', 'pattern', 'query', 'url', 'prompt'];
+      for (const key of candidates) {
+        if (str(key)) return { label: formatted, title: truncate(str(key), 60) };
+      }
+      return { label: formatted, title: formatted };
     }
   }
-  return null;
 }
 
 // Diff view for Edit tool — shows old_string/new_string as red/green lines
@@ -83,12 +107,194 @@ function isEditWithDiff(name: string, input: Record<string, unknown>): boolean {
   return name === 'Edit' && typeof input.old_string === 'string' && typeof input.new_string === 'string';
 }
 
-// Collapsible tool invocation card
+// --- TodoWrite card: renders todo items as a checklist ---
+function TodoWriteCard({ block }: { block: ContentBlock & { type: 'tool_use' } }) {
+  const todos: Array<{ content: string; status: string; activeForm?: string }> =
+    Array.isArray(block.input?.todos) ? (block.input.todos as Array<{ content: string; status: string; activeForm?: string }>) : [];
+
+  if (todos.length === 0) return null;
+
+  return (
+    <View style={styles.todoCard}>
+      <Text style={styles.todoTitle}>Tasks</Text>
+      {todos.map((todo, i) => {
+        const isComplete = todo.status === 'completed';
+        const isActive = todo.status === 'in_progress';
+        return (
+          <View key={i} style={styles.todoRow}>
+            <View style={[
+              styles.todoCircle,
+              isComplete && styles.todoCircleComplete,
+            ]}>
+              {isComplete && (
+                <View style={styles.todoCheck}>
+                  <View style={styles.todoCheckShort} />
+                  <View style={styles.todoCheckLong} />
+                </View>
+              )}
+            </View>
+            <Text style={[
+              styles.todoText,
+              isComplete && styles.todoTextComplete,
+              !isComplete && !isActive && styles.todoTextPending,
+            ]} numberOfLines={2}>
+              {isActive ? (todo.activeForm || todo.content) : todo.content}
+            </Text>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+// --- AskUserQuestion card: renders question options as tappable buttons ---
+// Interactive when pending (onRespond provided), read-only when answered.
+function AskUserQuestionCard({
+  block,
+  result,
+  onRespond,
+  onDeny,
+}: {
+  block: ContentBlock & { type: 'tool_use' };
+  result?: string | null;
+  onRespond?: (answers: Record<string, string>) => void;
+  onDeny?: () => void;
+}) {
+  const questions: Array<{
+    question: string;
+    header?: string;
+    options: Array<{ label: string; description?: string }>;
+    multiSelect?: boolean;
+  }> = Array.isArray(block.input?.questions) ? (block.input.questions as any[]) : [];
+
+  const [selections, setSelections] = useState<Record<number, Set<number>>>({});
+  const [submitted, setSubmitted] = useState(false);
+  const interactive = !!onRespond && !submitted;
+
+  if (questions.length === 0) return null;
+
+  // Parse the user's answer from the result string (for read-only mode)
+  const answerText = result ?? '';
+
+  const handleTapOption = (qi: number, oi: number, multiSelect?: boolean) => {
+    if (!interactive) return;
+    if (Platform.OS === 'ios') {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+    setSelections(prev => {
+      const updated = { ...prev };
+      if (multiSelect) {
+        const current = new Set(prev[qi] || []);
+        if (current.has(oi)) current.delete(oi);
+        else current.add(oi);
+        updated[qi] = current;
+      } else {
+        updated[qi] = new Set([oi]);
+        const answers: Record<string, string> = {};
+        questions.forEach((q, qIdx) => {
+          const selected = qIdx === qi ? new Set([oi]) : (prev[qIdx] || new Set());
+          const labels = Array.from(selected).map(idx => q.options[idx]?.label).filter(Boolean);
+          if (labels.length > 0) {
+            answers[q.question] = labels.join(', ');
+          }
+        });
+        setSubmitted(true);
+        setTimeout(() => {
+          if (Platform.OS === 'ios') {
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+          }
+          onRespond!(answers);
+        }, 150);
+      }
+      return updated;
+    });
+  };
+
+  const handleSubmitMulti = () => {
+    if (!onRespond) return;
+    const answers: Record<string, string> = {};
+    questions.forEach((q, qi) => {
+      const selected = selections[qi] || new Set();
+      const labels = Array.from(selected).map(idx => q.options[idx]?.label).filter(Boolean);
+      if (labels.length > 0) {
+        answers[q.question] = labels.join(', ');
+      }
+    });
+    if (Platform.OS === 'ios') {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    }
+    setSubmitted(true);
+    onRespond(answers);
+  };
+
+  const handleDeny = () => {
+    if (!onDeny) return;
+    if (Platform.OS === 'ios') {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+    onDeny();
+  };
+
+  const hasMultiSelect = questions.some(q => q.multiSelect);
+
+  return (
+    <View style={styles.questionCard}>
+      {interactive && (
+        <TouchableOpacity style={styles.questionDismissBtn} onPress={handleDeny} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} activeOpacity={0.5}>
+          <Text style={styles.questionDismissX}>{'\u00D7'}</Text>
+        </TouchableOpacity>
+      )}
+      {questions.map((q, qi) => {
+        return (
+          <View key={qi} style={qi > 0 ? { marginTop: 16 } : undefined}>
+            <Text style={styles.questionText}>{q.question}</Text>
+            <View style={styles.questionOptions}>
+              {q.options.map((opt, oi) => {
+                const isSelected = interactive
+                  ? (selections[qi]?.has(oi) ?? false)
+                  : answerText.includes(opt.label);
+                const Wrapper = interactive ? TouchableOpacity : View;
+                return (
+                  <Wrapper
+                    key={oi}
+                    style={[
+                      styles.questionOption,
+                      isSelected && styles.questionOptionSelected,
+                    ]}
+                    {...(interactive ? { onPress: () => handleTapOption(qi, oi, q.multiSelect), activeOpacity: 0.7 } : {})}
+                  >
+                    <Text style={[
+                      styles.questionOptionLabel,
+                      isSelected && styles.questionOptionLabelSelected,
+                    ]}>{opt.label}</Text>
+                    {opt.description && (
+                      <Text style={[
+                        styles.questionOptionDesc,
+                        isSelected && styles.questionOptionDescSelected,
+                      ]}>{opt.description}</Text>
+                    )}
+                  </Wrapper>
+                );
+              })}
+            </View>
+          </View>
+        );
+      })}
+      {interactive && hasMultiSelect && (
+        <TouchableOpacity style={styles.questionSubmitButton} onPress={handleSubmitMulti} activeOpacity={0.8}>
+          <Text style={styles.questionSubmitText}>Submit</Text>
+        </TouchableOpacity>
+      )}
+    </View>
+  );
+}
+
+// Tool card — consistent collapsed card, tappable to expand details
 function ToolUseCard({ block, result }: { block: ContentBlock & { type: 'tool_use' }; result?: string | null }) {
   const [expanded, setExpanded] = useState(false);
-  const fallbackName = formatToolName(block.name);
-  const title = extractToolDescription(block.input) || fallbackName;
+  const display = getToolDisplay(block.name, block.input as Record<string, unknown>);
   const isCompleted = result != null;
+  const hasDiff = isEditWithDiff(block.name, block.input);
 
   return (
     <View style={styles.toolCard}>
@@ -98,58 +304,44 @@ function ToolUseCard({ block, result }: { block: ContentBlock & { type: 'tool_us
         activeOpacity={0.7}
       >
         <View style={styles.toolHeaderLeft}>
-          <ToolIcon size={11} color="#666" />
-          <Text style={styles.toolName} numberOfLines={1}>{title}</Text>
+          <Text style={styles.toolLabel}>{display.label}</Text>
+          {isCompleted ? (
+            <Text style={styles.toolTitle} numberOfLines={1}>{display.title}</Text>
+          ) : (
+            <ShimmerText text={display.title} style={styles.toolTitle} duration={1700} />
+          )}
+        </View>
+        <View style={styles.toolHeaderRight}>
           <View style={[styles.toolBadge, !isCompleted && styles.toolBadgeRunning]}>
             <View style={[styles.toolBadgeDot, !isCompleted && styles.toolBadgeDotRunning]} />
-            <Text style={[styles.toolBadgeText, !isCompleted && styles.toolBadgeTextRunning]}>
-              {isCompleted ? 'Completed' : 'Running'}
-            </Text>
           </View>
-        </View>
-        <View style={[styles.toolChevronBox, expanded && styles.toolChevronBoxOpen]}>
-          <View style={styles.toolChevronArrow} />
+          <View style={[styles.toolChevron, expanded && styles.toolChevronOpen]}>
+            <View style={styles.toolChevronArrow} />
+          </View>
         </View>
       </TouchableOpacity>
 
       {expanded && (
         <View style={styles.toolBody}>
-          {isEditWithDiff(block.name, block.input) ? (
-            <>
-              <Text style={styles.toolSectionLabel}>DIFF</Text>
-              <ScrollView style={styles.toolCodeScroll} nestedScrollEnabled>
-                <View style={styles.toolCodeBlock}>
-                  <DiffView
-                    filePath={typeof block.input.file_path === 'string' ? block.input.file_path : undefined}
-                    oldStr={block.input.old_string as string}
-                    newStr={block.input.new_string as string}
-                  />
-                </View>
-              </ScrollView>
-            </>
-          ) : (
-            <>
-              <Text style={styles.toolSectionLabel}>INPUT</Text>
-              <ScrollView style={styles.toolCodeScroll} nestedScrollEnabled>
-                <View style={styles.toolCodeBlock}>
-                  <Text style={styles.toolCodeText}>
-                    {JSON.stringify(block.input, null, 2)}
-                  </Text>
-                </View>
-              </ScrollView>
-            </>
+          {hasDiff && (
+            <ScrollView style={styles.toolDetailScroll} nestedScrollEnabled>
+              <DiffView
+                oldStr={block.input.old_string as string}
+                newStr={block.input.new_string as string}
+              />
+            </ScrollView>
+          )}
+          {!hasDiff && (
+            <ScrollView style={styles.toolDetailScroll} nestedScrollEnabled>
+              <Text style={styles.toolDetailText}>
+                {JSON.stringify(block.input, null, 2)}
+              </Text>
+            </ScrollView>
           )}
           {result != null && (
-            <>
-              <Text style={[styles.toolSectionLabel, { marginTop: 10 }]}>OUTPUT</Text>
-              <ScrollView style={styles.toolCodeScroll} nestedScrollEnabled>
-                <View style={styles.toolCodeBlock}>
-                  <Text style={styles.toolCodeText}>
-                    {result}
-                  </Text>
-                </View>
-              </ScrollView>
-            </>
+            <ScrollView style={[styles.toolDetailScroll, { marginTop: 8 }]} nestedScrollEnabled>
+              <Text style={styles.toolDetailText}>{result}</Text>
+            </ScrollView>
           )}
         </View>
       )}
@@ -177,10 +369,16 @@ function ContentBlockView({
   block,
   resultMap,
   animateThinking = false,
+  pendingPermissionToolNames,
+  onRespondQuestion,
+  onDenyQuestion,
 }: {
   block: ContentBlock;
   resultMap?: Map<string, string>;
   animateThinking?: boolean;
+  pendingPermissionToolNames?: Set<string>;
+  onRespondQuestion?: (answers: Record<string, string>, toolInput: Record<string, unknown>) => void;
+  onDenyQuestion?: () => void;
 }) {
   const [expanded, setExpanded] = useState(block.type === 'thinking');
 
@@ -189,8 +387,25 @@ function ContentBlockView({
       return null; // Text blocks are rendered together via StreamdownRN
 
     case 'tool_use': {
+      const typedBlock = block as ContentBlock & { type: 'tool_use' };
       const result = resultMap?.get(block.id) ?? null;
-      return <ToolUseCard block={block as ContentBlock & { type: 'tool_use' }} result={result} />;
+
+      if (typedBlock.name === 'TodoWrite') {
+        return <TodoWriteCard block={typedBlock} />;
+      }
+      if (typedBlock.name === 'AskUserQuestion') {
+        const isPending = pendingPermissionToolNames?.has('AskUserQuestion');
+        return (
+          <AskUserQuestionCard
+            block={typedBlock}
+            result={result}
+            onRespond={isPending ? (answers) => onRespondQuestion?.(answers, typedBlock.input as Record<string, unknown>) : undefined}
+            onDeny={isPending ? onDenyQuestion : undefined}
+          />
+        );
+      }
+
+      return <ToolUseCard block={typedBlock} result={result} />;
     }
 
     case 'tool_result':
@@ -223,7 +438,7 @@ function ContentBlockView({
   }
 }
 
-export function MessageBubble({ message, toolResultMap, animateThinking = false }: MessageBubbleProps) {
+export function MessageBubble({ message, toolResultMap, animateThinking = false, pendingPermissionToolNames, onRespondQuestion, onDenyQuestion }: MessageBubbleProps) {
   const isUser = message.type === 'user';
   const isSystem = message.type === 'system';
 
@@ -271,6 +486,9 @@ export function MessageBubble({ message, toolResultMap, animateThinking = false 
             block={block}
             resultMap={toolResultMap}
             animateThinking={animateThinking}
+            pendingPermissionToolNames={pendingPermissionToolNames}
+            onRespondQuestion={onRespondQuestion}
+            onDenyQuestion={onDenyQuestion}
           />
         ))}
       </View>
@@ -318,42 +536,53 @@ const styles = StyleSheet.create({
 
   // --- Tool use card ---
   toolCard: {
-    borderWidth: 1,
-    borderColor: '#252525',
+    backgroundColor: '#141414',
     borderRadius: 8,
     marginVertical: 6,
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
     overflow: 'hidden',
   },
   toolHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+    padding: 14,
+    gap: 10,
   },
   toolHeaderLeft: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
     flex: 1,
+    minWidth: 0,
   },
-  toolName: {
-    color: '#ccc',
+  toolLabel: {
+    color: '#555',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  toolTitle: {
+    color: '#e5e5e5',
     fontSize: 13,
     fontWeight: '500',
     flexShrink: 1,
   },
-  toolBadge: {
+  toolHeaderRight: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(34,197,94,0.1)',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 10,
-    gap: 5,
+    gap: 8,
+  },
+  toolBadge: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: 'rgba(34,197,94,0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   toolBadgeRunning: {
-    backgroundColor: 'rgba(245,158,11,0.12)',
+    backgroundColor: 'rgba(245,158,11,0.15)',
   },
   toolBadgeDot: {
     width: 5,
@@ -364,58 +593,41 @@ const styles = StyleSheet.create({
   toolBadgeDotRunning: {
     backgroundColor: '#f59e0b',
   },
-  toolBadgeText: {
-    color: '#22c55e',
-    fontSize: 10,
-    fontWeight: '500',
-  },
-  toolBadgeTextRunning: {
-    color: '#f59e0b',
-  },
-  toolChevronBox: {
-    width: 20,
-    height: 20,
+  toolChevron: {
+    width: 16,
+    height: 16,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  toolChevronBoxOpen: {
+  toolChevronOpen: {
     transform: [{ rotate: '180deg' }],
   },
   toolChevronArrow: {
-    width: 7,
-    height: 7,
+    width: 6,
+    height: 6,
     borderRightWidth: 1.5,
     borderBottomWidth: 1.5,
-    borderColor: '#555',
+    borderColor: '#444',
     transform: [{ rotate: '45deg' }],
     marginTop: -3,
   },
   toolBody: {
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#252525',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    borderTopColor: '#2a2a2a',
+    padding: 14,
+    paddingTop: 12,
   },
-  toolSectionLabel: {
-    color: '#555',
-    fontSize: 10,
-    fontWeight: '600',
-    letterSpacing: 1,
-    marginBottom: 8,
-  },
-  toolCodeScroll: {
-    maxHeight: 500,
-  },
-  toolCodeBlock: {
-    backgroundColor: 'rgba(255,255,255,0.03)',
+  toolDetailScroll: {
+    maxHeight: 200,
+    backgroundColor: '#0f0f0f',
     borderRadius: 6,
     padding: 10,
   },
-  toolCodeText: {
-    color: '#888',
-    fontSize: 11,
+  toolDetailText: {
+    color: '#777',
+    fontSize: 12,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    lineHeight: 16,
+    lineHeight: 18,
   },
 
   // --- Diff view ---
@@ -516,5 +728,158 @@ const styles = StyleSheet.create({
     borderLeftWidth: StyleSheet.hairlineWidth,
     borderLeftColor: '#353535',
     fontStyle: 'italic',
+  },
+
+  // --- TodoWrite card ---
+  todoCard: {
+    backgroundColor: '#141414',
+    borderRadius: 8,
+    padding: 16,
+    marginVertical: 6,
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+  },
+  todoTitle: {
+    color: '#fafafa',
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 12,
+  },
+  todoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 6,
+    gap: 10,
+  },
+  todoCircle: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    borderWidth: 1.5,
+    borderColor: '#333',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  todoCircleComplete: {
+    backgroundColor: '#fff',
+    borderColor: '#fff',
+  },
+  todoCheck: {
+    width: 10,
+    height: 8,
+    position: 'relative',
+    marginTop: 1,
+  },
+  todoCheckShort: {
+    position: 'absolute',
+    top: 4,
+    left: 0,
+    width: 4,
+    height: 1.5,
+    backgroundColor: '#000',
+    borderRadius: 1,
+    transform: [{ rotate: '45deg' }],
+  },
+  todoCheckLong: {
+    position: 'absolute',
+    top: 3,
+    left: 2,
+    width: 8,
+    height: 1.5,
+    backgroundColor: '#000',
+    borderRadius: 1,
+    transform: [{ rotate: '-45deg' }],
+  },
+  todoText: {
+    color: '#e5e5e5',
+    fontSize: 13,
+    fontWeight: '500',
+    flex: 1,
+  },
+  todoTextComplete: {
+    color: '#555',
+    textDecorationLine: 'line-through',
+  },
+  todoTextPending: {
+    color: '#666',
+  },
+
+  // --- AskUserQuestion card ---
+  questionCard: {
+    backgroundColor: '#141414',
+    borderRadius: 8,
+    padding: 16,
+    marginVertical: 6,
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+  },
+  questionText: {
+    color: '#fafafa',
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 16,
+  },
+  questionOptions: {
+    gap: 8,
+  },
+  questionOption: {
+    borderWidth: 1,
+    borderColor: '#333',
+    borderRadius: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    backgroundColor: 'transparent',
+  },
+  questionOptionSelected: {
+    backgroundColor: '#fff',
+    borderColor: '#fff',
+  },
+  questionOptionLabel: {
+    color: '#e5e5e5',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  questionOptionLabelSelected: {
+    color: '#000',
+    fontWeight: '600',
+  },
+  questionOptionDesc: {
+    color: '#888',
+    fontSize: 12,
+    marginTop: 2,
+    lineHeight: 17,
+  },
+  questionOptionDescSelected: {
+    color: '#444',
+  },
+  questionDismissBtn: {
+    position: 'absolute',
+    top: -8,
+    right: -8,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1,
+  },
+  questionDismissX: {
+    color: '#000',
+    fontSize: 16,
+    lineHeight: 17,
+    fontWeight: '600',
+  },
+  questionSubmitButton: {
+    marginTop: 12,
+    paddingVertical: 10,
+    borderRadius: 6,
+    alignItems: 'center',
+    backgroundColor: '#fff',
+  },
+  questionSubmitText: {
+    color: '#000',
+    fontWeight: '600',
+    fontSize: 14,
   },
 });

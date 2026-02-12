@@ -33,10 +33,14 @@ export function KeyboardScrollView({
   const contentHeightRef = useRef(0);
   const scrollOffset = useRef(0);
 
-  const scrollToEnd = useCallback(() => {
-    setTimeout(() => {
-      scrollRef.current?.scrollToEnd({ animated: true });
-    }, 100);
+  const scrollToEnd = useCallback((animated = true) => {
+    if (animated) {
+      setTimeout(() => {
+        scrollRef.current?.scrollToEnd({ animated: true });
+      }, 100);
+    } else {
+      scrollRef.current?.scrollToEnd({ animated: false });
+    }
   }, []);
 
   // Update near-bottom tracking on every scroll
@@ -67,12 +71,16 @@ export function KeyboardScrollView({
     };
   }, [scrollToEnd]);
 
-  // Only auto-scroll when near the bottom (new messages, not card expand mid-scroll)
+  // Auto-scroll when near the bottom and content grew.
+  // Small growth (card swap, minor re-layout) snaps instantly without animation.
+  // Large growth (new messages) uses a smooth animated scroll.
   const handleContentSizeChange = useCallback(
     (_w: number, h: number) => {
+      const prevHeight = contentHeightRef.current;
       contentHeightRef.current = h;
-      if (isNearBottom.current) {
-        scrollToEnd();
+      const delta = h - prevHeight;
+      if (isNearBottom.current && delta > 0) {
+        scrollToEnd(delta > 150);
       }
     },
     [scrollToEnd]

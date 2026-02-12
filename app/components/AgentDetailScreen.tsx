@@ -49,7 +49,7 @@ interface AgentDetailScreenProps {
   onBack: () => void;
   onSendMessage: (agentId: string, text: string) => void;
   onStopAgent?: (agentId: string) => void;
-  onRespondPermission: (agentId: string, requestId: string, behavior: 'allow' | 'deny') => void;
+  onRespondPermission: (agentId: string, requestId: string, behavior: 'allow' | 'deny', updatedInput?: Record<string, unknown>) => void;
   onSetAutoApprove?: (agentId: string, enabled: boolean) => void;
   onResetPingTimer: () => void;
   onRequestGitStatus?: (agentId: string) => void;
@@ -167,6 +167,124 @@ function PermissionCard({
   );
 }
 
+// Interactive AskUserQuestion permission card — tappable options
+function AskUserQuestionPermissionCard({
+  permission,
+  onSelect,
+  onDeny,
+}: {
+  permission: PermissionRequest;
+  onSelect: (answers: Record<string, string>) => void;
+  onDeny: () => void;
+}) {
+  const questions: Array<{
+    question: string;
+    header?: string;
+    options: Array<{ label: string; description?: string }>;
+    multiSelect?: boolean;
+  }> = Array.isArray(permission.toolInput?.questions) ? (permission.toolInput.questions as any[]) : [];
+
+  const [selections, setSelections] = useState<Record<number, Set<number>>>({});
+
+  if (questions.length === 0) return null;
+
+  const handleTapOption = (qi: number, oi: number, multiSelect?: boolean) => {
+    if (Platform.OS === 'ios') {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+    setSelections(prev => {
+      const updated = { ...prev };
+      if (multiSelect) {
+        const current = new Set(prev[qi] || []);
+        if (current.has(oi)) current.delete(oi);
+        else current.add(oi);
+        updated[qi] = current;
+      } else {
+        // Single select — tap selects and submits
+        updated[qi] = new Set([oi]);
+        // Build answers and submit on next tick
+        const answers: Record<string, string> = {};
+        questions.forEach((q, qIdx) => {
+          const selected = qIdx === qi ? new Set([oi]) : (prev[qIdx] || new Set());
+          const labels = Array.from(selected).map(idx => q.options[idx]?.label).filter(Boolean);
+          if (labels.length > 0) {
+            answers[q.question] = labels.join(', ');
+          }
+        });
+        setTimeout(() => {
+          if (Platform.OS === 'ios') {
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+          }
+          onSelect(answers);
+        }, 150);
+      }
+      return updated;
+    });
+  };
+
+  const handleSubmitMulti = () => {
+    const answers: Record<string, string> = {};
+    questions.forEach((q, qi) => {
+      const selected = selections[qi] || new Set();
+      const labels = Array.from(selected).map(idx => q.options[idx]?.label).filter(Boolean);
+      if (labels.length > 0) {
+        answers[q.question] = labels.join(', ');
+      }
+    });
+    if (Platform.OS === 'ios') {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    }
+    onSelect(answers);
+  };
+
+  const handleDeny = () => {
+    if (Platform.OS === 'ios') {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+    onDeny();
+  };
+
+  const hasMultiSelect = questions.some(q => q.multiSelect);
+
+  return (
+    <View style={styles.permissionCard}>
+      {questions.map((q, qi) => (
+        <View key={qi} style={qi > 0 ? { marginTop: 16 } : undefined}>
+          <Text style={styles.askQuestionText}>{q.question}</Text>
+          <View style={styles.askOptions}>
+            {q.options.map((opt, oi) => {
+              const isSelected = selections[qi]?.has(oi) ?? false;
+              return (
+                <TouchableOpacity
+                  key={oi}
+                  style={[styles.askOption, isSelected && styles.askOptionSelected]}
+                  onPress={() => handleTapOption(qi, oi, q.multiSelect)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[styles.askOptionLabel, isSelected && styles.askOptionLabelSelected]}>{opt.label}</Text>
+                  {opt.description && (
+                    <Text style={[styles.askOptionDesc, isSelected && styles.askOptionDescSelected]}>{opt.description}</Text>
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </View>
+      ))}
+      <View style={styles.permissionButtons}>
+        <TouchableOpacity style={styles.denyButton} onPress={handleDeny} activeOpacity={0.7}>
+          <Text style={styles.denyText}>Dismiss</Text>
+        </TouchableOpacity>
+        {hasMultiSelect && (
+          <TouchableOpacity style={styles.allowButton} onPress={handleSubmitMulti} activeOpacity={0.8}>
+            <Text style={styles.allowText}>Submit</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+    </View>
+  );
+}
+
 // Agent type icon — SVG logo or colored letter fallback
 function AgentIcon({ type, size = 28 }: { type: AgentType; size?: number }) {
   const BRAND: Record<string, { color: string; bg: string; letter: string }> = {
@@ -219,6 +337,7 @@ export function AgentDetailScreen({
   const insets = useSafeAreaInsets();
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [activeTab, setActiveTab] = useState<DetailTab>('chat');
+  const [gitDiffOpen, setGitDiffOpen] = useState(false);
   const tabScrollRef = useRef<ScrollView>(null);
   const INITIAL_MESSAGE_WINDOW = 30;
   const [messageWindow, setMessageWindow] = useState(INITIAL_MESSAGE_WINDOW);
@@ -498,6 +617,10 @@ export function AgentDetailScreen({
 
   const isDisabled = connectionStatus !== 'connected';
   const permissions = Array.from(agent.pendingPermissions.values());
+  const pendingPermissionToolNames = useMemo(
+    () => new Set(permissions.map(p => p.toolName)),
+    [permissions],
+  );
   const modelDisplayName = formatModelName(agent.model, agent.type);
 
   // Build project/branch subtitle
@@ -648,6 +771,7 @@ export function AgentDetailScreen({
             onMomentumScrollEnd={handleTabScroll}
             scrollEventThrottle={16}
             keyboardShouldPersistTaps="handled"
+            scrollEnabled={!gitDiffOpen}
           >
             {/* Chat tab */}
             <View style={[styles.tabPage, activeTab === 'chat' && keyboardHeight > 0 && { paddingBottom: keyboardHeight }]}>
@@ -666,19 +790,26 @@ export function AgentDetailScreen({
                         </Text>
                       </TouchableOpacity>
                     )}
-                    {visibleMessages.map((msg, idx) => (
-                      <MessageBubble
-                        key={`${msg.id}-${idx}`}
-                        message={msg}
-                        toolResultMap={toolResultMap}
-                        animateThinking={agent.status === 'running' && idx === visibleMessages.length - 1}
-                      />
-                    ))}
+                    {visibleMessages.map((msg, idx) => {
+                      // Find pending AskUserQuestion permission to wire up inline interaction
+                      const questionPerm = permissions.find(p => p.toolName === 'AskUserQuestion');
+                      return (
+                        <MessageBubble
+                          key={`${msg.id}-${idx}`}
+                          message={msg}
+                          toolResultMap={toolResultMap}
+                          animateThinking={agent.status === 'running' && idx === visibleMessages.length - 1}
+                          pendingPermissionToolNames={pendingPermissionToolNames}
+                          onRespondQuestion={questionPerm ? (answers, toolInput) => onRespondPermission(agentId, questionPerm.requestId, 'allow', { ...toolInput, answers }) : undefined}
+                          onDenyQuestion={questionPerm ? () => onRespondPermission(agentId, questionPerm.requestId, 'deny') : undefined}
+                        />
+                      );
+                    })}
                   </>
                 )}
 
-                {/* Pending permissions */}
-                {permissions.map((perm) => (
+                {/* Pending permissions (excluding AskUserQuestion, handled inline) */}
+                {permissions.filter(p => p.toolName !== 'AskUserQuestion').map((perm) => (
                   <PermissionCard
                     key={perm.requestId}
                     permission={perm}
@@ -761,6 +892,7 @@ export function AgentDetailScreen({
                 diffLoading={gitDiffLoading}
                 onRequestStatus={handleRequestGitStatus}
                 onRequestDiff={handleRequestGitDiff}
+                onDiffViewChange={setGitDiffOpen}
               />
             </View>
 
@@ -1045,7 +1177,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#141414',
     borderRadius: 8,
     padding: 16,
-    marginVertical: 8,
+    marginTop: -10,
+    marginBottom: 8,
     borderWidth: 1,
     borderColor: '#2a2a2a',
   },
@@ -1093,6 +1226,47 @@ const styles = StyleSheet.create({
     color: '#000',
     fontWeight: '600',
     fontSize: 14,
+  },
+  // AskUserQuestion options
+  askQuestionText: {
+    color: '#fafafa',
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 16,
+  },
+  askOptions: {
+    gap: 8,
+    marginBottom: 12,
+  },
+  askOption: {
+    borderWidth: 1,
+    borderColor: '#333',
+    borderRadius: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    backgroundColor: 'transparent',
+  },
+  askOptionSelected: {
+    backgroundColor: '#fff',
+    borderColor: '#fff',
+  },
+  askOptionLabel: {
+    color: '#e5e5e5',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  askOptionLabelSelected: {
+    color: '#000',
+    fontWeight: '600',
+  },
+  askOptionDesc: {
+    color: '#888',
+    fontSize: 12,
+    marginTop: 2,
+    lineHeight: 17,
+  },
+  askOptionDescSelected: {
+    color: '#444',
   },
   // Diff view
   diffScroll: {

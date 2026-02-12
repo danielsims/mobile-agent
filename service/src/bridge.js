@@ -448,6 +448,10 @@ export class Bridge {
         this._handleGetWorktreeStatus(ws, msg);
         break;
 
+      case 'getWorktreeDiff':
+        this._handleGetWorktreeDiff(ws, msg);
+        break;
+
       case 'getGitLog':
         this._handleGetGitLog(ws, msg);
         break;
@@ -647,8 +651,10 @@ export class Bridge {
     });
 
     // If enabling and there are pending permissions, approve them all now
+    // (but never auto-approve AskUserQuestion — it requires user interaction)
     if (enabled && session.pendingPermissions.size > 0) {
-      for (const [requestId] of session.pendingPermissions) {
+      for (const [requestId, perm] of session.pendingPermissions) {
+        if (perm.toolName === 'AskUserQuestion') continue;
         session.respondToPermission(requestId, 'allow');
       }
     }
@@ -865,6 +871,17 @@ export class Bridge {
       filePath: filePath || null,
       diff,
     });
+  }
+
+  _handleGetWorktreeDiff(ws, msg) {
+    const { worktreePath, filePath } = msg;
+    if (!worktreePath || !filePath) {
+      this._sendTo(ws, 'error', { error: 'worktreePath and filePath required.' });
+      return;
+    }
+
+    const diff = getGitDiff(worktreePath, filePath);
+    this._sendTo(ws, 'worktreeDiff', { worktreePath, filePath, diff });
   }
 
   _handleGetGitLog(ws, msg) {

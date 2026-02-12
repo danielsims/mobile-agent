@@ -60,6 +60,10 @@ function AppInner() {
   const [worktreeGitData, setWorktreeGitData] = useState<Map<string, GitStatusData>>(new Map());
   const [worktreeGitLoading, setWorktreeGitLoading] = useState<Set<string>>(new Set());
 
+  // Worktree-level diff state
+  const [worktreeDiff, setWorktreeDiff] = useState<string | null>(null);
+  const [worktreeDiffLoading, setWorktreeDiffLoading] = useState(false);
+
   // Git log state — per-project commit history
   const [gitLogMap, setGitLogMap] = useState<Map<string, GitLogCommit[]>>(new Map());
   const [gitLogLoading, setGitLogLoading] = useState<Set<string>>(new Set());
@@ -135,11 +139,15 @@ function AppInner() {
       setModelsLoadingType(prev => (prev === agentType ? null : prev));
     }
 
-    // Worktree created — update projects list with new worktrees
+    // Worktree created — update projects list and fetch status for the new worktree
     if (msg.type === 'worktreeCreated' && msg.projectId && msg.worktrees) {
       setProjects(prev => prev.map(p =>
         p.id === msg.projectId ? { ...p, worktrees: msg.worktrees || [] } : p
       ));
+      // Request git status for the newly created worktree so it renders immediately
+      if (msg.worktree?.path) {
+        sendRef.current('getWorktreeStatus', { worktreePath: msg.worktree.path });
+      }
     }
 
     // Worktree removed — update projects list with remaining worktrees
@@ -198,6 +206,12 @@ function AppInner() {
     if (msg.type === 'gitDiff' && msg.agentId) {
       setGitDiff(msg.diff || '');
       setGitDiffLoading(false);
+    }
+
+    // Worktree diff response
+    if (msg.type === 'worktreeDiff') {
+      setWorktreeDiff(msg.diff || '');
+      setWorktreeDiffLoading(false);
     }
 
     // Git log response
@@ -440,8 +454,8 @@ function AppInner() {
     dispatch({ type: 'UPDATE_AGENT_STATUS', agentId, status: 'idle' });
   };
 
-  const handleRespondPermission = (agentId: string, requestId: string, behavior: 'allow' | 'deny') => {
-    send('respondPermission', { agentId, requestId, behavior });
+  const handleRespondPermission = (agentId: string, requestId: string, behavior: 'allow' | 'deny', updatedInput?: Record<string, unknown>) => {
+    send('respondPermission', { agentId, requestId, behavior, updatedInput });
     dispatch({ type: 'REMOVE_PERMISSION', agentId, requestId });
   };
 
@@ -522,6 +536,13 @@ function AppInner() {
       return next;
     });
     send('getWorktreeStatus', { worktreePath });
+  }, [send]);
+
+  // For GitScreen: request worktree-level diff
+  const handleRequestWorktreeDiff = useCallback((worktreePath: string, filePath: string) => {
+    setWorktreeDiffLoading(true);
+    setWorktreeDiff(null);
+    send('getWorktreeDiff', { worktreePath, filePath });
   }, [send]);
 
   // For GitScreen: request status for any agent (tracks loading state)
@@ -699,9 +720,13 @@ function AppInner() {
               onDestroyAgent={handleDestroyAgent}
               onSendMessage={handleSendMessage}
               onCreateAgentForWorktree={handleCreateAgentForWorktree}
+              onCreateWorktree={handleCreateWorktree}
               onRemoveWorktree={handleRemoveWorktree}
               onRefresh={handleRequestProjects}
               onRequestWorktreeStatus={handleRequestWorktreeStatus}
+              onRequestWorktreeDiff={handleRequestWorktreeDiff}
+              worktreeDiff={worktreeDiff}
+              worktreeDiffLoading={worktreeDiffLoading}
               skills={skills}
               gitDataMap={gitDataMap}
               worktreeGitData={worktreeGitData}
