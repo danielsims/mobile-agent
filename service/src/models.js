@@ -226,6 +226,91 @@ async function listCodexModels() {
   }), 10_000, 'codex model discovery');
 }
 
+async function listOpenCodeModels() {
+  const opencodePath = findBinary('OPENCODE_PATH', 'opencode');
+
+  return withTimeout(new Promise((resolve, reject) => {
+    const proc = spawn(opencodePath, ['acp'], {
+      cwd: process.env.HOME,
+      env: { ...process.env },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      try { proc.kill('SIGTERM'); } catch {}
+      setTimeout(() => {
+        try { proc.kill('SIGKILL'); } catch {}
+      }, 1000);
+    };
+
+    let buf = '';
+    let rpcId = 0;
+    const pending = new Map();
+
+    proc.stdout.on('data', (data) => {
+      buf += data.toString();
+      const lines = buf.split('\n');
+      buf = lines.pop() || '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        let msg;
+        try {
+          msg = JSON.parse(trimmed);
+        } catch {
+          continue;
+        }
+        if (msg.id != null && pending.has(msg.id)) {
+          const { resolve: done, reject: fail } = pending.get(msg.id);
+          pending.delete(msg.id);
+          if (msg.error) fail(new Error(msg.error.message || JSON.stringify(msg.error)));
+          else done(msg.result);
+        }
+      }
+    });
+
+    proc.on('error', (err) => {
+      cleanup();
+      reject(err);
+    });
+
+    const request = (method, params = {}) => new Promise((done, fail) => {
+      const id = ++rpcId;
+      pending.set(id, { resolve: done, reject: fail });
+      proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+    });
+
+    (async () => {
+      try {
+        const initResult = await request('initialize', {
+          protocolVersion: 1,
+          clientCapabilities: {},
+          clientInfo: { name: 'mobile-agent', version: '1.0.0' },
+        });
+
+        // ACP doesn't have a model/list method. Check if the init response
+        // or agent capabilities expose available models.
+        const models = [];
+        const agentInfo = initResult?.agentInfo || {};
+
+        // If the agent reports its current model, include it.
+        if (agentInfo.model) {
+          models.push({ value: agentInfo.model, label: agentInfo.model });
+        }
+
+        cleanup();
+        resolve(models);
+      } catch (err) {
+        cleanup();
+        reject(err);
+      }
+    })();
+  }), 10_000, 'opencode model discovery');
+}
+
 export async function listModelsForAgentType(type) {
   const cached = cache.get(type);
   if (cached && (Date.now() - cached.ts) < CACHE_TTL_MS) {
@@ -244,6 +329,17 @@ export async function listModelsForAgentType(type) {
         options.push({
           value: m.value,
           label: formatModelLabel('codex', m.value),
+        });
+      }
+    } else if (type === 'opencode') {
+      const opencode = await listOpenCodeModels();
+      const seen = new Set();
+      for (const m of opencode) {
+        if (seen.has(m.value)) continue;
+        seen.add(m.value);
+        options.push({
+          value: m.value,
+          label: formatModelLabel('opencode', m.value),
         });
       }
     } else if (type === 'claude') {
