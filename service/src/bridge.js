@@ -651,8 +651,10 @@ export class Bridge {
     });
 
     // If enabling and there are pending permissions, approve them all now
+    // (but never auto-approve AskUserQuestion — it requires user interaction)
     if (enabled && session.pendingPermissions.size > 0) {
-      for (const [requestId] of session.pendingPermissions) {
+      for (const [requestId, perm] of session.pendingPermissions) {
+        if (perm.toolName === 'AskUserQuestion') continue;
         session.respondToPermission(requestId, 'allow');
       }
     }

@@ -454,8 +454,8 @@ function AppInner() {
     dispatch({ type: 'UPDATE_AGENT_STATUS', agentId, status: 'idle' });
   };
 
-  const handleRespondPermission = (agentId: string, requestId: string, behavior: 'allow' | 'deny') => {
-    send('respondPermission', { agentId, requestId, behavior });
+  const handleRespondPermission = (agentId: string, requestId: string, behavior: 'allow' | 'deny', updatedInput?: Record<string, unknown>) => {
+    send('respondPermission', { agentId, requestId, behavior, updatedInput });
     dispatch({ type: 'REMOVE_PERMISSION', agentId, requestId });
   };
 
