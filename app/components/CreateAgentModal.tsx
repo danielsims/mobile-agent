@@ -2,7 +2,6 @@ import React, { useState, useCallback } from 'react';
 import {
   View,
   Text,
-  Modal,
   TouchableOpacity,
   TextInput,
   ScrollView,
@@ -14,6 +13,7 @@ import {
   Keyboard,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
+import { BottomModal } from './BottomModal';
 import type { AgentType, Project, ProviderModelOption } from '../state/types';
 
 interface CreateAgentModalProps {
@@ -103,7 +103,8 @@ export function CreateAgentModal({
   const [newBranchName, setNewBranchName] = useState('');
   const [menuProjectId, setMenuProjectId] = useState<string | null>(null);
 
-  const handleClose = useCallback(() => {
+  // Reset internal state — called after the Drawer's close animation completes
+  const handleDrawerClose = useCallback(() => {
     setStep('type');
     setSelectedType('claude');
     setSelectedModel('');
@@ -116,14 +117,14 @@ export function CreateAgentModal({
   const handleTypeSelect = useCallback((type: AgentType) => {
     if (initialProjectId && initialWorktreePath) {
       onSubmit({ agentType: type, projectId: initialProjectId, worktreePath: initialWorktreePath });
-      handleClose();
+      onClose();
       return;
     }
     setSelectedType(type);
     setSelectedModel('');
     onRequestModels(type);
     setStep('model');
-  }, [initialProjectId, initialWorktreePath, onSubmit, handleClose, onRequestModels]);
+  }, [initialProjectId, initialWorktreePath, onSubmit, onClose, onRequestModels]);
 
   const handleModelSelect = useCallback((model: string) => {
     setSelectedModel(model);
@@ -138,16 +139,16 @@ export function CreateAgentModal({
       projectId,
       worktreePath,
     });
-    handleClose();
-  }, [selectedType, selectedModel, onSubmit, handleClose]);
+    onClose();
+  }, [selectedType, selectedModel, onSubmit, onClose]);
 
   const handleNoProject = useCallback(() => {
     onSubmit({
       agentType: selectedType,
       model: selectedModel || undefined,
     });
-    handleClose();
-  }, [selectedType, selectedModel, onSubmit, handleClose]);
+    onClose();
+  }, [selectedType, selectedModel, onSubmit, onClose]);
 
   const handleCreateWorktree = useCallback((projectId: string) => {
     const trimmed = newBranchName.trim();
@@ -185,129 +186,117 @@ export function CreateAgentModal({
     );
   }, [onUnregisterProject]);
 
-  // --- Step 1: Agent Type ---
-  if (step === 'type') {
-    return (
-      <Modal visible={visible} animationType="slide" transparent>
-        <View style={styles.overlay}>
-          <View style={styles.sheet}>
-            <View style={styles.sheetHeader}>
-              <Text style={styles.sheetTitle}>New Agent</Text>
-              <TouchableOpacity onPress={handleClose} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                <Text style={styles.closeButton}>Cancel</Text>
+  const stepTitle = step === 'type' ? 'New Agent'
+    : step === 'model' ? 'Select Model'
+    : 'Select Project';
+
+  const models = modelsByType[selectedType] || [];
+  const modelsLoading = modelsLoadingType === selectedType
+    && (!modelsByType[selectedType] || modelsByType[selectedType].length === 0);
+
+  return (
+    <BottomModal
+      isVisible={visible}
+      onClose={handleDrawerClose}
+      showCloseButton={false}
+    >
+      {/* Header — Back | Title | Cancel */}
+      <View style={styles.sheetHeader}>
+        <View style={styles.headerSide}>
+          {step !== 'type' && (
+            <TouchableOpacity onPress={handleBack} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Text style={styles.backButton}>Back</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+        <Text style={styles.sheetTitle}>{stepTitle}</Text>
+        <View style={[styles.headerSide, styles.headerSideRight]}>
+          <TouchableOpacity onPress={onClose} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Text style={styles.cancelButton}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Step 1: Agent Type */}
+      {step === 'type' && (
+        <>
+          <Text style={styles.stepLabel}>Select agent type</Text>
+
+          {AGENT_TYPES.map(({ type, label, color, bg }) => (
+            <TouchableOpacity
+              key={type}
+              style={styles.typeRow}
+              onPress={() => handleTypeSelect(type)}
+              activeOpacity={0.7}
+            >
+              <View style={[styles.typeIcon, { backgroundColor: bg }]}>
+                {type === 'claude' ? (
+                  <Svg width={16} height={16} viewBox="0 0 24 24">
+                    <Path d={CLAUDE_LOGO_PATH} fill={color} fillRule="nonzero" />
+                  </Svg>
+                ) : type === 'codex' ? (
+                  <Svg width={16} height={16} viewBox="0 0 24 24">
+                    <Path d={OPENAI_LOGO_PATH} fill={color} fillRule="evenodd" />
+                  </Svg>
+                ) : (
+                  <Text style={[styles.typeIconLetter, { color }]}>
+                    {type.charAt(0).toUpperCase()}
+                  </Text>
+                )}
+              </View>
+              <Text style={styles.typeLabel}>{label}</Text>
+              <View style={styles.chevron}>
+                <View style={[styles.chevronArrow, { borderColor: '#444' }]} />
+              </View>
+            </TouchableOpacity>
+          ))}
+        </>
+      )}
+
+      {/* Step 2: Model */}
+      {step === 'model' && (
+        <>
+          <Text style={styles.stepLabel}>Select model</Text>
+
+          {modelsLoading ? (
+            <View style={styles.loadingContainer}>
+              <ActivityIndicator color="#555" size="small" />
+              <Text style={styles.loadingText}>Loading models...</Text>
+            </View>
+          ) : models.length === 0 ? (
+            <View style={styles.emptyContainer}>
+              <Text style={styles.emptyText}>No models found</Text>
+              <TouchableOpacity
+                style={styles.retryButton}
+                onPress={() => onRequestModels(selectedType)}
+                activeOpacity={0.75}
+              >
+                <Text style={styles.retryButtonText}>Retry</Text>
               </TouchableOpacity>
             </View>
-
-            <Text style={styles.stepLabel}>Select agent type</Text>
-
-            {AGENT_TYPES.map(({ type, label, color, bg }) => (
+          ) : (
+            models.map(({ value, label }) => (
               <TouchableOpacity
-                key={type}
+                key={value}
                 style={styles.typeRow}
-                onPress={() => handleTypeSelect(type)}
+                onPress={() => handleModelSelect(value)}
                 activeOpacity={0.7}
               >
-                <View style={[styles.typeIcon, { backgroundColor: bg }]}>
-                  {type === 'claude' ? (
-                    <Svg width={16} height={16} viewBox="0 0 24 24">
-                      <Path d={CLAUDE_LOGO_PATH} fill={color} fillRule="nonzero" />
-                    </Svg>
-                  ) : type === 'codex' ? (
-                    <Svg width={16} height={16} viewBox="0 0 24 24">
-                      <Path d={OPENAI_LOGO_PATH} fill={color} fillRule="evenodd" />
-                    </Svg>
-                  ) : (
-                    <Text style={[styles.typeIconLetter, { color }]}>
-                      {type.charAt(0).toUpperCase()}
-                    </Text>
-                  )}
+                <View style={styles.modelRowInfo}>
+                  <Text style={styles.typeLabel}>{label}</Text>
                 </View>
-                <Text style={styles.typeLabel}>{label}</Text>
                 <View style={styles.chevron}>
                   <View style={[styles.chevronArrow, { borderColor: '#444' }]} />
                 </View>
               </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-      </Modal>
-    );
-  }
+            ))
+          )}
+        </>
+      )}
 
-  // --- Step 2: Model ---
-  if (step === 'model') {
-    const models = modelsByType[selectedType] || [];
-    const loading = modelsLoadingType === selectedType && (!modelsByType[selectedType] || modelsByType[selectedType].length === 0);
-    return (
-      <Modal visible={visible} animationType="slide" transparent>
-        <View style={styles.overlay}>
-          <View style={styles.sheet}>
-            <View style={styles.sheetHeader}>
-              <TouchableOpacity onPress={handleBack} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                <Text style={styles.backButton}>Back</Text>
-              </TouchableOpacity>
-              <Text style={styles.sheetTitle}>Select Model</Text>
-              <TouchableOpacity onPress={handleClose} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                <Text style={styles.closeButton}>Cancel</Text>
-              </TouchableOpacity>
-            </View>
-
-            <Text style={styles.stepLabel}>Select model</Text>
-
-            {loading ? (
-              <View style={styles.loadingContainer}>
-                <ActivityIndicator color="#555" size="small" />
-                <Text style={styles.loadingText}>Loading models...</Text>
-              </View>
-            ) : models.length === 0 ? (
-              <View style={styles.emptyContainer}>
-                <Text style={styles.emptyText}>No models found</Text>
-                <TouchableOpacity
-                  style={styles.retryButton}
-                  onPress={() => onRequestModels(selectedType)}
-                  activeOpacity={0.75}
-                >
-                  <Text style={styles.retryButtonText}>Retry</Text>
-                </TouchableOpacity>
-              </View>
-            ) : (
-              models.map(({ value, label }) => (
-                <TouchableOpacity
-                  key={value}
-                  style={styles.typeRow}
-                  onPress={() => handleModelSelect(value)}
-                  activeOpacity={0.7}
-                >
-                  <View style={styles.modelRowInfo}>
-                    <Text style={styles.typeLabel}>{label}</Text>
-                  </View>
-                  <View style={styles.chevron}>
-                    <View style={[styles.chevronArrow, { borderColor: '#444' }]} />
-                  </View>
-                </TouchableOpacity>
-              ))
-            )}
-          </View>
-        </View>
-      </Modal>
-    );
-  }
-
-  // --- Step 3: Project + Worktree ---
-  return (
-    <Modal visible={visible} animationType="slide" transparent>
-      <View style={styles.overlay}>
-        <View style={[styles.sheet, styles.sheetTall]}>
-          <View style={styles.sheetHeader}>
-            <TouchableOpacity onPress={handleBack} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-              <Text style={styles.backButton}>Back</Text>
-            </TouchableOpacity>
-            <Text style={styles.sheetTitle}>Select Project</Text>
-            <TouchableOpacity onPress={handleClose} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-              <Text style={styles.closeButton}>Cancel</Text>
-            </TouchableOpacity>
-          </View>
-
+      {/* Step 3: Project + Worktree */}
+      {step === 'project' && (
+        <>
           {/* No project option */}
           <TouchableOpacity style={styles.noProjectRow} onPress={handleNoProject} activeOpacity={0.7}>
             <View style={styles.noProjectIcon}>
@@ -412,41 +401,33 @@ export function CreateAgentModal({
             ))}
             </ScrollView>
           )}
-        </View>
-      </View>
-    </Modal>
+        </>
+      )}
+    </BottomModal>
   );
 }
 
 const styles = StyleSheet.create({
-  overlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    justifyContent: 'flex-end',
-  },
-  sheet: {
-    backgroundColor: '#141414',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 40,
-  },
-  sheetTall: {
-    maxHeight: '80%',
-  },
   sheetHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 20,
   },
+  headerSide: {
+    width: 60,
+  },
+  headerSideRight: {
+    alignItems: 'flex-end',
+  },
   sheetTitle: {
     color: '#e5e5e5',
     fontSize: 17,
     fontWeight: '600',
+    flex: 1,
+    textAlign: 'center',
   },
-  closeButton: {
+  cancelButton: {
     color: '#555',
     fontSize: 15,
   },
