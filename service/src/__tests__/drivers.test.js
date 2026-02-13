@@ -986,7 +986,7 @@ describe('CodexDriver', () => {
       expect(Array.isArray(msg.result.contentItems)).toBe(true);
     });
 
-    it('responds to item/tool/requestUserInput with empty answers', () => {
+    it('emits AskUserQuestion tool + permission for item/tool/requestUserInput', () => {
       const proc = createMockProcess();
       driver._process = proc;
 
@@ -1001,10 +1001,43 @@ describe('CodexDriver', () => {
         },
       });
 
-      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
-      expect(msg.jsonrpc).toBe('2.0');
-      expect(msg.id).toBe('srv-input-1');
-      expect(msg.result).toEqual({ answers: {} });
+      const msgEvent = events.find(e => e.event === 'message');
+      expect(msgEvent).toBeTruthy();
+      expect(msgEvent.data.content[0].type).toBe('tool_use');
+      expect(msgEvent.data.content[0].name).toBe('AskUserQuestion');
+      expect(msgEvent.data.content[0].input.questions[0].question).toBe('Continue?');
+
+      const permEvent = events.find(e => e.event === 'permission');
+      expect(permEvent).toBeTruthy();
+      expect(permEvent.data.toolName).toBe('AskUserQuestion');
+      expect(permEvent.data.requestId).toBeTruthy();
+
+      expect(proc.stdin.write).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Message handling (plan updates)', () => {
+    it('emits TodoWrite tool_use with normalized todos from turn/plan/updated', () => {
+      driver._handleMessage({
+        method: 'turn/plan/updated',
+        params: {
+          steps: [
+            { step: 'Fetch repository metadata', status: 'completed' },
+            { step: 'Update Codex driver', status: 'in_progress', activeForm: 'Updating Codex driver' },
+            { step: 'Verify with tests', status: 'pending' },
+          ],
+        },
+      });
+
+      const msgEvent = events.find(e => e.event === 'message');
+      expect(msgEvent).toBeTruthy();
+      expect(msgEvent.data.content[0].type).toBe('tool_use');
+      expect(msgEvent.data.content[0].name).toBe('TodoWrite');
+      expect(msgEvent.data.content[0].input.todos).toEqual([
+        { content: 'Fetch repository metadata', status: 'completed' },
+        { content: 'Update Codex driver', status: 'in_progress', activeForm: 'Updating Codex driver' },
+        { content: 'Verify with tests', status: 'pending' },
+      ]);
     });
   });
 
@@ -1223,6 +1256,71 @@ describe('CodexDriver', () => {
       const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
       expect(msg.id).toBe('srv-456');
       expect(msg.result.decision).toBe('decline');
+    });
+
+    it('responds to AskUserQuestion permissions with answers payload', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+
+      driver._handleMessage({
+        id: 'srv-question-1',
+        method: 'item/tool/requestUserInput',
+        params: {
+          itemId: 'question-1',
+          questions: [
+            {
+              id: 'q1',
+              question: 'Which mode?',
+              options: [{ label: 'Tool-native' }, { label: 'Markdown' }],
+            },
+          ],
+        },
+      });
+
+      const permEvent = events.find(e => e.event === 'permission');
+      expect(permEvent).toBeTruthy();
+
+      await driver.respondPermission(permEvent.data.requestId, 'allow', {
+        answers: {
+          'Which mode?': 'Tool-native',
+        },
+      });
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.id).toBe('srv-question-1');
+      expect(msg.result).toEqual({
+        answers: {
+          q1: 'Tool-native',
+        },
+      });
+    });
+
+    it('returns empty answers when AskUserQuestion permission is denied', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+
+      driver._handleMessage({
+        id: 'srv-question-2',
+        method: 'item/tool/requestUserInput',
+        params: {
+          itemId: 'question-2',
+          questions: [
+            {
+              id: 'q1',
+              question: 'Proceed?',
+              options: [{ label: 'Yes' }, { label: 'No' }],
+            },
+          ],
+        },
+      });
+
+      const permEvent = events.find(e => e.event === 'permission');
+      expect(permEvent).toBeTruthy();
+      await driver.respondPermission(permEvent.data.requestId, 'deny');
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.id).toBe('srv-question-2');
+      expect(msg.result).toEqual({ answers: {} });
     });
   });
 
@@ -1745,6 +1843,186 @@ describe('OpenCodeDriver', () => {
       expect(msg.id).toBe('perm-3');
       expect(msg.result.optionId).toBe('allow-once');
     });
+
+    it('does not auto-approve AskUserQuestion permissions in bypass mode', () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+      driver._autoApprovePermissions = true;
+
+      driver._handleMessage({
+        id: 'perm-q1',
+        method: 'session/request_permission',
+        params: {
+          sessionId: 'sess-1',
+          title: 'Tool Permission',
+          toolCall: {
+            name: 'request_user_input',
+            input: {
+              questions: [
+                {
+                  question: 'Continue?',
+                  options: [{ label: 'Yes' }, { label: 'No' }],
+                },
+              ],
+            },
+          },
+          options: [
+            { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+            { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+          ],
+        },
+      });
+
+      const permEvent = events.find(e => e.event === 'permission');
+      expect(permEvent).toBeTruthy();
+      expect(permEvent.data.toolName).toBe('AskUserQuestion');
+      expect(permEvent.data.toolInput.questions[0].question).toBe('Continue?');
+      expect(proc.stdin.write).not.toHaveBeenCalled();
+    });
+
+    it('emits question permission from tool_call_update with questions', () => {
+      // Simulates ACP flow: tool_call arrives with empty rawInput,
+      // then tool_call_update delivers the actual questions.
+      driver._turnActive = true;
+
+      // Initial tool_call — empty rawInput, should NOT emit permission
+      driver._handleSessionUpdate({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tc-q1',
+        title: 'question',
+        status: 'pending',
+        rawInput: {},
+      });
+
+      let permEvent = events.find(e => e.event === 'permission');
+      expect(permEvent).toBeUndefined();
+
+      // tool_call_update — now has questions, should emit permission
+      driver._handleSessionUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tc-q1',
+        title: 'question',
+        status: 'in_progress',
+        rawInput: {
+          questions: [
+            { question: 'Pick a color?', options: [{ label: 'Red' }, { label: 'Blue' }] },
+          ],
+        },
+      });
+
+      permEvent = events.find(e => e.event === 'permission');
+      expect(permEvent).toBeTruthy();
+      expect(permEvent.data.toolName).toBe('AskUserQuestion');
+      expect(permEvent.data.toolInput.questions).toHaveLength(1);
+      expect(permEvent.data.toolInput.questions[0].question).toBe('Pick a color?');
+    });
+
+    it('restarts process and emits questionAnswered when user answers question without RPC', async () => {
+      const proc = createMockProcess();
+      proc.kill = vi.fn();
+      proc.removeAllListeners = vi.fn();
+      proc.stdout.removeAllListeners = vi.fn();
+      proc.stderr.removeAllListeners = vi.fn();
+      driver._process = proc;
+      driver._turnActive = true;
+      driver._sessionId = 'sess-123';
+      driver._cwd = '/tmp/test';
+      driver._agentId = 'agent-q-test';
+
+      // Emit question permission from tool_call_update
+      driver._handleSessionUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tc-q2',
+        title: 'question',
+        status: 'in_progress',
+        rawInput: {
+          questions: [
+            { question: 'Continue?', options: [{ label: 'Yes' }, { label: 'No' }] },
+          ],
+        },
+      });
+
+      const permEvent = events.find(e => e.event === 'permission');
+      expect(permEvent).toBeTruthy();
+
+      // Mock start() since we can't actually spawn opencode in tests
+      const startCalled = vi.fn();
+      const originalStart = driver.start.bind(driver);
+      driver.start = async (agentId, opts) => {
+        startCalled(agentId, opts);
+        driver._ready = true;
+        driver._sessionId = opts.resumeSessionId;
+      };
+
+      // Listen for questionAnswered event
+      const questionAnsweredPromise = new Promise(resolve => {
+        driver.on('questionAnswered', resolve);
+      });
+
+      // User answers — no RPC available, triggers restart
+      driver.respondPermission(permEvent.data.requestId, 'allow', {
+        questions: [{ question: 'Continue?', options: [{ label: 'Yes' }, { label: 'No' }] }],
+        answers: { 'Continue?': 'Yes' },
+      });
+
+      // Wait for the restart (includes 300ms delay + start)
+      const { text } = await questionAnsweredPromise;
+
+      // Process was killed
+      expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
+
+      // start() was called with session resume
+      expect(startCalled).toHaveBeenCalledWith('agent-q-test', expect.objectContaining({
+        cwd: '/tmp/test',
+        resumeSessionId: 'sess-123',
+      }));
+
+      // Answer was emitted
+      expect(text).toContain('Yes');
+    });
+
+    it('responds immediately when RPC arrives before user answers', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+      driver._turnActive = true;
+
+      // Emit question permission from tool_call_update
+      driver._handleSessionUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tc-q3',
+        title: 'question',
+        status: 'in_progress',
+        rawInput: {
+          questions: [
+            { question: 'Mode?', options: [{ label: 'Fast' }, { label: 'Careful' }] },
+          ],
+        },
+      });
+
+      const permEvent = events.find(e => e.event === 'permission');
+
+      // session/request_permission arrives BEFORE user answers
+      driver._handleMessage({
+        id: 'rpc-q3',
+        method: 'session/request_permission',
+        params: {
+          toolCall: { name: 'question', input: { questions: [{ question: 'Mode?' }] } },
+          options: [{ optionId: 'allow-once' }],
+        },
+      });
+
+      // Not responded yet — waiting for user
+      expect(proc.stdin.write).not.toHaveBeenCalled();
+
+      // User answers
+      await driver.respondPermission(permEvent.data.requestId, 'allow', {});
+
+      // Now should have responded
+      expect(proc.stdin.write).toHaveBeenCalled();
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.id).toBe('rpc-q3');
+      expect(msg.result.optionId).toBe('allow-once');
+    });
   });
 
   describe('Message handling (agent→client reverse RPC)', () => {
@@ -1940,23 +2218,18 @@ describe('OpenCodeDriver', () => {
   });
 
   describe('Interrupt', () => {
-    it('sends session/cancel on interrupt', async () => {
+    it('sends SIGINT to process on interrupt', async () => {
       const proc = createMockProcess();
       driver._process = proc;
       driver._sessionId = 'sess-123';
 
-      const interruptPromise = driver.interrupt();
+      await driver.interrupt();
 
-      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
-      expect(msg.method).toBe('session/cancel');
-      expect(msg.params.sessionId).toBe('sess-123');
-
-      driver._handleMessage({ id: msg.id, result: {} });
-      await interruptPromise;
+      expect(proc.kill).toHaveBeenCalledWith('SIGINT');
     });
 
-    it('handles interrupt when no active session', async () => {
-      driver._sessionId = null;
+    it('handles interrupt when no process exists', async () => {
+      driver._process = null;
       // Should not throw
       await driver.interrupt();
     });
