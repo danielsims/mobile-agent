@@ -60,9 +60,15 @@ export class CodexDriver extends BaseDriver {
     this._activeToolUseIds = new Set();  // tool items currently in progress (web search, etc.)
     this._lastReasoningText = '';
     this._lastReasoningAt = 0;
+    this._lastPlanSnapshot = '';
 
     // Track pending approval requests keyed by our UI requestId.
-    // entry: { rpcRequestId?: string|number, itemId?: string }
+    // entry: {
+    //   rpcRequestId?: string|number,
+    //   itemId?: string,
+    //   responseKind?: 'decision' | 'answers',
+    //   questionPromptToId?: Record<string, string>,
+    // }
     this._approvalRequests = new Map();
   }
 
@@ -248,6 +254,7 @@ export class CodexDriver extends BaseDriver {
       case 'turn/started': {
         this._turnId = params.turnId || params.turn?.id || null;
         this._currentStreamContent = '';
+        this._lastPlanSnapshot = '';
         this.emit('status', { status: 'running' });
         break;
       }
@@ -378,7 +385,21 @@ export class CodexDriver extends BaseDriver {
       }
 
       case 'turn/plan/updated': {
-        // Agent plan — could show in UI
+        const todos = this._extractPlanTodos(params);
+        if (todos.length === 0) break;
+
+        const snapshot = JSON.stringify(todos);
+        if (snapshot === this._lastPlanSnapshot) break;
+        this._lastPlanSnapshot = snapshot;
+
+        this.emit('message', {
+          content: [{
+            type: 'tool_use',
+            id: `plan-${this._turnId || uuidv4()}`,
+            name: 'TodoWrite',
+            input: { todos },
+          }],
+        });
         break;
       }
 
@@ -404,11 +425,32 @@ export class CodexDriver extends BaseDriver {
       }
 
       case 'item/tool/requestUserInput': {
-        // Experimental request-user-input flow is not wired in mobile UI yet.
-        // Reply with an empty answer map so the server can continue gracefully.
-        if (isServerRequest) {
-          this._rpcRespond(msg.id, { answers: {} });
-        }
+        const requestId = uuidv4();
+        const itemId = params.itemId || params.item?.id || params.id || null;
+        const toolUseId = itemId || `ask-user-question-${requestId}`;
+        const { questions, promptToId } = this._extractQuestionPromptInput(params);
+        this._approvalRequests.set(requestId, {
+          rpcRequestId: isServerRequest ? msg.id : null,
+          itemId,
+          responseKind: 'answers',
+          questionPromptToId: promptToId,
+        });
+
+        this.emit('message', {
+          content: [{
+            type: 'tool_use',
+            id: toolUseId,
+            name: 'AskUserQuestion',
+            input: { questions },
+          }],
+        });
+
+        this.emit('permission', {
+          requestId,
+          toolName: 'AskUserQuestion',
+          toolInput: { questions },
+        });
+        this.emit('status', { status: 'awaiting_permission' });
         break;
       }
 
@@ -573,18 +615,33 @@ export class CodexDriver extends BaseDriver {
     this._approvalRequests.delete(requestId);
 
     const decision = behavior === 'allow' ? 'accept' : 'decline';
+    const responseKind = pending.responseKind || 'decision';
+    const normalizedAnswers = this._normalizeQuestionAnswers(updatedInput?.answers, pending.questionPromptToId);
 
     try {
       // Current Codex app-server protocol sends approval prompts as server
       // requests (with msg.id) and expects a JSON-RPC response with the same id.
       if (pending.rpcRequestId != null) {
-        this._rpcRespond(pending.rpcRequestId, { decision });
+        if (responseKind === 'answers') {
+          this._rpcRespond(pending.rpcRequestId, {
+            answers: behavior === 'allow' ? normalizedAnswers : {},
+          });
+        } else {
+          this._rpcRespond(pending.rpcRequestId, { decision });
+        }
       } else if (pending.itemId) {
         // Legacy fallback for older app-server variants.
-        await this._rpcRequest('item/approve', {
-          itemId: pending.itemId,
-          decision,
-        });
+        if (responseKind === 'answers') {
+          await this._rpcRequest('item/tool/requestUserInput/response', {
+            itemId: pending.itemId,
+            answers: behavior === 'allow' ? normalizedAnswers : {},
+          });
+        } else {
+          await this._rpcRequest('item/approve', {
+            itemId: pending.itemId,
+            decision,
+          });
+        }
       } else {
         console.log(`[Codex ${this._agentId?.slice(0, 8)}] Missing approval routing metadata for requestId: ${requestId}`);
       }
@@ -807,6 +864,173 @@ export class CodexDriver extends BaseDriver {
       return 'Web search completed.';
     }
     return lines.join('\n');
+  }
+
+  _extractPlanTodos(params) {
+    const containers = [
+      params,
+      params?.turn,
+      params?.plan,
+      params?.update,
+      params?.payload,
+    ];
+
+    let rawTodos = null;
+    for (const container of containers) {
+      if (!container) continue;
+      if (Array.isArray(container)) {
+        rawTodos = container;
+        break;
+      }
+      if (typeof container !== 'object') continue;
+      const candidateKeys = ['todos', 'steps', 'items', 'tasks', 'plan', 'entries'];
+      for (const key of candidateKeys) {
+        if (Array.isArray(container[key])) {
+          rawTodos = container[key];
+          break;
+        }
+      }
+      if (rawTodos) break;
+    }
+
+    if (!Array.isArray(rawTodos)) return [];
+
+    return rawTodos
+      .map((todo) => this._normalizePlanTodo(todo))
+      .filter(Boolean);
+  }
+
+  _normalizePlanTodo(todo) {
+    if (typeof todo === 'string') {
+      const content = todo.trim();
+      if (!content) return null;
+      return { content, status: 'pending' };
+    }
+
+    if (!todo || typeof todo !== 'object') return null;
+
+    const content =
+      todo.content ||
+      todo.step ||
+      todo.text ||
+      todo.title ||
+      todo.label ||
+      todo.task ||
+      todo.description ||
+      '';
+    if (typeof content !== 'string' || !content.trim()) return null;
+
+    const rawStatus = String(todo.status || todo.state || todo.phase || '').toLowerCase();
+    let status = 'pending';
+    if (/completed|complete|done|finished|success/.test(rawStatus)) {
+      status = 'completed';
+    } else if (/in_progress|inprogress|active|running|working|progress/.test(rawStatus)) {
+      status = 'in_progress';
+    }
+
+    const normalized = { content: content.trim(), status };
+    const activeForm = typeof todo.activeForm === 'string'
+      ? todo.activeForm
+      : (typeof todo.active_form === 'string' ? todo.active_form : '');
+    if (activeForm) normalized.activeForm = activeForm;
+    return normalized;
+  }
+
+  _extractQuestionPromptInput(params) {
+    const rawQuestions = Array.isArray(params?.questions)
+      ? params.questions
+      : (Array.isArray(params?.input?.questions) ? params.input.questions : []);
+    const promptToId = {};
+
+    const questions = rawQuestions
+      .map((q) => {
+        if (!q) return null;
+        if (typeof q === 'string') {
+          const question = q.trim();
+          if (!question) return null;
+          return { question, options: [] };
+        }
+
+        if (typeof q !== 'object') return null;
+
+        const question =
+          (typeof q.question === 'string' && q.question) ||
+          (typeof q.prompt === 'string' && q.prompt) ||
+          (typeof q.text === 'string' && q.text) ||
+          '';
+        if (!question.trim()) return null;
+
+        const rawOptions = Array.isArray(q.options)
+          ? q.options
+          : (Array.isArray(q.choices) ? q.choices : []);
+        const options = rawOptions
+          .map((option) => {
+            if (!option) return null;
+            if (typeof option === 'string') {
+              const label = option.trim();
+              return label ? { label } : null;
+            }
+            if (typeof option !== 'object') return null;
+            const label =
+              (typeof option.label === 'string' && option.label) ||
+              (typeof option.text === 'string' && option.text) ||
+              (typeof option.title === 'string' && option.title) ||
+              (typeof option.value === 'string' && option.value) ||
+              '';
+            if (!label.trim()) return null;
+            const normalized = { label: label.trim() };
+            if (typeof option.description === 'string' && option.description.trim()) {
+              normalized.description = option.description.trim();
+            }
+            return normalized;
+          })
+          .filter(Boolean);
+
+        const normalizedQuestion = {
+          question: question.trim(),
+          options,
+        };
+        if (typeof q.header === 'string' && q.header.trim()) {
+          normalizedQuestion.header = q.header.trim();
+        }
+        if (typeof q.multiSelect === 'boolean') {
+          normalizedQuestion.multiSelect = q.multiSelect;
+        } else if (typeof q.multi_select === 'boolean') {
+          normalizedQuestion.multiSelect = q.multi_select;
+        } else if (typeof q.multiple === 'boolean') {
+          normalizedQuestion.multiSelect = q.multiple;
+        }
+
+        if (typeof q.id === 'string' && q.id.trim()) {
+          promptToId[normalizedQuestion.question] = q.id.trim();
+        }
+
+        return normalizedQuestion;
+      })
+      .filter(Boolean);
+
+    if (questions.length === 0 && typeof params?.prompt === 'string' && params.prompt.trim()) {
+      questions.push({
+        question: params.prompt.trim(),
+        options: [],
+      });
+    }
+
+    return { questions, promptToId };
+  }
+
+  _normalizeQuestionAnswers(answers, promptToId = {}) {
+    if (!answers || typeof answers !== 'object') return {};
+
+    const normalized = {};
+    for (const [prompt, value] of Object.entries(answers)) {
+      if (typeof value !== 'string' || !value.trim()) continue;
+      const mappedKey = typeof promptToId[prompt] === 'string' && promptToId[prompt].trim()
+        ? promptToId[prompt].trim()
+        : prompt;
+      normalized[mappedKey] = value.trim();
+    }
+    return normalized;
   }
 
   _buildTurnSandboxPolicy() {
