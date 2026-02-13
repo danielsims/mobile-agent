@@ -5,6 +5,7 @@ export type ToolRendererKind = 'default' | 'todo' | 'question';
 const TOOL_NAME_ALIASES: Record<string, string> = {
   askuserquestion: 'question',
   question: 'question',
+  requestuserinput: 'question',
   todowrite: 'todowrite',
   todoread: 'todoread',
 };
