@@ -8,6 +8,7 @@ const cache = new Map(); // type -> { ts, models }
 function findBinary(envVar, localName) {
   const paths = [
     process.env[envVar],
+    `${process.env.HOME}/.${localName}/bin/${localName}`,
     `${process.env.HOME}/.local/bin/${localName}`,
     `/usr/local/bin/${localName}`,
   ].filter(Boolean);
@@ -230,84 +231,59 @@ async function listOpenCodeModels() {
   const opencodePath = findBinary('OPENCODE_PATH', 'opencode');
 
   return withTimeout(new Promise((resolve, reject) => {
-    const proc = spawn(opencodePath, ['acp'], {
+    const proc = spawn(opencodePath, ['models'], {
       cwd: process.env.HOME,
       env: { ...process.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-    let cleaned = false;
-    const cleanup = () => {
-      if (cleaned) return;
-      cleaned = true;
-      try { proc.kill('SIGTERM'); } catch {}
-      setTimeout(() => {
-        try { proc.kill('SIGKILL'); } catch {}
-      }, 1000);
-    };
-
-    let buf = '';
-    let rpcId = 0;
-    const pending = new Map();
+    let stdout = '';
+    let stderr = '';
 
     proc.stdout.on('data', (data) => {
-      buf += data.toString();
-      const lines = buf.split('\n');
-      buf = lines.pop() || '';
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        let msg;
-        try {
-          msg = JSON.parse(trimmed);
-        } catch {
-          continue;
-        }
-        if (msg.id != null && pending.has(msg.id)) {
-          const { resolve: done, reject: fail } = pending.get(msg.id);
-          pending.delete(msg.id);
-          if (msg.error) fail(new Error(msg.error.message || JSON.stringify(msg.error)));
-          else done(msg.result);
-        }
-      }
+      stdout += data.toString();
+    });
+
+    proc.stderr.on('data', (data) => {
+      stderr += data.toString();
     });
 
     proc.on('error', (err) => {
-      cleanup();
       reject(err);
     });
 
-    const request = (method, params = {}) => new Promise((done, fail) => {
-      const id = ++rpcId;
-      pending.set(id, { resolve: done, reject: fail });
-      proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
-    });
-
-    (async () => {
-      try {
-        const initResult = await request('initialize', {
-          protocolVersion: 1,
-          clientCapabilities: {},
-          clientInfo: { name: 'mobile-agent', version: '1.0.0' },
-        });
-
-        // ACP doesn't have a model/list method. Check if the init response
-        // or agent capabilities expose available models.
-        const models = [];
-        const agentInfo = initResult?.agentInfo || {};
-
-        // If the agent reports its current model, include it.
-        if (agentInfo.model) {
-          models.push({ value: agentInfo.model, label: agentInfo.model });
-        }
-
-        cleanup();
-        resolve(models);
-      } catch (err) {
-        cleanup();
-        reject(err);
+    proc.on('exit', (code) => {
+      if (code !== 0) {
+        reject(new Error(`opencode models exited with code ${code}: ${stderr}`));
+        return;
       }
-    })();
+
+      // Try to parse as JSON first (newer versions may output JSON)
+      let models = [];
+      try {
+        const parsed = JSON.parse(stdout);
+        if (Array.isArray(parsed)) {
+          models = parsed.map(m => ({
+            value: typeof m === 'string' ? m : (m.id || m.model || m.value || JSON.stringify(m)),
+            label: typeof m === 'string' ? formatModelLabel('opencode', m) : (m.label || m.name || m.id || m.model || JSON.stringify(m)),
+          }));
+        } else if (parsed.models) {
+          models = parsed.models.map(m => ({
+            value: m.id || m.model || m.value || JSON.stringify(m),
+            label: m.label || m.name || m.id || m.model || JSON.stringify(m),
+          }));
+        }
+      } catch {
+        // Fall back to line-by-line parsing
+        const lines = stdout.split('\n').map(l => l.trim()).filter(Boolean);
+        models = lines.map(modelId => ({
+          value: modelId,
+          label: formatModelLabel('opencode', modelId),
+        }));
+      }
+
+      resolve(models);
+    });
   }), 10_000, 'opencode model discovery');
 }
 
