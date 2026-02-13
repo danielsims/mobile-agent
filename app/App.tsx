@@ -236,7 +236,7 @@ function AppInner() {
 
     // Skill search results
     if (msg.type === 'skillSearchResults') {
-      setSkillSearchResults((msg.searchResults || []).map((r) => ({
+      setSkillSearchResults((msg.results || []).map((r) => ({
         name: r.name || '',
         description: r.description || '',
         packageRef: r.packageRef || '',
