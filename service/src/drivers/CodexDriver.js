@@ -531,7 +531,6 @@ export class CodexDriver extends BaseDriver {
   }
 
   async sendPrompt(text, sessionId, imageData) {
-    // TODO: Add image support for Codex driver
     if (!this._ready || !this._threadId) {
       console.log(`[Codex ${this._agentId?.slice(0, 8)}] Not ready, cannot send prompt`);
       this.emit('error', { message: 'Codex not ready' });
@@ -540,10 +539,21 @@ export class CodexDriver extends BaseDriver {
 
     this.emit('status', { status: 'running' });
 
+    // Build input items — add image block when provided
+    const input = [{ type: 'text', text }];
+    if (imageData?.base64) {
+      const mimeType = imageData.mimeType || 'image/png';
+      console.log(`[Codex ${this._agentId?.slice(0, 8)}] Image: ${mimeType}, base64 length=${imageData.base64.length}`);
+      input.push({
+        type: 'image',
+        url: `data:${mimeType};base64,${imageData.base64}`,
+      });
+    }
+
     try {
       await this._rpcRequest('turn/start', {
         threadId: this._threadId,
-        input: [{ type: 'text', text }],
+        input,
         approvalPolicy: this._approvalPolicy,
         sandboxPolicy: this._buildTurnSandboxPolicy(),
       });

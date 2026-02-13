@@ -483,6 +483,58 @@ describe('ClaudeDriver', () => {
       expect(sent.session_id).toBe('sess-123');
     });
 
+    it('sends prompt with image as content blocks', async () => {
+      const ws = createMockWebSocket();
+      driver.attachSocket(ws);
+
+      const imageData = {
+        base64: 'dGVzdA==',
+        mimeType: 'image/png',
+      };
+      await driver.sendPrompt('What is this?', 'sess-123', imageData);
+
+      const sent = JSON.parse(ws.send.mock.calls[0][0].trim());
+      expect(sent.type).toBe('user');
+      expect(sent.message.role).toBe('user');
+      expect(sent.message.content).toEqual([
+        { type: 'text', text: 'What is this?' },
+        {
+          type: 'image',
+          source: { type: 'base64', media_type: 'image/png', data: 'dGVzdA==' },
+        },
+      ]);
+    });
+
+    it('sends plain text content when no image provided', async () => {
+      const ws = createMockWebSocket();
+      driver.attachSocket(ws);
+
+      await driver.sendPrompt('Hello', 'sess-123', null);
+
+      const sent = JSON.parse(ws.send.mock.calls[0][0].trim());
+      expect(sent.message.content).toBe('Hello');
+    });
+
+    it('queues prompts with image when socket not ready', async () => {
+      const imageData = {
+        base64: 'dGVzdA==',
+        mimeType: 'image/jpeg',
+      };
+      await driver.sendPrompt('Describe this', 'sess-123', imageData);
+
+      const ws = createMockWebSocket();
+      driver.attachSocket(ws);
+
+      const sent = JSON.parse(ws.send.mock.calls[0][0].trim());
+      expect(sent.message.content).toEqual([
+        { type: 'text', text: 'Describe this' },
+        {
+          type: 'image',
+          source: { type: 'base64', media_type: 'image/jpeg', data: 'dGVzdA==' },
+        },
+      ]);
+    });
+
     it('queues prompts when socket not ready', async () => {
       // Don't attach a socket
       await driver.sendPrompt('Hello Claude', 'sess-123');
@@ -1035,6 +1087,44 @@ describe('CodexDriver', () => {
       });
 
       // Resolve the request
+      driver._handleMessage({ id: msg.id, result: {} });
+      await sendPromise;
+    });
+
+    it('sends turn/start with image in input array', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+      driver._ready = true;
+      driver._threadId = 'thread-123';
+
+      const imageData = {
+        base64: 'dGVzdA==',
+        mimeType: 'image/png',
+      };
+      const sendPromise = driver.sendPrompt('What is this?', 'thread-123', imageData);
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.method).toBe('turn/start');
+      expect(msg.params.input).toEqual([
+        { type: 'text', text: 'What is this?' },
+        { type: 'image', url: 'data:image/png;base64,dGVzdA==' },
+      ]);
+
+      driver._handleMessage({ id: msg.id, result: {} });
+      await sendPromise;
+    });
+
+    it('sends turn/start with text only when no image', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+      driver._ready = true;
+      driver._threadId = 'thread-123';
+
+      const sendPromise = driver.sendPrompt('Hello', 'thread-123', null);
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.params.input).toEqual([{ type: 'text', text: 'Hello' }]);
+
       driver._handleMessage({ id: msg.id, result: {} });
       await sendPromise;
     });

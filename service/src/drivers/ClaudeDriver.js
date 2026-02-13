@@ -245,10 +245,27 @@ export class ClaudeDriver extends BaseDriver {
   }
 
   async sendPrompt(text, sessionId, imageData) {
-    // TODO: Add image support for Claude driver
+    // Build content — array of blocks when image is present, plain string otherwise.
+    let content = text;
+    if (imageData?.base64) {
+      const mimeType = imageData.mimeType || 'image/png';
+      console.log(`[Claude ${this._agentId?.slice(0, 8)}] Image: ${mimeType}, base64 length=${imageData.base64.length}`);
+      content = [
+        { type: 'text', text },
+        {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: mimeType,
+            data: imageData.base64,
+          },
+        },
+      ];
+    }
+
     const message = {
       type: 'user',
-      message: { role: 'user', content: text },
+      message: { role: 'user', content },
       session_id: sessionId || '',
     };
 
@@ -256,7 +273,7 @@ export class ClaudeDriver extends BaseDriver {
       this._send(message);
     } else {
       console.log(`[Claude ${this._agentId?.slice(0, 8)}] CLI not connected, queuing`);
-      this._promptQueue.push(text);
+      this._promptQueue.push({ text, imageData });
     }
   }
 
@@ -338,10 +355,29 @@ export class ClaudeDriver extends BaseDriver {
 
   _flushPromptQueue() {
     while (this._promptQueue.length > 0 && this._cliSocket?.readyState === 1) {
-      const text = this._promptQueue.shift();
+      const queued = this._promptQueue.shift();
+      // Support both legacy string format and new { text, imageData } format
+      const text = typeof queued === 'string' ? queued : queued.text;
+      const imageData = typeof queued === 'object' ? queued.imageData : null;
+
+      let content = text;
+      if (imageData?.base64) {
+        content = [
+          { type: 'text', text },
+          {
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: imageData.mimeType || 'image/png',
+              data: imageData.base64,
+            },
+          },
+        ];
+      }
+
       this._send({
         type: 'user',
-        message: { role: 'user', content: text },
+        message: { role: 'user', content },
         session_id: '',
       });
     }
