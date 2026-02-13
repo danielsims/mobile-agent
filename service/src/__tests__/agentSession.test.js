@@ -484,6 +484,23 @@ describe('AgentSession', () => {
       session.sendPrompt('Second message');
       expect(session.sessionName).toBe('First message');
     });
+
+    it('passes image data to driver and stores image metadata in history', () => {
+      const sendSpy = vi.spyOn(session.driver, 'sendPrompt').mockResolvedValue(undefined);
+      const imageData = {
+        uri: 'file:///tmp/photo.jpg',
+        base64: 'ZmFrZQ==',
+        mimeType: 'image/jpeg',
+      };
+
+      session.sendPrompt('Describe this image', null, imageData);
+
+      expect(sendSpy).toHaveBeenCalledWith('Describe this image', null, imageData);
+      expect(session.messageHistory[0].imageData).toEqual({
+        uri: 'file:///tmp/photo.jpg',
+        mimeType: 'image/jpeg',
+      });
+    });
   });
 
   describe('respondToPermission()', () => {

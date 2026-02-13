@@ -204,31 +204,71 @@ export function agentReducer(state: AppState, action: AgentAction): AppState {
 
     case 'MERGE_TOOL_RESULTS': {
       return updateAgent(state, action.agentId, (agent) => {
-        // Find the most recent assistant message and append tool_result blocks
-        // so that ToolUseCard can show them as completed.
+        const msgs = [...agent.messages];
+
+        const findLatestStructuredAssistant = () => {
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            const msg = msgs[i];
+            if (msg.type === 'assistant' && Array.isArray(msg.content)) return i;
+          }
+          return -1;
+        };
+
+        const findMatchingToolUseMessage = (toolUseId: string) => {
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            const msg = msgs[i];
+            if (msg.type !== 'assistant' || !Array.isArray(msg.content)) continue;
+            const hasMatch = msg.content.some(
+              b => b.type === 'tool_use' && 'id' in b && b.id === toolUseId,
+            );
+            if (hasMatch) return i;
+          }
+          return -1;
+        };
+
+        for (const r of action.results) {
+          const matchIdx = findMatchingToolUseMessage(r.toolUseId);
+          const targetIdx = matchIdx >= 0 ? matchIdx : findLatestStructuredAssistant();
+          if (targetIdx < 0) continue;
+
+          const target = msgs[targetIdx];
+          if (!Array.isArray(target.content)) continue;
+          const updated = [...target.content];
+          const exists = updated.some(
+            b => b.type === 'tool_result' && 'toolUseId' in b && b.toolUseId === r.toolUseId,
+          );
+
+          if (!exists) {
+            updated.push({
+              type: 'tool_result',
+              toolUseId: r.toolUseId,
+              content: typeof r.content === 'string' ? r.content : JSON.stringify(r.content),
+            });
+            msgs[targetIdx] = { ...target, content: updated };
+          }
+        }
+
+        return { ...agent, messages: msgs };
+      });
+    }
+
+    case 'UPDATE_TOOL_INPUT': {
+      return updateAgent(state, action.agentId, (agent) => {
         const msgs = [...agent.messages];
         for (let i = msgs.length - 1; i >= 0; i--) {
           const msg = msgs[i];
-          if (msg.type === 'assistant' && Array.isArray(msg.content)) {
+          if (msg.type !== 'assistant' || !Array.isArray(msg.content)) continue;
+          const blockIdx = msg.content.findIndex(
+            b => b.type === 'tool_use' && 'id' in b && b.id === action.toolCallId,
+          );
+          if (blockIdx >= 0) {
             const updated = [...msg.content];
-            for (const r of action.results) {
-              // Avoid duplicates — only add if not already present
-              const exists = updated.some(
-                b => b.type === 'tool_result' && 'toolUseId' in b && b.toolUseId === r.toolUseId,
-              );
-              if (!exists) {
-                updated.push({
-                  type: 'tool_result',
-                  toolUseId: r.toolUseId,
-                  content: typeof r.content === 'string' ? r.content : JSON.stringify(r.content),
-                });
-              }
-            }
+            updated[blockIdx] = { ...updated[blockIdx], input: action.input } as typeof updated[number];
             msgs[i] = { ...msg, content: updated };
-            break;
+            return { ...agent, messages: msgs };
           }
         }
-        return { ...agent, messages: msgs };
+        return agent;
       });
     }
 

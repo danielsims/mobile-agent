@@ -16,6 +16,24 @@ function nextHistoryId(suffix) {
   return `h-${++historyMsgSeq}-${suffix}`;
 }
 
+function normalizeImageAttachment(imageData) {
+  if (!imageData || typeof imageData !== 'object') return null;
+  const uri = typeof imageData.uri === 'string' && imageData.uri ? imageData.uri : null;
+  const mimeType = typeof imageData.mimeType === 'string' && imageData.mimeType
+    ? imageData.mimeType
+    : null;
+  const base64 = !uri && typeof imageData.base64 === 'string' && imageData.base64
+    ? imageData.base64
+    : null;
+
+  if (!uri && !base64) return null;
+  return {
+    ...(uri ? { uri } : {}),
+    ...(mimeType ? { mimeType } : {}),
+    ...(base64 ? { base64 } : {}),
+  };
+}
+
 export class AgentSession {
   constructor(id, type = 'claude', opts = {}) {
     this.id = id;
@@ -94,6 +112,18 @@ export class AgentSession {
     d.on('message', (data) => {
       this._currentStreamContent = '';
       const content = data.content || [];
+
+      // If this payload only contains tool_result blocks, merge those results
+      // into the corresponding prior tool_use message instead of creating a
+      // standalone assistant row (which renders as an empty "Assistant" label).
+      const normalizedResults = this._extractToolResults(content);
+      if (normalizedResults.length > 0 && normalizedResults.length === content.length) {
+        const merged = this._mergeToolResultsIntoHistory(normalizedResults);
+        if (merged.length > 0) {
+          this._broadcast('toolResults', { agentId: this.id, results: merged });
+          return;
+        }
+      }
 
       // Extract text for lastOutput
       for (const block of content) {
@@ -176,6 +206,26 @@ export class AgentSession {
       });
     });
 
+    d.on('toolUseUpdated', (data) => {
+      const { toolCallId, input } = data;
+      // Find the tool_use block in history and update its input
+      for (let i = this.messageHistory.length - 1; i >= 0; i--) {
+        const msg = this.messageHistory[i];
+        if (msg.type !== 'assistant' || !Array.isArray(msg.content)) continue;
+        for (const block of msg.content) {
+          if (block.type === 'tool_use' && block.id === toolCallId) {
+            block.input = input;
+            this._broadcast('toolUseUpdated', {
+              agentId: this.id,
+              toolCallId,
+              input,
+            });
+            return;
+          }
+        }
+      }
+    });
+
     d.on('toolProgress', (data) => {
       this._broadcast('toolProgress', {
         agentId: this.id,
@@ -215,6 +265,16 @@ export class AgentSession {
       if (merged.length > 0) {
         this._broadcast('toolResults', { agentId: this.id, results: merged });
       }
+    });
+
+    d.on('questionAnswered', (data) => {
+      // ACP doesn't support answering questions via RPC. The driver interrupted
+      // the stuck turn and asks us to re-send the user's answer as a new prompt.
+      const text = data.text;
+      console.log(`[Agent ${this.id.slice(0, 8)}] Auto-sending question answer: "${text.slice(0, 60)}"`);
+      setTimeout(() => {
+        this.sendPrompt(text);
+      }, 300);
     });
 
     d.on('status', (data) => {
@@ -286,6 +346,67 @@ export class AgentSession {
     }
   }
 
+  _extractToolResults(content) {
+    if (!Array.isArray(content)) return [];
+    return content
+      .filter((b) => b?.type === 'tool_result')
+      .map((b) => ({
+        toolUseId: b.toolUseId || b.tool_use_id,
+        content: typeof b.content === 'string' ? b.content : JSON.stringify(b.content),
+      }))
+      .filter((r) => typeof r.toolUseId === 'string' && r.toolUseId.length > 0);
+  }
+
+  _mergeToolResultsIntoHistory(results) {
+    const merged = [];
+
+    for (const result of results) {
+      let targetIndex = -1;
+
+      // Prefer the most recent assistant message that contains matching tool_use.
+      for (let i = this.messageHistory.length - 1; i >= 0; i--) {
+        const msg = this.messageHistory[i];
+        if (msg.type !== 'assistant' || !Array.isArray(msg.content)) continue;
+        const hasMatchingToolUse = msg.content.some(
+          (b) => b.type === 'tool_use' && b.id === result.toolUseId,
+        );
+        if (hasMatchingToolUse) {
+          targetIndex = i;
+          break;
+        }
+      }
+
+      // Fallback: most recent structured assistant message.
+      if (targetIndex < 0) {
+        for (let i = this.messageHistory.length - 1; i >= 0; i--) {
+          const msg = this.messageHistory[i];
+          if (msg.type === 'assistant' && Array.isArray(msg.content)) {
+            targetIndex = i;
+            break;
+          }
+        }
+      }
+
+      if (targetIndex < 0) continue;
+
+      const target = this.messageHistory[targetIndex];
+      const alreadyHasResult = target.content.some(
+        (b) => b.type === 'tool_result'
+          && (b.toolUseId === result.toolUseId || b.tool_use_id === result.toolUseId),
+      );
+      if (alreadyHasResult) continue;
+
+      target.content.push({
+        type: 'tool_result',
+        toolUseId: result.toolUseId,
+        content: result.content,
+      });
+      merged.push(result);
+    }
+
+    return merged;
+  }
+
   _trimHistory() {
     if (this.messageHistory.length > MAX_HISTORY) {
       this.messageHistory = this.messageHistory.slice(-MAX_HISTORY);
@@ -319,8 +440,11 @@ export class AgentSession {
 
   /**
    * Send a user prompt. Delegates to driver.sendPrompt().
+   * @param {string} text
+   * @param {string|null} sessionId
+   * @param {{ uri?: string, base64?: string, mimeType?: string }|null} imageData
    */
-  sendPrompt(text) {
+  sendPrompt(text, sessionId = null, imageData = null) {
     this._checkBranchChange();
 
     if (!this.sessionName) {
@@ -328,16 +452,22 @@ export class AgentSession {
       this._broadcast('agentUpdated', { agentId: this.id, sessionName: this.sessionName });
     }
 
-    this.messageHistory.push({
+    const historyMessage = {
       id: nextHistoryId('user'),
       type: 'user',
       content: text,
       timestamp: Date.now(),
-    });
+    };
+    const normalizedImage = normalizeImageAttachment(imageData);
+    if (normalizedImage) {
+      historyMessage.imageData = normalizedImage;
+    }
+
+    this.messageHistory.push(historyMessage);
     this._trimHistory();
     this._setStatus('running');
 
-    this.driver.sendPrompt(text, this.sessionId);
+    this.driver.sendPrompt(text, sessionId || this.sessionId, imageData);
   }
 
   /**

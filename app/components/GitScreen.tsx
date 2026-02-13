@@ -18,6 +18,7 @@ import {
   type NativeScrollEvent,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
+import { OpenCodeLogo } from './OpenCodeLogo';
 import * as Haptics from 'expo-haptics';
 import { useAgentState } from '../state/AgentContext';
 import { useSettings } from '../state/SettingsContext';
@@ -156,6 +157,8 @@ function AgentAvatar({ type, size = 20 }: { type: AgentType; size?: number }) {
         <Svg width={iconSize} height={iconSize} viewBox="0 0 24 24">
           <Path d={OPENAI_LOGO_PATH} fill={brand.color} fillRule="evenodd" />
         </Svg>
+      ) : type === 'opencode' ? (
+        <OpenCodeLogo width={iconSize * 0.8} height={iconSize * 1.4} variant="dark" />
       ) : (
         <Text style={{ color: brand.color, fontSize: size * 0.45, fontWeight: '700', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }}>
           {brand.letter}
@@ -906,7 +909,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
             const worktreeAgents = Array.from(state.agents.values()).filter(a => a.cwd === selectedWorktree.path);
             const filteredSkills = skills.filter(s => s.source === 'builtin' && s.name !== 'create-worktree');
             return (
-              <View style={actionStyles.container}>
+              <ScrollView style={actionStyles.scroll} showsVerticalScrollIndicator={false}><View style={actionStyles.container}>
                 {/* New chat */}
                 <TouchableOpacity
                   style={actionStyles.row}
@@ -1009,7 +1012,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                     </TouchableOpacity>
                   </>
                 )}
-              </View>
+              </View></ScrollView>
             );
           })()}
 
@@ -1017,7 +1020,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
           {selectedWorktree && modalStep === 'pickAgent' && pendingSkillPrompt && (() => {
             const worktreeAgents = Array.from(state.agents.values()).filter(a => a.cwd === selectedWorktree.path);
             return (
-              <View style={actionStyles.container}>
+              <ScrollView style={actionStyles.scroll} showsVerticalScrollIndicator={false}><View style={actionStyles.container}>
                 {worktreeAgents.map(agent => (
                   <TouchableOpacity
                     key={agent.id}
@@ -1062,7 +1065,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                     <Text style={actionStyles.description}>Start a fresh chat with this skill</Text>
                   </View>
                 </TouchableOpacity>
-              </View>
+              </View></ScrollView>
             );
           })()}
 
@@ -1711,6 +1714,9 @@ const overlayStyles = StyleSheet.create({
 });
 
 const actionStyles = StyleSheet.create({
+  scroll: {
+    maxHeight: Dimensions.get('window').height * 0.5,
+  },
   container: {
     paddingBottom: 4,
   },

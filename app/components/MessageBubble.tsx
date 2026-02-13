@@ -1,12 +1,15 @@
-import React, { useState } from 'react';
-import { View, Text, ScrollView, StyleSheet, Platform, TouchableOpacity } from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { View, Text, ScrollView, StyleSheet, Platform, TouchableOpacity, Image } from 'react-native';
 import * as Haptics from 'expo-haptics';
+import * as Clipboard from 'expo-clipboard';
 import { StreamdownRN } from 'streamdown-rn';
-import type { AgentMessage, ContentBlock } from '../state/types';
+import type { AgentMessage, ContentBlock, AgentType } from '../state/types';
 import { ShimmerText } from './ShimmerText';
+import { getCanonicalToolKey, getToolRendererKind, isQuestionTool } from '../utils/toolRegistry';
 
 interface MessageBubbleProps {
   message: AgentMessage;
+  agentType?: AgentType;
   toolResultMap?: Map<string, string>;
   animateThinking?: boolean;
   pendingPermissionToolNames?: Set<string>;
@@ -14,12 +17,64 @@ interface MessageBubbleProps {
   onDenyQuestion?: () => void;
 }
 
-// Extract markdown string from content blocks
-function blocksToMarkdown(blocks: ContentBlock[]): string {
-  return blocks
-    .filter(b => b.type === 'text')
-    .map(b => b.text)
-    .join('\n\n');
+// Check if a message has any content that will actually render visibly.
+// Prevents empty "Assistant" headers for messages where all blocks render null
+// (e.g. TodoWriteCard with empty input, or tool_result-only messages).
+function hasVisibleContent(message: AgentMessage, agentType?: AgentType): boolean {
+  if (typeof message.content === 'string') {
+    return message.content.trim().length > 0;
+  }
+  return message.content.some(block => {
+    switch (block.type) {
+      case 'text':
+        return block.text.trim().length > 0;
+      case 'thinking':
+        return !!block.text?.trim();
+      case 'tool_use': {
+        const rendererKind = getToolRendererKind(agentType, block.name);
+        if (rendererKind === 'todo') {
+          const input = block.input as Record<string, unknown> | undefined;
+          const todos = Array.isArray(input?.todos)
+            ? input!.todos
+            : Array.isArray(input?.items)
+              ? input!.items
+              : [];
+          return todos.length > 0;
+        }
+        return true;
+      }
+      case 'tool_result':
+        return false; // rendered inline with tool_use
+      default:
+        return false;
+    }
+  });
+}
+
+function getCopyableMessageText(message: AgentMessage): string {
+  if (typeof message.content === 'string') {
+    return message.content.trim();
+  }
+
+  const textParts: string[] = [];
+  for (const block of message.content) {
+    if (block.type === 'text' && block.text.trim()) {
+      textParts.push(block.text.trim());
+    }
+  }
+
+  return textParts.join('\n\n').trim();
+}
+
+function getMessageImageUri(message: AgentMessage): string | null {
+  const image = message.imageData;
+  if (!image) return null;
+  if (typeof image.uri === 'string' && image.uri) return image.uri;
+  if (typeof image.base64 === 'string' && image.base64) {
+    const mimeType = image.mimeType || 'image/jpeg';
+    return `data:${mimeType};base64,${image.base64}`;
+  }
+  return null;
 }
 
 // Format tool name: "Read" → "Read", "Bash" → "Bash", "mcp__ide__getDiagnostics" → "getDiagnostics"
@@ -42,34 +97,56 @@ function truncate(str: string, max: number): string {
   return str.length > max ? str.slice(0, max) + '\u2026' : str;
 }
 
+function pickString(input: Record<string, unknown>, ...keys: string[]): string {
+  for (const key of keys) {
+    if (typeof input[key] === 'string' && input[key]) return input[key] as string;
+  }
+  return '';
+}
+
 // Tool display config — maps tool names to label + title
 function getToolDisplay(name: string, input: Record<string, unknown>): { label: string; title: string } {
-  const str = (key: string) => typeof input[key] === 'string' ? input[key] as string : '';
+  const key = getCanonicalToolKey(name);
 
-  switch (name) {
-    case 'Read':
-      return { label: 'Read', title: shortPath(str('file_path')) };
-    case 'Write':
-      return { label: 'Write', title: shortPath(str('file_path')) };
-    case 'Edit':
-      return { label: 'Edit', title: shortPath(str('file_path')) };
-    case 'Bash':
-      return { label: 'Run', title: str('description') || truncate(str('command'), 60) };
-    case 'Grep':
-      return { label: 'Search', title: truncate(str('pattern'), 50) };
-    case 'Glob':
-      return { label: 'Find files', title: truncate(str('pattern'), 50) };
-    case 'WebSearch':
-      return { label: 'Web', title: truncate(str('query'), 60) };
-    case 'WebFetch':
-      return { label: 'Fetch', title: truncate(str('url'), 50) };
-    case 'Task':
-      return { label: 'Agent', title: str('description') || truncate(str('prompt') || 'Subagent', 50) };
+  switch (key) {
+    case 'read':
+      return { label: 'Read', title: shortPath(pickString(input, 'file_path', 'path', 'file')) };
+    case 'write':
+      return { label: 'Write', title: shortPath(pickString(input, 'file_path', 'path', 'file')) };
+    case 'edit':
+      return { label: 'Edit', title: shortPath(pickString(input, 'file_path', 'path', 'file')) };
+    case 'bash':
+      return { label: 'Run', title: pickString(input, 'description') || truncate(pickString(input, 'command'), 60) };
+    case 'grep':
+      return { label: 'Search', title: truncate(pickString(input, 'pattern', 'query'), 50) };
+    case 'glob':
+      return { label: 'Find files', title: truncate(pickString(input, 'pattern', 'path'), 50) };
+    case 'websearch':
+      return { label: 'Web', title: truncate(pickString(input, 'query'), 60) };
+    case 'codesearch':
+      return { label: 'Code', title: truncate(pickString(input, 'query'), 60) };
+    case 'webfetch':
+      return { label: 'Fetch', title: truncate(pickString(input, 'url'), 50) };
+    case 'task':
+      return { label: 'Agent', title: pickString(input, 'description') || truncate(pickString(input, 'prompt') || 'Subagent', 50) };
+    case 'skill':
+      return { label: 'Skill', title: truncate(pickString(input, 'name', 'description'), 60) || 'Skill' };
+    case 'question': {
+      const questions = Array.isArray(input.questions) ? input.questions : [];
+      const first = questions.find((q) => q && typeof q === 'object' && typeof (q as { question?: unknown }).question === 'string') as { question: string } | undefined;
+      return { label: 'Question', title: first?.question ? truncate(first.question, 60) : 'Awaiting input' };
+    }
+    case 'todowrite':
+    case 'todoread': {
+      const todos = Array.isArray(input.todos) ? input.todos : [];
+      return { label: 'Tasks', title: todos.length > 0 ? `${todos.length} items` : 'Task list' };
+    }
     default: {
       const formatted = formatToolName(name);
       const candidates = ['description', 'file_path', 'command', 'pattern', 'query', 'url', 'prompt'];
       for (const key of candidates) {
-        if (str(key)) return { label: formatted, title: truncate(str(key), 60) };
+        const value = pickString(input, key);
+        if (value) return { label: formatted, title: truncate(value, 60) };
       }
       return { label: formatted, title: formatted };
     }
@@ -102,15 +179,46 @@ function DiffView({ filePath, oldStr, newStr }: { filePath?: string; oldStr: str
   );
 }
 
+function CopyButtonIcon({ copied }: { copied: boolean }) {
+  if (copied) {
+    return (
+      <View style={styles.copyCheckIcon} accessibilityElementsHidden importantForAccessibility="no">
+        <View style={styles.copyCheckShort} />
+        <View style={styles.copyCheckLong} />
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.copyIconFrame} accessibilityElementsHidden importantForAccessibility="no">
+      <View style={styles.copyIconBack} />
+      <View style={styles.copyIconFront} />
+    </View>
+  );
+}
+
 // Check if a tool_use block is an Edit with old_string/new_string
 function isEditWithDiff(name: string, input: Record<string, unknown>): boolean {
-  return name === 'Edit' && typeof input.old_string === 'string' && typeof input.new_string === 'string';
+  return getCanonicalToolKey(name) === 'edit'
+    && typeof input.old_string === 'string'
+    && typeof input.new_string === 'string';
 }
 
 // --- TodoWrite card: renders todo items as a checklist ---
 function TodoWriteCard({ block }: { block: ContentBlock & { type: 'tool_use' } }) {
-  const todos: Array<{ content: string; status: string; activeForm?: string }> =
-    Array.isArray(block.input?.todos) ? (block.input.todos as Array<{ content: string; status: string; activeForm?: string }>) : [];
+  const rawTodos = Array.isArray(block.input?.todos)
+    ? block.input.todos
+    : Array.isArray(block.input?.items)
+      ? block.input.items
+      : [];
+
+  const todos = rawTodos
+    .filter((todo): todo is Record<string, unknown> => !!todo && typeof todo === 'object')
+    .map((todo) => ({
+      content: pickString(todo, 'content', 'text', 'title', 'label') || 'Task',
+      status: pickString(todo, 'status', 'state') || 'pending',
+      activeForm: pickString(todo, 'activeForm', 'active_form'),
+    })) as Array<{ content: string; status: string; activeForm?: string }>;
 
   if (todos.length === 0) return null;
 
@@ -118,8 +226,9 @@ function TodoWriteCard({ block }: { block: ContentBlock & { type: 'tool_use' } }
     <View style={styles.todoCard}>
       <Text style={styles.todoTitle}>Tasks</Text>
       {todos.map((todo, i) => {
-        const isComplete = todo.status === 'completed';
-        const isActive = todo.status === 'in_progress';
+        const normalizedStatus = todo.status.toLowerCase();
+        const isComplete = normalizedStatus === 'completed' || normalizedStatus === 'done';
+        const isActive = normalizedStatus === 'in_progress' || normalizedStatus === 'active';
         return (
           <View key={i} style={styles.todoRow}>
             <View style={[
@@ -176,6 +285,22 @@ function AskUserQuestionCard({
   // Parse the user's answer from the result string (for read-only mode)
   const answerText = result ?? '';
 
+  // Show a submit button when there are multiple questions or any multi-select
+  // question, so the user can answer all of them before submitting.
+  const needsSubmitButton = questions.length > 1 || questions.some(q => q.multiSelect);
+
+  const buildAnswers = (sels: Record<number, Set<number>>): Record<string, string> => {
+    const answers: Record<string, string> = {};
+    questions.forEach((q, qi) => {
+      const selected = sels[qi] || new Set();
+      const labels = Array.from(selected).map(idx => q.options[idx]?.label).filter(Boolean);
+      if (labels.length > 0) {
+        answers[q.question] = labels.join(', ');
+      }
+    });
+    return answers;
+  };
+
   const handleTapOption = (qi: number, oi: number, multiSelect?: boolean) => {
     if (!interactive) return;
     if (Platform.OS === 'ios') {
@@ -190,41 +315,31 @@ function AskUserQuestionCard({
         updated[qi] = current;
       } else {
         updated[qi] = new Set([oi]);
-        const answers: Record<string, string> = {};
-        questions.forEach((q, qIdx) => {
-          const selected = qIdx === qi ? new Set([oi]) : (prev[qIdx] || new Set());
-          const labels = Array.from(selected).map(idx => q.options[idx]?.label).filter(Boolean);
-          if (labels.length > 0) {
-            answers[q.question] = labels.join(', ');
-          }
-        });
-        setSubmitted(true);
-        setTimeout(() => {
-          if (Platform.OS === 'ios') {
-            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-          }
-          onRespond!(answers);
-        }, 150);
+
+        // Auto-submit only for single-question, single-select cards.
+        // Multi-question cards need a submit button so the user can
+        // answer all questions before submitting.
+        if (!needsSubmitButton) {
+          setSubmitted(true);
+          setTimeout(() => {
+            if (Platform.OS === 'ios') {
+              Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+            }
+            onRespond!(buildAnswers(updated));
+          }, 150);
+        }
       }
       return updated;
     });
   };
 
-  const handleSubmitMulti = () => {
+  const handleSubmit = () => {
     if (!onRespond) return;
-    const answers: Record<string, string> = {};
-    questions.forEach((q, qi) => {
-      const selected = selections[qi] || new Set();
-      const labels = Array.from(selected).map(idx => q.options[idx]?.label).filter(Boolean);
-      if (labels.length > 0) {
-        answers[q.question] = labels.join(', ');
-      }
-    });
     if (Platform.OS === 'ios') {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     }
     setSubmitted(true);
-    onRespond(answers);
+    onRespond(buildAnswers(selections));
   };
 
   const handleDeny = () => {
@@ -235,7 +350,7 @@ function AskUserQuestionCard({
     onDeny();
   };
 
-  const hasMultiSelect = questions.some(q => q.multiSelect);
+  const allAnswered = questions.every((_, qi) => (selections[qi]?.size ?? 0) > 0);
 
   return (
     <View style={styles.questionCard}>
@@ -250,7 +365,11 @@ function AskUserQuestionCard({
             <Text style={styles.questionText}>{q.question}</Text>
             <View style={styles.questionOptions}>
               {q.options.map((opt, oi) => {
-                const isSelected = interactive
+                // Use local selections when the user has interacted;
+                // fall back to answerText for historical messages where
+                // selections state is empty (component just mounted).
+                const hasLocalSelections = Object.keys(selections).length > 0;
+                const isSelected = hasLocalSelections
                   ? (selections[qi]?.has(oi) ?? false)
                   : answerText.includes(opt.label);
                 const Wrapper = interactive ? TouchableOpacity : View;
@@ -280,8 +399,13 @@ function AskUserQuestionCard({
           </View>
         );
       })}
-      {interactive && hasMultiSelect && (
-        <TouchableOpacity style={styles.questionSubmitButton} onPress={handleSubmitMulti} activeOpacity={0.8}>
+      {interactive && needsSubmitButton && (
+        <TouchableOpacity
+          style={[styles.questionSubmitButton, !allAnswered && { opacity: 0.4 }]}
+          onPress={handleSubmit}
+          activeOpacity={0.8}
+          disabled={!allAnswered}
+        >
           <Text style={styles.questionSubmitText}>Submit</Text>
         </TouchableOpacity>
       )}
@@ -326,6 +450,7 @@ function ToolUseCard({ block, result }: { block: ContentBlock & { type: 'tool_us
           {hasDiff && (
             <ScrollView style={styles.toolDetailScroll} nestedScrollEnabled>
               <DiffView
+                filePath={pickString(block.input as Record<string, unknown>, 'file_path', 'path', 'file') || undefined}
                 oldStr={block.input.old_string as string}
                 newStr={block.input.new_string as string}
               />
@@ -367,6 +492,7 @@ export function buildToolResultMap(messages: AgentMessage[]): Map<string, string
 // Render a single ContentBlock (tool_result handled inline with tool_use)
 function ContentBlockView({
   block,
+  agentType,
   resultMap,
   animateThinking = false,
   pendingPermissionToolNames,
@@ -374,6 +500,7 @@ function ContentBlockView({
   onDenyQuestion,
 }: {
   block: ContentBlock;
+  agentType?: AgentType;
   resultMap?: Map<string, string>;
   animateThinking?: boolean;
   pendingPermissionToolNames?: Set<string>;
@@ -389,12 +516,13 @@ function ContentBlockView({
     case 'tool_use': {
       const typedBlock = block as ContentBlock & { type: 'tool_use' };
       const result = resultMap?.get(block.id) ?? null;
+      const rendererKind = getToolRendererKind(agentType, typedBlock.name);
 
-      if (typedBlock.name === 'TodoWrite') {
+      if (rendererKind === 'todo') {
         return <TodoWriteCard block={typedBlock} />;
       }
-      if (typedBlock.name === 'AskUserQuestion') {
-        const isPending = pendingPermissionToolNames?.has('AskUserQuestion');
+      if (rendererKind === 'question') {
+        const isPending = Array.from(pendingPermissionToolNames || []).some((name) => isQuestionTool(agentType, name));
         return (
           <AskUserQuestionCard
             block={typedBlock}
@@ -438,9 +566,22 @@ function ContentBlockView({
   }
 }
 
-export function MessageBubble({ message, toolResultMap, animateThinking = false, pendingPermissionToolNames, onRespondQuestion, onDenyQuestion }: MessageBubbleProps) {
+export function MessageBubble({ message, agentType, toolResultMap, animateThinking = false, pendingPermissionToolNames, onRespondQuestion, onDenyQuestion }: MessageBubbleProps) {
   const isUser = message.type === 'user';
   const isSystem = message.type === 'system';
+  const [copied, setCopied] = useState(false);
+  const copiedTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copyText = useMemo(() => getCopyableMessageText(message), [message]);
+  const imageUri = useMemo(() => getMessageImageUri(message), [message]);
+  const shouldShowCopyButton = copyText.length > 0 && !isUser;
+
+  useEffect(() => {
+    return () => {
+      if (copiedTimeoutRef.current) {
+        clearTimeout(copiedTimeoutRef.current);
+      }
+    };
+  }, []);
 
   if (isSystem) {
     return (
@@ -452,10 +593,32 @@ export function MessageBubble({ message, toolResultMap, animateThinking = false,
     );
   }
 
+  // Skip assistant messages where all blocks render as null (e.g. empty TodoWriteCard)
+  if (!isUser && !hasVisibleContent(message, agentType)) {
+    return null;
+  }
+
+  const handleCopy = async () => {
+    if (!copyText) return;
+
+    await Clipboard.setStringAsync(copyText);
+    if (Platform.OS === 'ios') {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+    setCopied(true);
+
+    if (copiedTimeoutRef.current) {
+      clearTimeout(copiedTimeoutRef.current);
+    }
+    copiedTimeoutRef.current = setTimeout(() => setCopied(false), 1300);
+  };
+
   // Content can be string (streaming) or ContentBlock[] (structured)
   const renderContent = () => {
     if (typeof message.content === 'string') {
       if (isUser) {
+        const userText = message.content.trim();
+        if (!userText) return null;
         return <Text style={styles.userText}>{message.content}</Text>;
       }
       // Assistant streaming text — render as markdown
@@ -466,31 +629,51 @@ export function MessageBubble({ message, toolResultMap, animateThinking = false,
       );
     }
 
-    // ContentBlock array — render text blocks as unified markdown,
-    // non-text blocks (tool_use, thinking) as custom components
-    const textMarkdown = blocksToMarkdown(message.content);
-    const nonTextBlocks = message.content.filter((b) => {
-      if (b.type === 'text' || b.type === 'tool_result') return false;
-      if (b.type === 'thinking' && (!b.text || !b.text.trim())) return false;
-      return true;
-    });
+    // ContentBlock array — render in original order, grouping adjacent
+    // text blocks into markdown sections so thinking/tool blocks appear
+    // in the correct position relative to text.
+    const renderGroups: Array<{ kind: 'markdown'; text: string } | { kind: 'block'; block: ContentBlock }> = [];
+    let textAccum: string[] = [];
+
+    for (const block of message.content) {
+      if (block.type === 'text') {
+        if (block.text.trim()) textAccum.push(block.text);
+      } else if (block.type === 'tool_result') {
+        continue; // rendered inline with tool_use
+      } else if (block.type === 'thinking' && (!block.text || !block.text.trim())) {
+        continue; // skip empty thinking
+      } else {
+        // Non-text block — flush any accumulated text first
+        if (textAccum.length > 0) {
+          renderGroups.push({ kind: 'markdown', text: textAccum.join('\n\n') });
+          textAccum = [];
+        }
+        renderGroups.push({ kind: 'block', block });
+      }
+    }
+    if (textAccum.length > 0) {
+      renderGroups.push({ kind: 'markdown', text: textAccum.join('\n\n') });
+    }
 
     return (
       <View style={styles.bubble}>
-        {textMarkdown.length > 0 && (
-          <StreamdownRN theme="dark">{textMarkdown}</StreamdownRN>
-        )}
-        {nonTextBlocks.map((block, i) => (
-          <ContentBlockView
-            key={i}
-            block={block}
-            resultMap={toolResultMap}
-            animateThinking={animateThinking}
-            pendingPermissionToolNames={pendingPermissionToolNames}
-            onRespondQuestion={onRespondQuestion}
-            onDenyQuestion={onDenyQuestion}
-          />
-        ))}
+        {renderGroups.map((group, i) => {
+          if (group.kind === 'markdown') {
+            return <StreamdownRN key={i} theme="dark">{group.text}</StreamdownRN>;
+          }
+          return (
+            <ContentBlockView
+              key={i}
+              block={group.block}
+              agentType={agentType}
+              resultMap={toolResultMap}
+              animateThinking={animateThinking}
+              pendingPermissionToolNames={pendingPermissionToolNames}
+              onRespondQuestion={onRespondQuestion}
+              onDenyQuestion={onDenyQuestion}
+            />
+          );
+        })}
       </View>
     );
   };
@@ -501,6 +684,32 @@ export function MessageBubble({ message, toolResultMap, animateThinking = false,
         {isUser ? 'You' : 'Assistant'}
       </Text>
       {renderContent()}
+      {isUser && imageUri && (
+        <Image
+          source={{ uri: imageUri }}
+          style={styles.userImage}
+          resizeMode="cover"
+        />
+      )}
+      {shouldShowCopyButton && (
+        <View style={styles.messageActions}>
+          <TouchableOpacity
+            style={[
+              styles.copyButton,
+              !copyText && styles.copyButtonDisabled,
+              copied && styles.copyButtonCopied,
+            ]}
+            onPress={handleCopy}
+            disabled={!copyText}
+            activeOpacity={0.7}
+            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+            accessibilityRole="button"
+            accessibilityLabel={copied ? 'Message copied' : 'Copy message'}
+          >
+            <CopyButtonIcon copied={copied} />
+          </TouchableOpacity>
+        </View>
+      )}
     </View>
   );
 }
@@ -523,6 +732,82 @@ const styles = StyleSheet.create({
     color: '#e5e5e5',
     fontSize: 15,
     lineHeight: 22,
+  },
+  userImage: {
+    width: 220,
+    height: 220,
+    marginTop: 10,
+    borderRadius: 12,
+    backgroundColor: '#1d1d1d',
+  },
+  messageActions: {
+    flexDirection: 'row',
+    marginTop: 4,
+    marginBottom: 2,
+  },
+  copyButton: {
+    alignSelf: 'flex-start',
+    paddingVertical: 2,
+    paddingHorizontal: 4,
+  },
+  copyButtonDisabled: {
+    opacity: 0.4,
+  },
+  copyButtonCopied: {
+    opacity: 0.95,
+  },
+  copyIconFrame: {
+    width: 16,
+    height: 16,
+    position: 'relative',
+  },
+  copyIconBack: {
+    position: 'absolute',
+    width: 10,
+    height: 10,
+    borderWidth: 1.2,
+    borderColor: '#5d5d5d',
+    borderRadius: 2,
+    top: 1,
+    left: 1,
+  },
+  copyIconFront: {
+    position: 'absolute',
+    width: 10,
+    height: 10,
+    borderWidth: 1.2,
+    borderColor: '#9a9a9a',
+    borderRadius: 2,
+    top: 5,
+    left: 5,
+    backgroundColor: '#0f0f0f',
+  },
+  copyCheckIcon: {
+    width: 16,
+    height: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  copyCheckShort: {
+    position: 'absolute',
+    width: 5,
+    height: 1.8,
+    backgroundColor: '#7edc95',
+    borderRadius: 1,
+    transform: [{ rotate: '45deg' }],
+    top: 9,
+    left: 3,
+  },
+  copyCheckLong: {
+    position: 'absolute',
+    width: 8,
+    height: 1.8,
+    backgroundColor: '#7edc95',
+    borderRadius: 1,
+    transform: [{ rotate: '-45deg' }],
+    top: 7,
+    left: 6,
   },
   systemContainer: {
     alignItems: 'center',
@@ -680,7 +965,8 @@ const styles = StyleSheet.create({
 
   // --- Thinking ---
   thinkingContainer: {
-    marginVertical: 5,
+    marginTop: 5,
+    marginBottom: 10,
   },
   thinkingHeader: {
     flexDirection: 'row',

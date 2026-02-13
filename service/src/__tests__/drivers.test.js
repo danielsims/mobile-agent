@@ -12,6 +12,7 @@ import { EventEmitter } from 'node:events';
 import { BaseDriver } from '../drivers/BaseDriver.js';
 import { ClaudeDriver } from '../drivers/ClaudeDriver.js';
 import { CodexDriver } from '../drivers/CodexDriver.js';
+import { OpenCodeDriver } from '../drivers/OpenCodeDriver.js';
 import { createDriver, getSupportedTypes } from '../drivers/index.js';
 
 // ---------------------------------------------------------------------------
@@ -171,6 +172,13 @@ describe('Driver Registry', () => {
     expect(driver.transportType).toBe('stdio-jsonrpc');
   });
 
+  it('creates OpenCode driver', () => {
+    const driver = createDriver('opencode');
+    expect(driver).toBeInstanceOf(OpenCodeDriver);
+    expect(driver.name).toBe('OpenCode');
+    expect(driver.transportType).toBe('stdio-jsonrpc');
+  });
+
   it('throws for unknown agent type', () => {
     expect(() => createDriver('unknown')).toThrow('Unknown agent type');
   });
@@ -179,6 +187,7 @@ describe('Driver Registry', () => {
     const types = getSupportedTypes();
     expect(types).toContain('claude');
     expect(types).toContain('codex');
+    expect(types).toContain('opencode');
   });
 });
 
@@ -472,6 +481,58 @@ describe('ClaudeDriver', () => {
       expect(sent.message.role).toBe('user');
       expect(sent.message.content).toBe('Hello Claude');
       expect(sent.session_id).toBe('sess-123');
+    });
+
+    it('sends prompt with image as content blocks', async () => {
+      const ws = createMockWebSocket();
+      driver.attachSocket(ws);
+
+      const imageData = {
+        base64: 'dGVzdA==',
+        mimeType: 'image/png',
+      };
+      await driver.sendPrompt('What is this?', 'sess-123', imageData);
+
+      const sent = JSON.parse(ws.send.mock.calls[0][0].trim());
+      expect(sent.type).toBe('user');
+      expect(sent.message.role).toBe('user');
+      expect(sent.message.content).toEqual([
+        { type: 'text', text: 'What is this?' },
+        {
+          type: 'image',
+          source: { type: 'base64', media_type: 'image/png', data: 'dGVzdA==' },
+        },
+      ]);
+    });
+
+    it('sends plain text content when no image provided', async () => {
+      const ws = createMockWebSocket();
+      driver.attachSocket(ws);
+
+      await driver.sendPrompt('Hello', 'sess-123', null);
+
+      const sent = JSON.parse(ws.send.mock.calls[0][0].trim());
+      expect(sent.message.content).toBe('Hello');
+    });
+
+    it('queues prompts with image when socket not ready', async () => {
+      const imageData = {
+        base64: 'dGVzdA==',
+        mimeType: 'image/jpeg',
+      };
+      await driver.sendPrompt('Describe this', 'sess-123', imageData);
+
+      const ws = createMockWebSocket();
+      driver.attachSocket(ws);
+
+      const sent = JSON.parse(ws.send.mock.calls[0][0].trim());
+      expect(sent.message.content).toEqual([
+        { type: 'text', text: 'Describe this' },
+        {
+          type: 'image',
+          source: { type: 'base64', media_type: 'image/jpeg', data: 'dGVzdA==' },
+        },
+      ]);
     });
 
     it('queues prompts when socket not ready', async () => {
@@ -925,7 +986,7 @@ describe('CodexDriver', () => {
       expect(Array.isArray(msg.result.contentItems)).toBe(true);
     });
 
-    it('responds to item/tool/requestUserInput with empty answers', () => {
+    it('emits AskUserQuestion tool + permission for item/tool/requestUserInput', () => {
       const proc = createMockProcess();
       driver._process = proc;
 
@@ -940,10 +1001,43 @@ describe('CodexDriver', () => {
         },
       });
 
-      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
-      expect(msg.jsonrpc).toBe('2.0');
-      expect(msg.id).toBe('srv-input-1');
-      expect(msg.result).toEqual({ answers: {} });
+      const msgEvent = events.find(e => e.event === 'message');
+      expect(msgEvent).toBeTruthy();
+      expect(msgEvent.data.content[0].type).toBe('tool_use');
+      expect(msgEvent.data.content[0].name).toBe('AskUserQuestion');
+      expect(msgEvent.data.content[0].input.questions[0].question).toBe('Continue?');
+
+      const permEvent = events.find(e => e.event === 'permission');
+      expect(permEvent).toBeTruthy();
+      expect(permEvent.data.toolName).toBe('AskUserQuestion');
+      expect(permEvent.data.requestId).toBeTruthy();
+
+      expect(proc.stdin.write).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Message handling (plan updates)', () => {
+    it('emits TodoWrite tool_use with normalized todos from turn/plan/updated', () => {
+      driver._handleMessage({
+        method: 'turn/plan/updated',
+        params: {
+          steps: [
+            { step: 'Fetch repository metadata', status: 'completed' },
+            { step: 'Update Codex driver', status: 'in_progress', activeForm: 'Updating Codex driver' },
+            { step: 'Verify with tests', status: 'pending' },
+          ],
+        },
+      });
+
+      const msgEvent = events.find(e => e.event === 'message');
+      expect(msgEvent).toBeTruthy();
+      expect(msgEvent.data.content[0].type).toBe('tool_use');
+      expect(msgEvent.data.content[0].name).toBe('TodoWrite');
+      expect(msgEvent.data.content[0].input.todos).toEqual([
+        { content: 'Fetch repository metadata', status: 'completed' },
+        { content: 'Update Codex driver', status: 'in_progress', activeForm: 'Updating Codex driver' },
+        { content: 'Verify with tests', status: 'pending' },
+      ]);
     });
   });
 
@@ -1026,6 +1120,44 @@ describe('CodexDriver', () => {
       });
 
       // Resolve the request
+      driver._handleMessage({ id: msg.id, result: {} });
+      await sendPromise;
+    });
+
+    it('sends turn/start with image in input array', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+      driver._ready = true;
+      driver._threadId = 'thread-123';
+
+      const imageData = {
+        base64: 'dGVzdA==',
+        mimeType: 'image/png',
+      };
+      const sendPromise = driver.sendPrompt('What is this?', 'thread-123', imageData);
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.method).toBe('turn/start');
+      expect(msg.params.input).toEqual([
+        { type: 'text', text: 'What is this?' },
+        { type: 'image', url: 'data:image/png;base64,dGVzdA==' },
+      ]);
+
+      driver._handleMessage({ id: msg.id, result: {} });
+      await sendPromise;
+    });
+
+    it('sends turn/start with text only when no image', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+      driver._ready = true;
+      driver._threadId = 'thread-123';
+
+      const sendPromise = driver.sendPrompt('Hello', 'thread-123', null);
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.params.input).toEqual([{ type: 'text', text: 'Hello' }]);
+
       driver._handleMessage({ id: msg.id, result: {} });
       await sendPromise;
     });
@@ -1124,6 +1256,71 @@ describe('CodexDriver', () => {
       const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
       expect(msg.id).toBe('srv-456');
       expect(msg.result.decision).toBe('decline');
+    });
+
+    it('responds to AskUserQuestion permissions with answers payload', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+
+      driver._handleMessage({
+        id: 'srv-question-1',
+        method: 'item/tool/requestUserInput',
+        params: {
+          itemId: 'question-1',
+          questions: [
+            {
+              id: 'q1',
+              question: 'Which mode?',
+              options: [{ label: 'Tool-native' }, { label: 'Markdown' }],
+            },
+          ],
+        },
+      });
+
+      const permEvent = events.find(e => e.event === 'permission');
+      expect(permEvent).toBeTruthy();
+
+      await driver.respondPermission(permEvent.data.requestId, 'allow', {
+        answers: {
+          'Which mode?': 'Tool-native',
+        },
+      });
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.id).toBe('srv-question-1');
+      expect(msg.result).toEqual({
+        answers: {
+          q1: 'Tool-native',
+        },
+      });
+    });
+
+    it('returns empty answers when AskUserQuestion permission is denied', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+
+      driver._handleMessage({
+        id: 'srv-question-2',
+        method: 'item/tool/requestUserInput',
+        params: {
+          itemId: 'question-2',
+          questions: [
+            {
+              id: 'q1',
+              question: 'Proceed?',
+              options: [{ label: 'Yes' }, { label: 'No' }],
+            },
+          ],
+        },
+      });
+
+      const permEvent = events.find(e => e.event === 'permission');
+      expect(permEvent).toBeTruthy();
+      await driver.respondPermission(permEvent.data.requestId, 'deny');
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.id).toBe('srv-question-2');
+      expect(msg.result).toEqual({ answers: {} });
     });
   });
 
@@ -1232,11 +1429,890 @@ describe('CodexDriver', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 5. Cross-Driver Behavioral Consistency Tests
+// 5. OpenCodeDriver Tests
+// ---------------------------------------------------------------------------
+
+describe('OpenCodeDriver', () => {
+  let driver;
+  let events;
+
+  beforeEach(() => {
+    driver = new OpenCodeDriver();
+    events = collectEvents(driver, ALL_EVENTS);
+  });
+
+  afterEach(() => {
+    for (const [id, pending] of driver._pendingRpc) {
+      if (pending.timer) clearTimeout(pending.timer);
+      pending.resolve(null);
+    }
+    driver._pendingRpc.clear();
+    driver.stop().catch(() => {});
+  });
+
+  describe('Message handling (session lifecycle)', () => {
+    it('emits running status on session/update with tool_call', () => {
+      driver._turnActive = true;
+      driver._handleMessage({
+        method: 'session/update',
+        params: {
+          update: {
+            type: 'tool_call',
+            toolCallId: 'tc-1',
+            title: 'Read',
+            status: 'in_progress',
+            input: { path: '/file.txt' },
+          },
+        },
+      });
+
+      const statusEvent = events.find(e => e.event === 'status');
+      expect(statusEvent).toBeTruthy();
+      expect(statusEvent.data.status).toBe('running');
+    });
+
+    it('does not emit running status for late tool_call when turn is not active', () => {
+      driver._turnActive = false;
+      driver._handleMessage({
+        method: 'session/update',
+        params: {
+          update: {
+            type: 'tool_call',
+            toolCallId: 'tc-late',
+            title: 'Read',
+            status: 'in_progress',
+            input: { path: '/late.txt' },
+          },
+        },
+      });
+
+      const statusEvents = events.filter(e => e.event === 'status');
+      expect(statusEvents.some(e => e.data.status === 'running')).toBe(false);
+    });
+
+    it('emits result and idle when session/prompt RPC returns', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+      driver._ready = true;
+      driver._sessionId = 'sess-1';
+
+      const sendPromise = driver.sendPrompt('Fix the bug');
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      driver._handleMessage({ id: msg.id, result: { stopReason: 'end_turn' } });
+      await sendPromise;
+
+      const resultEvent = events.find(e => e.event === 'result');
+      expect(resultEvent).toBeTruthy();
+      expect(resultEvent.data.isError).toBe(false);
+      expect(resultEvent.data.sessionId).toBe('sess-1');
+
+      const statusEvents = events.filter(e => e.event === 'status');
+      expect(statusEvents.some(e => e.data.status === 'idle')).toBe(true);
+    });
+
+    it('emits error for failed prompt returns', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+      driver._ready = true;
+      driver._sessionId = 'sess-1';
+
+      const sendPromise = driver.sendPrompt('Fix the bug');
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      driver._handleMessage({ id: msg.id, error: { message: 'Rate limit exceeded' } });
+      await sendPromise;
+
+      const errorEvent = events.find(e => e.event === 'error');
+      expect(errorEvent).toBeTruthy();
+      expect(errorEvent.data.message).toBe('Rate limit exceeded');
+
+      const resultEvent = events.find(e => e.event === 'result');
+      expect(resultEvent).toBeTruthy();
+      expect(resultEvent.data.isError).toBe(true);
+    });
+  });
+
+  describe('Message handling (streaming)', () => {
+    it('emits stream events for agent_message_chunk updates', () => {
+      driver._handleMessage({
+        method: 'session/update',
+        params: {
+          update: {
+            type: 'agent_message_chunk',
+            content: [{ type: 'text', text: 'Hello ' }],
+          },
+        },
+      });
+
+      driver._handleMessage({
+        method: 'session/update',
+        params: {
+          update: {
+            type: 'agent_message_chunk',
+            content: [{ type: 'text', text: 'world!' }],
+          },
+        },
+      });
+
+      const streamEvents = events.filter(e => e.event === 'stream');
+      expect(streamEvents).toHaveLength(2);
+      expect(streamEvents[0].data.text).toBe('Hello ');
+      expect(streamEvents[1].data.text).toBe('world!');
+    });
+
+    it('handles agent_message_chunk with string content', () => {
+      driver._handleMessage({
+        method: 'session/update',
+        params: {
+          update: {
+            type: 'agent_message_chunk',
+            content: 'raw text chunk',
+          },
+        },
+      });
+
+      const streamEvents = events.filter(e => e.event === 'stream');
+      expect(streamEvents).toHaveLength(1);
+      expect(streamEvents[0].data.text).toBe('raw text chunk');
+    });
+
+    it('accumulates stream content for final message on prompt return', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+      driver._ready = true;
+      driver._sessionId = 'sess-1';
+
+      const sendPromise = driver.sendPrompt('Hello');
+
+      // Simulate streaming during the prompt
+      driver._handleMessage({
+        method: 'session/update',
+        params: { update: { type: 'agent_message_chunk', content: [{ type: 'text', text: 'Hello ' }] } },
+      });
+      driver._handleMessage({
+        method: 'session/update',
+        params: { update: { type: 'agent_message_chunk', content: [{ type: 'text', text: 'world!' }] } },
+      });
+
+      // Complete the prompt
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      driver._handleMessage({ id: msg.id, result: { stopReason: 'end_turn' } });
+      await sendPromise;
+
+      // Should emit accumulated stream as final message
+      const msgEvent = events.find(e => e.event === 'message' && e.data.content?.[0]?.type === 'text');
+      expect(msgEvent).toBeTruthy();
+      expect(msgEvent.data.content[0].text).toBe('Hello world!');
+    });
+  });
+
+  describe('Message handling (item completed)', () => {
+    it('emits tool_use for pending tool_call', () => {
+      driver._handleMessage({
+        method: 'session/update',
+        params: {
+          update: {
+            type: 'tool_call',
+            toolCallId: 'tc-1',
+            title: 'Bash',
+            status: 'pending',
+            input: { command: 'ls -la' },
+          },
+        },
+      });
+
+      const msgEvent = events.find(e => e.event === 'message');
+      expect(msgEvent).toBeTruthy();
+      expect(msgEvent.data.content[0].type).toBe('tool_use');
+      expect(msgEvent.data.content[0].id).toBe('tc-1');
+      expect(msgEvent.data.content[0].name).toBe('Bash');
+      expect(msgEvent.data.content[0].input).toEqual({ command: 'ls -la' });
+    });
+
+    it('emits tool_result for completed tool_call_update', () => {
+      driver._activeToolCalls.set('tc-1', {
+        name: 'Bash',
+        input: { command: 'ls -la' },
+      });
+      driver._handleMessage({
+        method: 'session/update',
+        params: {
+          update: {
+            type: 'tool_call_update',
+            toolCallId: 'tc-1',
+            status: 'completed',
+            content: 'file1.txt\nfile2.txt',
+          },
+        },
+      });
+
+      const msgEvent = events.find(e => e.event === 'message');
+      expect(msgEvent).toBeTruthy();
+      expect(msgEvent.data.content[0].type).toBe('tool_result');
+      expect(msgEvent.data.content[0].toolUseId).toBe('tc-1');
+      expect(msgEvent.data.content[0].content).toBe('file1.txt\nfile2.txt');
+    });
+
+    it('emits tool_result with error for failed tool_call_update', () => {
+      driver._activeToolCalls.set('tc-1', {
+        name: 'Bash',
+        input: { command: 'rm -rf /tmp/test' },
+      });
+      driver._handleMessage({
+        method: 'session/update',
+        params: {
+          update: {
+            type: 'tool_call_update',
+            toolCallId: 'tc-1',
+            status: 'failed',
+            error: 'Permission denied',
+          },
+        },
+      });
+
+      const msgEvent = events.find(e => e.event === 'message');
+      expect(msgEvent).toBeTruthy();
+      expect(msgEvent.data.content[0].type).toBe('tool_result');
+      expect(msgEvent.data.content[0].content).toBe('Permission denied');
+    });
+
+    it('emits fallback tool_use before tool_result when completion arrives without start', () => {
+      driver._handleMessage({
+        method: 'session/update',
+        params: {
+          update: {
+            type: 'tool_call_update',
+            toolCallId: 'tc-missing-start',
+            title: 'read',
+            status: 'completed',
+            input: { path: '/tmp/a.txt' },
+            content: 'done',
+          },
+        },
+      });
+
+      const msgEvents = events.filter(e => e.event === 'message');
+      expect(msgEvents).toHaveLength(2);
+      expect(msgEvents[0].data.content[0].type).toBe('tool_use');
+      expect(msgEvents[0].data.content[0].id).toBe('tc-missing-start');
+      expect(msgEvents[1].data.content[0].type).toBe('tool_result');
+      expect(msgEvents[1].data.content[0].toolUseId).toBe('tc-missing-start');
+      expect(msgEvents[1].data.content[0].content).toBe('done');
+    });
+
+    it('accumulates thinking and includes it in next tool message', () => {
+      driver._handleMessage({
+        method: 'session/update',
+        params: {
+          update: {
+            type: 'agent_thought_chunk',
+            content: 'I should check the tests first',
+          },
+        },
+      });
+
+      // Thinking is accumulated, not emitted immediately
+      expect(events.filter(e => e.event === 'message').length).toBe(0);
+
+      // Trigger flush via tool_call — thinking is combined with tool_use
+      driver._handleMessage({
+        method: 'session/update',
+        params: {
+          update: {
+            type: 'tool_call',
+            toolCallId: 'tc-think-flush',
+            title: 'Read',
+            input: { file_path: '/tmp/test' },
+            status: 'pending',
+          },
+        },
+      });
+
+      const msgEvents = events.filter(e => e.event === 'message');
+      expect(msgEvents.length).toBe(1);
+      expect(msgEvents[0].data.content[0]).toEqual({
+        type: 'thinking',
+        text: 'I should check the tests first',
+      });
+      expect(msgEvents[0].data.content[1].type).toBe('tool_use');
+    });
+  });
+
+  describe('Message handling (permissions)', () => {
+    it('emits permission for session/request_permission (reverse RPC)', () => {
+      driver._handleMessage({
+        id: 'perm-1',
+        method: 'session/request_permission',
+        params: {
+          sessionId: 'sess-1',
+          title: 'Bash',
+          input: { command: 'rm -rf /tmp/test' },
+          options: [
+            { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+            { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+          ],
+        },
+      });
+
+      const permEvent = events.find(e => e.event === 'permission');
+      expect(permEvent).toBeTruthy();
+      expect(permEvent.data.requestId).toBeTruthy();
+      expect(permEvent.data.toolName).toBe('Bash');
+      expect(permEvent.data.toolInput).toEqual({ command: 'rm -rf /tmp/test' });
+
+      const statusEvents = events.filter(e => e.event === 'status');
+      expect(statusEvents.some(e => e.data.status === 'awaiting_permission')).toBe(true);
+    });
+
+    it('responds with allow-once for allowed permissions', () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+
+      driver._handleMessage({
+        id: 'perm-1',
+        method: 'session/request_permission',
+        params: {
+          sessionId: 'sess-1',
+          title: 'Read',
+          options: [
+            { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+            { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+          ],
+        },
+      });
+
+      const permEvent = events.find(e => e.event === 'permission');
+      driver.respondPermission(permEvent.data.requestId, 'allow');
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.jsonrpc).toBe('2.0');
+      expect(msg.id).toBe('perm-1');
+      expect(msg.result.optionId).toBe('allow-once');
+    });
+
+    it('responds with reject-once for denied permissions', () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+
+      driver._handleMessage({
+        id: 'perm-2',
+        method: 'session/request_permission',
+        params: {
+          sessionId: 'sess-1',
+          title: 'Bash',
+          options: [
+            { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+            { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+          ],
+        },
+      });
+
+      const permEvent = events.find(e => e.event === 'permission');
+      driver.respondPermission(permEvent.data.requestId, 'deny');
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.id).toBe('perm-2');
+      expect(msg.result.optionId).toBe('reject-once');
+    });
+
+    it('auto-approves permissions in bypass mode', () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+      driver._autoApprovePermissions = true;
+
+      driver._handleMessage({
+        id: 'perm-3',
+        method: 'session/request_permission',
+        params: {
+          sessionId: 'sess-1',
+          title: 'Write',
+          options: [
+            { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+            { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+          ],
+        },
+      });
+
+      // Should NOT emit permission event (auto-approved)
+      const permEvent = events.find(e => e.event === 'permission');
+      expect(permEvent).toBeUndefined();
+
+      // Should have responded with allow
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.id).toBe('perm-3');
+      expect(msg.result.optionId).toBe('allow-once');
+    });
+
+    it('does not auto-approve AskUserQuestion permissions in bypass mode', () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+      driver._autoApprovePermissions = true;
+
+      driver._handleMessage({
+        id: 'perm-q1',
+        method: 'session/request_permission',
+        params: {
+          sessionId: 'sess-1',
+          title: 'Tool Permission',
+          toolCall: {
+            name: 'request_user_input',
+            input: {
+              questions: [
+                {
+                  question: 'Continue?',
+                  options: [{ label: 'Yes' }, { label: 'No' }],
+                },
+              ],
+            },
+          },
+          options: [
+            { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+            { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
+          ],
+        },
+      });
+
+      const permEvent = events.find(e => e.event === 'permission');
+      expect(permEvent).toBeTruthy();
+      expect(permEvent.data.toolName).toBe('AskUserQuestion');
+      expect(permEvent.data.toolInput.questions[0].question).toBe('Continue?');
+      expect(proc.stdin.write).not.toHaveBeenCalled();
+    });
+
+    it('emits question permission from tool_call_update with questions', () => {
+      // Simulates ACP flow: tool_call arrives with empty rawInput,
+      // then tool_call_update delivers the actual questions.
+      driver._turnActive = true;
+
+      // Initial tool_call — empty rawInput, should NOT emit permission
+      driver._handleSessionUpdate({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tc-q1',
+        title: 'question',
+        status: 'pending',
+        rawInput: {},
+      });
+
+      let permEvent = events.find(e => e.event === 'permission');
+      expect(permEvent).toBeUndefined();
+
+      // tool_call_update — now has questions, should emit permission
+      driver._handleSessionUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tc-q1',
+        title: 'question',
+        status: 'in_progress',
+        rawInput: {
+          questions: [
+            { question: 'Pick a color?', options: [{ label: 'Red' }, { label: 'Blue' }] },
+          ],
+        },
+      });
+
+      permEvent = events.find(e => e.event === 'permission');
+      expect(permEvent).toBeTruthy();
+      expect(permEvent.data.toolName).toBe('AskUserQuestion');
+      expect(permEvent.data.toolInput.questions).toHaveLength(1);
+      expect(permEvent.data.toolInput.questions[0].question).toBe('Pick a color?');
+    });
+
+    it('restarts process and emits questionAnswered when user answers question without RPC', async () => {
+      const proc = createMockProcess();
+      proc.kill = vi.fn();
+      proc.removeAllListeners = vi.fn();
+      proc.stdout.removeAllListeners = vi.fn();
+      proc.stderr.removeAllListeners = vi.fn();
+      driver._process = proc;
+      driver._turnActive = true;
+      driver._sessionId = 'sess-123';
+      driver._cwd = '/tmp/test';
+      driver._agentId = 'agent-q-test';
+
+      // Emit question permission from tool_call_update
+      driver._handleSessionUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tc-q2',
+        title: 'question',
+        status: 'in_progress',
+        rawInput: {
+          questions: [
+            { question: 'Continue?', options: [{ label: 'Yes' }, { label: 'No' }] },
+          ],
+        },
+      });
+
+      const permEvent = events.find(e => e.event === 'permission');
+      expect(permEvent).toBeTruthy();
+
+      // Mock start() since we can't actually spawn opencode in tests
+      const startCalled = vi.fn();
+      const originalStart = driver.start.bind(driver);
+      driver.start = async (agentId, opts) => {
+        startCalled(agentId, opts);
+        driver._ready = true;
+        driver._sessionId = opts.resumeSessionId;
+      };
+
+      // Listen for questionAnswered event
+      const questionAnsweredPromise = new Promise(resolve => {
+        driver.on('questionAnswered', resolve);
+      });
+
+      // User answers — no RPC available, triggers restart
+      driver.respondPermission(permEvent.data.requestId, 'allow', {
+        questions: [{ question: 'Continue?', options: [{ label: 'Yes' }, { label: 'No' }] }],
+        answers: { 'Continue?': 'Yes' },
+      });
+
+      // Wait for the restart (includes 300ms delay + start)
+      const { text } = await questionAnsweredPromise;
+
+      // Process was killed
+      expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
+
+      // start() was called with session resume
+      expect(startCalled).toHaveBeenCalledWith('agent-q-test', expect.objectContaining({
+        cwd: '/tmp/test',
+        resumeSessionId: 'sess-123',
+      }));
+
+      // Answer was emitted
+      expect(text).toContain('Yes');
+    });
+
+    it('responds immediately when RPC arrives before user answers', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+      driver._turnActive = true;
+
+      // Emit question permission from tool_call_update
+      driver._handleSessionUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tc-q3',
+        title: 'question',
+        status: 'in_progress',
+        rawInput: {
+          questions: [
+            { question: 'Mode?', options: [{ label: 'Fast' }, { label: 'Careful' }] },
+          ],
+        },
+      });
+
+      const permEvent = events.find(e => e.event === 'permission');
+
+      // session/request_permission arrives BEFORE user answers
+      driver._handleMessage({
+        id: 'rpc-q3',
+        method: 'session/request_permission',
+        params: {
+          toolCall: { name: 'question', input: { questions: [{ question: 'Mode?' }] } },
+          options: [{ optionId: 'allow-once' }],
+        },
+      });
+
+      // Not responded yet — waiting for user
+      expect(proc.stdin.write).not.toHaveBeenCalled();
+
+      // User answers
+      await driver.respondPermission(permEvent.data.requestId, 'allow', {});
+
+      // Now should have responded
+      expect(proc.stdin.write).toHaveBeenCalled();
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.id).toBe('rpc-q3');
+      expect(msg.result.optionId).toBe('allow-once');
+    });
+  });
+
+  describe('Message handling (agent→client reverse RPC)', () => {
+    it('responds to fs/read_text_file requests', () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+
+      driver._handleMessage({
+        id: 'fs-1',
+        method: 'fs/read_text_file',
+        params: { path: '/tmp/test-file-that-does-not-exist.txt' },
+      });
+
+      // Should have responded via _rpcRespond
+      expect(proc.stdin.write).toHaveBeenCalled();
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.jsonrpc).toBe('2.0');
+      expect(msg.id).toBe('fs-1');
+      // File doesn't exist, so we get an error response
+      expect(msg.result).toBeTruthy();
+      expect(msg.result.error).toBeTruthy();
+    });
+
+    it('responds to fs/write_text_file requests with success', () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+
+      driver._handleMessage({
+        id: 'fs-2',
+        method: 'fs/write_text_file',
+        params: { path: '/tmp/test-write.txt', content: 'hello world' },
+      });
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.id).toBe('fs-2');
+      expect(msg.result).toBeTruthy();
+      expect(msg.result.error).toBeUndefined();
+    });
+
+    it('responds to terminal/create requests', () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+
+      driver._handleMessage({
+        id: 'term-1',
+        method: 'terminal/create',
+        params: { command: 'ls', args: ['-la'], sessionId: 'sess-1' },
+      });
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.id).toBe('term-1');
+      expect(msg.result).toBeTruthy();
+      expect(msg.result.terminalId).toBeTruthy();
+    });
+  });
+
+  describe('JSON-RPC communication', () => {
+    it('sends JSON-RPC requests with incrementing IDs', () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+
+      driver._rpcRequest('method1', { param1: 'value1' });
+      driver._rpcRequest('method2', { param2: 'value2' });
+
+      expect(proc.stdin.write).toHaveBeenCalledTimes(2);
+      const msg1 = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      const msg2 = JSON.parse(proc.stdin.write.mock.calls[1][0].trim());
+
+      expect(msg1.jsonrpc).toBe('2.0');
+      expect(msg1.method).toBe('method1');
+      expect(msg1.id).toBe(1);
+      expect(msg2.id).toBe(2);
+    });
+
+    it('resolves RPC requests on response', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+
+      const promise = driver._rpcRequest('test/method', {});
+
+      const id = JSON.parse(proc.stdin.write.mock.calls[0][0].trim()).id;
+      driver._handleMessage({ id, result: { success: true } });
+
+      const result = await promise;
+      expect(result).toEqual({ success: true });
+    });
+
+    it('rejects RPC requests on error response', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+
+      const promise = driver._rpcRequest('test/method', {});
+
+      const id = JSON.parse(proc.stdin.write.mock.calls[0][0].trim()).id;
+      driver._handleMessage({ id, error: { message: 'Something went wrong' } });
+
+      await expect(promise).rejects.toThrow('Something went wrong');
+    });
+
+    it('sends notifications without ID', () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+
+      driver._rpcNotify('initialized', {});
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.jsonrpc).toBe('2.0');
+      expect(msg.method).toBe('initialized');
+      expect(msg.id).toBeUndefined();
+    });
+  });
+
+  describe('Prompt sending', () => {
+    it('sends session/prompt via RPC when ready', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+      driver._ready = true;
+      driver._sessionId = 'sess-123';
+
+      const sendPromise = driver.sendPrompt('Fix the bug', 'sess-123');
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.method).toBe('session/prompt');
+      expect(msg.params.sessionId).toBe('sess-123');
+      expect(msg.params.prompt).toEqual([{ type: 'text', text: 'Fix the bug' }]);
+
+      driver._handleMessage({ id: msg.id, result: { stopReason: 'end_turn' } });
+      await sendPromise;
+    });
+
+    it('includes image content block when promptCapabilities.image is true', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+      driver._ready = true;
+      driver._sessionId = 'sess-123';
+      driver._promptCapabilities = { image: true };
+
+      const imageData = {
+        uri: 'file:///tmp/test.png',
+        base64: 'dGVzdA==',
+        mimeType: 'image/png',
+      };
+
+      const sendPromise = driver.sendPrompt('What is in this image?', 'sess-123', imageData);
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.method).toBe('session/prompt');
+      expect(msg.params.prompt).toEqual([
+        { type: 'text', text: 'What is in this image?' },
+        { type: 'image', data: 'dGVzdA==', mimeType: 'image/png' },
+      ]);
+
+      driver._handleMessage({ id: msg.id, result: { stopReason: 'end_turn' } });
+      await sendPromise;
+    });
+
+    it('falls back to temp file when promptCapabilities.image is not set', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+      driver._ready = true;
+      driver._sessionId = 'sess-123';
+      driver._promptCapabilities = {};
+
+      const imageData = {
+        uri: 'file:///tmp/test.png',
+        base64: 'dGVzdA==',
+        mimeType: 'image/png',
+      };
+
+      const sendPromise = driver.sendPrompt('Describe this', 'sess-123', imageData);
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.method).toBe('session/prompt');
+      // Should have only text, no image block
+      expect(msg.params.prompt).toHaveLength(1);
+      expect(msg.params.prompt[0].type).toBe('text');
+      expect(msg.params.prompt[0].text).toContain('Describe this');
+      expect(msg.params.prompt[0].text).toContain('[An image has been saved to');
+      expect(msg.params.prompt[0].text).toContain('.png');
+
+      driver._handleMessage({ id: msg.id, result: { stopReason: 'end_turn' } });
+      await sendPromise;
+    });
+
+    it('emits error when not ready', async () => {
+      driver._ready = false;
+      await driver.sendPrompt('Fix the bug');
+
+      const errorEvent = events.find(e => e.event === 'error');
+      expect(errorEvent).toBeTruthy();
+      expect(errorEvent.data.message).toBe('OpenCode not ready');
+    });
+  });
+
+  describe('Interrupt', () => {
+    it('sends SIGINT to process on interrupt', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+      driver._sessionId = 'sess-123';
+
+      await driver.interrupt();
+
+      expect(proc.kill).toHaveBeenCalledWith('SIGINT');
+    });
+
+    it('handles interrupt when no process exists', async () => {
+      driver._process = null;
+      // Should not throw
+      await driver.interrupt();
+    });
+  });
+
+  describe('Permission mode', () => {
+    it('maps bypassPermissions to auto-approve', async () => {
+      await driver.setPermissionMode('bypassPermissions');
+      expect(driver._autoApprovePermissions).toBe(true);
+    });
+
+    it('maps default to manual approval', async () => {
+      driver._autoApprovePermissions = true;
+      await driver.setPermissionMode('default');
+      expect(driver._autoApprovePermissions).toBe(false);
+    });
+  });
+
+  describe('Cleanup', () => {
+    it('kills process and clears state on stop', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+      driver._ready = true;
+      driver._sessionId = 'sess-1';
+
+      await driver.stop();
+
+      expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(driver.isReady()).toBe(false);
+      expect(driver._sessionId).toBeNull();
+    });
+
+    it('rejects pending RPC requests on stop', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+
+      const promise = driver._rpcRequest('test/method', {});
+      const rejection = promise.catch(e => e);
+      await driver.stop();
+
+      const error = await rejection;
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toBe('Driver stopped');
+    });
+  });
+
+  describe('stdout JSONL parsing', () => {
+    it('handles partial lines across data chunks via buffer logic', () => {
+      const fullMessage = JSON.stringify({
+        method: 'session/update',
+        params: { update: { type: 'agent_message_chunk', content: [{ type: 'text', text: 'hello' }] } },
+      });
+      const splitPoint = Math.floor(fullMessage.length / 2);
+
+      // First chunk: partial JSON
+      driver._buffer += fullMessage.substring(0, splitPoint);
+      let lines = driver._buffer.split('\n');
+      driver._buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (line.trim()) driver._handleMessage(JSON.parse(line.trim()));
+      }
+      expect(events.filter(e => e.event === 'stream')).toHaveLength(0);
+
+      // Second chunk: rest of JSON + newline
+      driver._buffer += fullMessage.substring(splitPoint) + '\n';
+      lines = driver._buffer.split('\n');
+      driver._buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (line.trim()) driver._handleMessage(JSON.parse(line.trim()));
+      }
+
+      expect(events.filter(e => e.event === 'stream')).toHaveLength(1);
+      expect(events.find(e => e.event === 'stream').data.text).toBe('hello');
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. Cross-Driver Behavioral Consistency Tests
 // ---------------------------------------------------------------------------
 
 describe('Cross-Driver Consistency', () => {
-  it('both drivers normalize agent messages to { content: [{type: "text", text}] }', () => {
+  it('all three drivers normalize agent messages to { content: [{type: "text", text}] }', () => {
     // Claude
     const claude = new ClaudeDriver();
     const claudeEvents = collectEvents(claude, ['message']);
@@ -1257,12 +2333,43 @@ describe('Cross-Driver Consistency', () => {
       params: { item: { type: 'agentMessage', text: 'Hello from Codex' } },
     });
 
-    // Both should produce the same structure
+    // OpenCode — thinking is accumulated and flushed with next event
+    const opencode = new OpenCodeDriver();
+    const opencodeEvents = collectEvents(opencode, ['message']);
+
+    opencode._handleMessage({
+      method: 'session/update',
+      params: {
+        update: {
+          type: 'agent_thought_chunk',
+          content: 'Hello from OpenCode',
+        },
+      },
+    });
+
+    // Flush thinking via a tool_call so it emits as a combined message
+    opencode._handleMessage({
+      method: 'session/update',
+      params: {
+        update: {
+          type: 'tool_call',
+          toolCallId: 'tc-consistency',
+          title: 'Read',
+          input: {},
+          status: 'pending',
+        },
+      },
+    });
+
+    // All should produce the same structure
     expect(claudeEvents[0].data.content[0].type).toBe('text');
     expect(codexEvents[0].data.content[0].type).toBe('text');
+    expect(opencodeEvents[0].data.content[0].type).toBe('thinking');
+    expect(opencodeEvents[0].data.content[0].text).toBe('Hello from OpenCode');
 
     claude.stop();
     codex.stop();
+    opencode.stop();
   });
 
   it('both drivers normalize command execution to tool_use + tool_result', () => {
@@ -1310,7 +2417,7 @@ describe('Cross-Driver Consistency', () => {
     codex.stop();
   });
 
-  it('both drivers emit stream events with {text} shape', () => {
+  it('all three drivers emit stream events with {text} shape', () => {
     const claude = new ClaudeDriver();
     const claudeEvents = collectEvents(claude, ['stream']);
     const ws = createMockWebSocket();
@@ -1329,14 +2436,24 @@ describe('Cross-Driver Consistency', () => {
       params: { delta: 'chunk' },
     });
 
+    const opencode = new OpenCodeDriver();
+    const opencodeEvents = collectEvents(opencode, ['stream']);
+
+    opencode._handleMessage({
+      method: 'session/update',
+      params: { update: { type: 'agent_message_chunk', content: [{ type: 'text', text: 'chunk' }] } },
+    });
+
     expect(claudeEvents[0].data).toEqual({ text: 'chunk' });
     expect(codexEvents[0].data).toEqual({ text: 'chunk' });
+    expect(opencodeEvents[0].data).toEqual({ text: 'chunk' });
 
     claude.stop();
     codex.stop();
+    opencode.stop();
   });
 
-  it('both drivers emit permission events with {requestId, toolName, toolInput}', () => {
+  it('all three drivers emit permission events with {requestId, toolName, toolInput}', () => {
     const claude = new ClaudeDriver();
     const claudeEvents = collectEvents(claude, ['permission']);
     const ws = createMockWebSocket();
@@ -1363,9 +2480,23 @@ describe('Cross-Driver Consistency', () => {
       },
     });
 
-    // Both should have the same shape
-    for (const events of [claudeEvents, codexEvents]) {
-      const perm = events[0].data;
+    const opencode = new OpenCodeDriver();
+    const opencodeEvents = collectEvents(opencode, ['permission']);
+
+    opencode._handleMessage({
+      id: 'perm-1',
+      method: 'session/request_permission',
+      params: {
+        sessionId: 'sess-1',
+        title: 'Bash',
+        input: { command: 'npm test' },
+        options: [{ optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' }],
+      },
+    });
+
+    // All three should have the same shape
+    for (const evts of [claudeEvents, codexEvents, opencodeEvents]) {
+      const perm = evts[0].data;
       expect(perm).toHaveProperty('requestId');
       expect(perm).toHaveProperty('toolName');
       expect(perm).toHaveProperty('toolInput');
@@ -1376,9 +2507,10 @@ describe('Cross-Driver Consistency', () => {
 
     claude.stop();
     codex.stop();
+    opencode.stop();
   });
 
-  it('both drivers emit result events with {cost, usage, isError, sessionId}', () => {
+  it('all three drivers emit result events with {cost, usage, isError, sessionId}', () => {
     // Claude
     const claude = new ClaudeDriver();
     const claudeEvents = collectEvents(claude, ['result']);
@@ -1407,9 +2539,22 @@ describe('Cross-Driver Consistency', () => {
       },
     });
 
-    // Both should have these fields
-    for (const events of [claudeEvents, codexEvents]) {
-      const result = events[0].data;
+    // OpenCode — result is emitted when sendPrompt() returns, so we test via direct emit
+    const opencode = new OpenCodeDriver();
+    const opencodeEvents = collectEvents(opencode, ['result']);
+    const proc = createMockProcess();
+    opencode._process = proc;
+    opencode._ready = true;
+    opencode._sessionId = 'sess-oc-1';
+
+    // Trigger sendPrompt and resolve it
+    const sendPromise = opencode.sendPrompt('test');
+    const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+    opencode._handleMessage({ id: msg.id, result: { stopReason: 'end_turn' } });
+
+    // All three should have these fields
+    for (const evts of [claudeEvents, codexEvents]) {
+      const result = evts[0].data;
       expect(result).toHaveProperty('cost');
       expect(result).toHaveProperty('usage');
       expect(result).toHaveProperty('isError');
@@ -1418,8 +2563,21 @@ describe('Cross-Driver Consistency', () => {
       expect(typeof result.isError).toBe('boolean');
     }
 
-    claude.stop();
-    codex.stop();
+    // Need to wait for the async sendPrompt to complete
+    return sendPromise.then(() => {
+      const result = opencodeEvents[0].data;
+      expect(result).toHaveProperty('cost');
+      expect(result).toHaveProperty('usage');
+      expect(result).toHaveProperty('isError');
+      expect(result).toHaveProperty('sessionId');
+      expect(typeof result.cost).toBe('number');
+      expect(typeof result.isError).toBe('boolean');
+      expect(result.sessionId).toBe('sess-oc-1');
+
+      claude.stop();
+      codex.stop();
+      opencode.stop();
+    });
   });
 });
 
@@ -1440,6 +2598,10 @@ describe('AgentSession with Drivers', () => {
     const codex = createDriver('codex');
     expect(codex).toBeInstanceOf(CodexDriver);
     expect(codex.name).toBe('Codex');
+
+    const opencode = createDriver('opencode');
+    expect(opencode).toBeInstanceOf(OpenCodeDriver);
+    expect(opencode.name).toBe('OpenCode');
   });
 
   it('all drivers extend BaseDriver', () => {

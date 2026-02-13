@@ -17,6 +17,7 @@ import {
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
+import * as ImagePicker from 'expo-image-picker';
 import { useAgent, useAgentState } from '../state/AgentContext';
 import type { ConnectionStatus, PermissionRequest } from '../types';
 import type { AgentType, Project, Skill } from '../state/types';
@@ -29,6 +30,7 @@ import { GitTabContent, type GitStatusData } from './GitTabContent';
 import { ArtifactsTabContent } from './ArtifactsTabContent';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 import { useSettings } from '../state/SettingsContext';
+import { getCanonicalToolKey, isQuestionTool } from '../utils/toolRegistry';
 
 // Claude logo SVG path (shared with AgentCard)
 const CLAUDE_LOGO_PATH = 'M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z';
@@ -47,7 +49,7 @@ interface AgentDetailScreenProps {
   projects?: Project[];
   skills?: Skill[];
   onBack: () => void;
-  onSendMessage: (agentId: string, text: string) => void;
+  onSendMessage: (agentId: string, text: string, imageData?: { uri: string; base64: string; mimeType: string }) => void;
   onStopAgent?: (agentId: string) => void;
   onRespondPermission: (agentId: string, requestId: string, behavior: 'allow' | 'deny', updatedInput?: Record<string, unknown>) => void;
   onSetAutoApprove?: (agentId: string, enabled: boolean) => void;
@@ -104,7 +106,9 @@ function PermissionDiffView({ filePath, oldStr, newStr }: { filePath?: string; o
 }
 
 function isEditWithDiff(toolName: string, toolInput: Record<string, unknown>): boolean {
-  return toolName === 'Edit' && typeof toolInput.old_string === 'string' && typeof toolInput.new_string === 'string';
+  return getCanonicalToolKey(toolName) === 'edit'
+    && typeof toolInput.old_string === 'string'
+    && typeof toolInput.new_string === 'string';
 }
 
 // Individual permission prompt for structured tool data
@@ -162,124 +166,6 @@ function PermissionCard({
         <TouchableOpacity style={styles.allowButton} onPress={handleAllow} activeOpacity={0.8}>
           <Text style={styles.allowText}>Allow</Text>
         </TouchableOpacity>
-      </View>
-    </View>
-  );
-}
-
-// Interactive AskUserQuestion permission card — tappable options
-function AskUserQuestionPermissionCard({
-  permission,
-  onSelect,
-  onDeny,
-}: {
-  permission: PermissionRequest;
-  onSelect: (answers: Record<string, string>) => void;
-  onDeny: () => void;
-}) {
-  const questions: Array<{
-    question: string;
-    header?: string;
-    options: Array<{ label: string; description?: string }>;
-    multiSelect?: boolean;
-  }> = Array.isArray(permission.toolInput?.questions) ? (permission.toolInput.questions as any[]) : [];
-
-  const [selections, setSelections] = useState<Record<number, Set<number>>>({});
-
-  if (questions.length === 0) return null;
-
-  const handleTapOption = (qi: number, oi: number, multiSelect?: boolean) => {
-    if (Platform.OS === 'ios') {
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    }
-    setSelections(prev => {
-      const updated = { ...prev };
-      if (multiSelect) {
-        const current = new Set(prev[qi] || []);
-        if (current.has(oi)) current.delete(oi);
-        else current.add(oi);
-        updated[qi] = current;
-      } else {
-        // Single select — tap selects and submits
-        updated[qi] = new Set([oi]);
-        // Build answers and submit on next tick
-        const answers: Record<string, string> = {};
-        questions.forEach((q, qIdx) => {
-          const selected = qIdx === qi ? new Set([oi]) : (prev[qIdx] || new Set());
-          const labels = Array.from(selected).map(idx => q.options[idx]?.label).filter(Boolean);
-          if (labels.length > 0) {
-            answers[q.question] = labels.join(', ');
-          }
-        });
-        setTimeout(() => {
-          if (Platform.OS === 'ios') {
-            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-          }
-          onSelect(answers);
-        }, 150);
-      }
-      return updated;
-    });
-  };
-
-  const handleSubmitMulti = () => {
-    const answers: Record<string, string> = {};
-    questions.forEach((q, qi) => {
-      const selected = selections[qi] || new Set();
-      const labels = Array.from(selected).map(idx => q.options[idx]?.label).filter(Boolean);
-      if (labels.length > 0) {
-        answers[q.question] = labels.join(', ');
-      }
-    });
-    if (Platform.OS === 'ios') {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    }
-    onSelect(answers);
-  };
-
-  const handleDeny = () => {
-    if (Platform.OS === 'ios') {
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    }
-    onDeny();
-  };
-
-  const hasMultiSelect = questions.some(q => q.multiSelect);
-
-  return (
-    <View style={styles.permissionCard}>
-      {questions.map((q, qi) => (
-        <View key={qi} style={qi > 0 ? { marginTop: 16 } : undefined}>
-          <Text style={styles.askQuestionText}>{q.question}</Text>
-          <View style={styles.askOptions}>
-            {q.options.map((opt, oi) => {
-              const isSelected = selections[qi]?.has(oi) ?? false;
-              return (
-                <TouchableOpacity
-                  key={oi}
-                  style={[styles.askOption, isSelected && styles.askOptionSelected]}
-                  onPress={() => handleTapOption(qi, oi, q.multiSelect)}
-                  activeOpacity={0.7}
-                >
-                  <Text style={[styles.askOptionLabel, isSelected && styles.askOptionLabelSelected]}>{opt.label}</Text>
-                  {opt.description && (
-                    <Text style={[styles.askOptionDesc, isSelected && styles.askOptionDescSelected]}>{opt.description}</Text>
-                  )}
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        </View>
-      ))}
-      <View style={styles.permissionButtons}>
-        <TouchableOpacity style={styles.denyButton} onPress={handleDeny} activeOpacity={0.7}>
-          <Text style={styles.denyText}>Dismiss</Text>
-        </TouchableOpacity>
-        {hasMultiSelect && (
-          <TouchableOpacity style={styles.allowButton} onPress={handleSubmitMulti} activeOpacity={0.8}>
-            <Text style={styles.allowText}>Submit</Text>
-          </TouchableOpacity>
-        )}
       </View>
     </View>
   );
@@ -343,6 +229,7 @@ export function AgentDetailScreen({
   const [messageWindow, setMessageWindow] = useState(INITIAL_MESSAGE_WINDOW);
   const [showPlusModal, setShowPlusModal] = useState(false);
   const [showSkillPicker, setShowSkillPicker] = useState(false);
+  const [attachedImage, setAttachedImage] = useState<{ uri: string; base64: string; mimeType: string } | null>(null);
 
   // Swipe-from-left-edge to go back (only on Chat tab)
   const swipeX = useRef(new Animated.Value(0)).current;
@@ -439,10 +326,11 @@ export function AgentDetailScreen({
   });
 
   const handleSend = useCallback((text: string) => {
-    onSendMessage(agentId, text);
-    // Clear draft after sending
+    onSendMessage(agentId, text, attachedImage || undefined);
+    // Clear draft and attached image after sending
     dispatch({ type: 'SET_DRAFT', agentId, text: '' });
-  }, [agentId, onSendMessage, dispatch]);
+    setAttachedImage(null);
+  }, [agentId, onSendMessage, dispatch, attachedImage]);
 
   const handleStop = useCallback(() => {
     onStopAgent?.(agentId);
@@ -500,6 +388,99 @@ export function AgentDetailScreen({
   }, [abortListening]);
 
   const canSendVoice = voiceText.trim().length > 0 && connectionStatus === 'connected';
+
+  // Image upload handler
+  const handleImageUpload = useCallback(async () => {
+    setShowPlusModal(false);
+
+    // Request permissions
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      alert('Sorry, we need camera roll permissions to upload images.');
+      return;
+    }
+
+    // Launch image picker
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsEditing: false,
+      quality: 0,
+      base64: true,
+    });
+
+    if (!result.canceled && result.assets?.[0]) {
+      const asset = result.assets[0];
+
+      if (!asset.base64) {
+        alert('Failed to read image data');
+        return;
+      }
+
+      // Determine MIME type from URI.
+      // Note: expo-image-picker auto-converts HEIC→JPEG on iOS, so most
+      // picked photos will already have a .jpg URI even if the original was HEIC.
+      const ext = asset.uri.split('.').pop()?.toLowerCase();
+      const mimeMap: Record<string, string> = {
+        png: 'image/png',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        gif: 'image/gif',
+        webp: 'image/webp',
+        heic: 'image/jpeg', // HEIC data is transcoded to JPEG by expo-image-picker
+        heif: 'image/jpeg',
+      };
+      const mimeType = (ext && mimeMap[ext]) || 'image/jpeg';
+
+      // Downsample large images to prevent overloading the model.
+      // iPhone photos can be 4032x3024 (12MP+) → 3MB+ base64 which hangs models.
+      const MAX_DIMENSION = 1536;
+      const w = asset.width ?? 0;
+      const h = asset.height ?? 0;
+      let finalUri = asset.uri;
+      let finalBase64 = asset.base64;
+      let finalMime = mimeType;
+
+      if (w > MAX_DIMENSION || h > MAX_DIMENSION) {
+        try {
+          const { manipulateAsync, SaveFormat } = await import('expo-image-manipulator');
+          const scale = Math.min(MAX_DIMENSION / w, MAX_DIMENSION / h);
+          const targetWidth = Math.round(w * scale);
+          const manipulated = await manipulateAsync(
+            asset.uri,
+            [{ resize: { width: targetWidth } }],
+            { compress: 0.7, format: SaveFormat.JPEG, base64: true },
+          );
+          if (manipulated.base64) {
+            finalUri = manipulated.uri;
+            finalBase64 = manipulated.base64;
+            finalMime = 'image/jpeg';
+            console.log('Image downsampled:', {
+              original: `${w}x${h} (${Math.round(asset.base64.length / 1024)}KB)`,
+              resized: `${manipulated.width}x${manipulated.height} (${Math.round(manipulated.base64.length / 1024)}KB)`,
+            });
+          }
+        } catch (err) {
+          // Native module not available yet (needs dev build rebuild).
+          // Fall back to sending original image.
+          console.warn('Image downsample unavailable (rebuild dev build for expo-image-manipulator):', err);
+        }
+      }
+
+      // Store the image as attachment - will be sent when user presses send
+      setAttachedImage({
+        uri: finalUri,
+        base64: finalBase64,
+        mimeType: finalMime,
+      });
+
+      console.log('Image attached:', {
+        width: w,
+        height: h,
+        mimeType: finalMime,
+        base64Length: finalBase64.length,
+      });
+    }
+  }, []);
 
   // Match agent to a project (for icon and name)
   const matchedProject = useMemo(() => {
@@ -617,6 +598,10 @@ export function AgentDetailScreen({
 
   const isDisabled = connectionStatus !== 'connected';
   const permissions = Array.from(agent.pendingPermissions.values());
+  const questionPerm = useMemo(
+    () => permissions.find((p) => isQuestionTool(agent.type, p.toolName)),
+    [permissions, agent.type],
+  );
   const pendingPermissionToolNames = useMemo(
     () => new Set(permissions.map(p => p.toolName)),
     [permissions],
@@ -791,12 +776,11 @@ export function AgentDetailScreen({
                       </TouchableOpacity>
                     )}
                     {visibleMessages.map((msg, idx) => {
-                      // Find pending AskUserQuestion permission to wire up inline interaction
-                      const questionPerm = permissions.find(p => p.toolName === 'AskUserQuestion');
                       return (
                         <MessageBubble
                           key={`${msg.id}-${idx}`}
                           message={msg}
+                          agentType={agent.type}
                           toolResultMap={toolResultMap}
                           animateThinking={agent.status === 'running' && idx === visibleMessages.length - 1}
                           pendingPermissionToolNames={pendingPermissionToolNames}
@@ -808,8 +792,8 @@ export function AgentDetailScreen({
                   </>
                 )}
 
-                {/* Pending permissions (excluding AskUserQuestion, handled inline) */}
-                {permissions.filter(p => p.toolName !== 'AskUserQuestion').map((perm) => (
+                {/* Pending permissions (excluding question tools, handled inline) */}
+                {permissions.filter(p => !isQuestionTool(agent.type, p.toolName)).map((perm) => (
                   <PermissionCard
                     key={perm.requestId}
                     permission={perm}
@@ -878,6 +862,8 @@ export function AgentDetailScreen({
                   onActivity={onResetPingTimer}
                   initialValue={agent.draftText}
                   onDraftChange={handleDraftChange}
+                  attachedImage={attachedImage}
+                  onRemoveImage={() => setAttachedImage(null)}
                 />
               )}
             </View>
@@ -907,6 +893,22 @@ export function AgentDetailScreen({
       {/* Plus button modal — actions */}
       <BottomModal isVisible={showPlusModal} onClose={() => setShowPlusModal(false)} title="Actions">
         <View style={plusModalStyles.list}>
+          <TouchableOpacity
+            style={plusModalStyles.row}
+            activeOpacity={0.7}
+            onPress={handleImageUpload}
+          >
+            <View style={plusModalStyles.icon}>
+              <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+                <Path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12" stroke="#ccc" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+              </Svg>
+            </View>
+            <View style={plusModalStyles.rowContent}>
+              <Text style={plusModalStyles.label}>Upload Image</Text>
+              <Text style={plusModalStyles.description}>Send an image from your device</Text>
+            </View>
+          </TouchableOpacity>
+
           <TouchableOpacity
             style={plusModalStyles.row}
             activeOpacity={0.7}

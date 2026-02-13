@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useCallback, useRef, useMemo, useEffect } from 'react';
-import type { AppState, AgentState, AgentAction, ServerMessage, AgentMessage, PermissionRequest } from './types';
+import type { AppState, AgentState, AgentAction, ServerMessage, AgentMessage, PermissionRequest, ImageAttachment, ContentBlock } from './types';
 import { agentReducer, initialState } from './agentReducer';
 import { saveMessages, loadMessages, clearMessages } from './messageCache';
 
@@ -7,6 +7,17 @@ import { saveMessages, loadMessages, clearMessages } from './messageCache';
 let msgSeq = 0;
 function nextMsgId(suffix: string): string {
   return `${++msgSeq}-${suffix}`;
+}
+
+function normalizeImageAttachment(raw: unknown): ImageAttachment | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const image = raw as Record<string, unknown>;
+  const uri = typeof image.uri === 'string' && image.uri ? image.uri : undefined;
+  const mimeType = typeof image.mimeType === 'string' && image.mimeType ? image.mimeType : undefined;
+  const base64 = !uri && typeof image.base64 === 'string' && image.base64 ? image.base64 : undefined;
+
+  if (!uri && !base64) return undefined;
+  return { uri, mimeType, base64 };
 }
 
 // --- Context ---
@@ -150,11 +161,12 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
       }
 
       case 'userMessage': {
-        if (msg.agentId && msg.content) {
+        if (msg.agentId && msg.content !== undefined) {
           const message: AgentMessage = {
             id: nextMsgId('user'),
             type: 'user',
             content: Array.isArray(msg.content) ? msg.content : String(msg.content),
+            imageData: normalizeImageAttachment(msg.imageData),
             timestamp: msg.ts || Date.now(),
           };
           dispatch({ type: 'ADD_MESSAGE', agentId: msg.agentId, message });
@@ -176,6 +188,9 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
 
       case 'assistantMessage': {
         if (msg.agentId && msg.content) {
+          const content: ContentBlock[] = Array.isArray(msg.content)
+            ? msg.content
+            : [{ type: 'text', text: String(msg.content) }];
           const timestamp = msg.ts || Date.now();
           const hadStream = streamSeenRef.current.has(msg.agentId);
 
@@ -197,14 +212,14 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
             dispatch({
               type: 'FINALIZE_ASSISTANT_MESSAGE',
               agentId: msg.agentId,
-              content: msg.content,
+              content,
               timestamp,
             });
           } else {
             const message: AgentMessage = {
               id: nextMsgId('assistant'),
               type: 'assistant',
-              content: msg.content,
+              content,
               timestamp,
             };
             dispatch({ type: 'ADD_MESSAGE', agentId: msg.agentId, message });
@@ -219,6 +234,18 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
             type: 'MERGE_TOOL_RESULTS',
             agentId: msg.agentId,
             results: msg.results,
+          });
+        }
+        break;
+      }
+
+      case 'toolUseUpdated': {
+        if (msg.agentId && msg.toolCallId && msg.input) {
+          dispatch({
+            type: 'UPDATE_TOOL_INPUT',
+            agentId: msg.agentId,
+            toolCallId: msg.toolCallId,
+            input: msg.input,
           });
         }
         break;

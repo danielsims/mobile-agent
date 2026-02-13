@@ -8,6 +8,7 @@ const cache = new Map(); // type -> { ts, models }
 function findBinary(envVar, localName) {
   const paths = [
     process.env[envVar],
+    `${process.env.HOME}/.${localName}/bin/${localName}`,
     `${process.env.HOME}/.local/bin/${localName}`,
     `/usr/local/bin/${localName}`,
   ].filter(Boolean);
@@ -226,6 +227,66 @@ async function listCodexModels() {
   }), 10_000, 'codex model discovery');
 }
 
+async function listOpenCodeModels() {
+  const opencodePath = findBinary('OPENCODE_PATH', 'opencode');
+
+  return withTimeout(new Promise((resolve, reject) => {
+    const proc = spawn(opencodePath, ['models'], {
+      cwd: process.env.HOME,
+      env: { ...process.env },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    proc.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+
+    proc.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    proc.on('error', (err) => {
+      reject(err);
+    });
+
+    proc.on('exit', (code) => {
+      if (code !== 0) {
+        reject(new Error(`opencode models exited with code ${code}: ${stderr}`));
+        return;
+      }
+
+      // Try to parse as JSON first (newer versions may output JSON)
+      let models = [];
+      try {
+        const parsed = JSON.parse(stdout);
+        if (Array.isArray(parsed)) {
+          models = parsed.map(m => ({
+            value: typeof m === 'string' ? m : (m.id || m.model || m.value || JSON.stringify(m)),
+            label: typeof m === 'string' ? formatModelLabel('opencode', m) : (m.label || m.name || m.id || m.model || JSON.stringify(m)),
+          }));
+        } else if (parsed.models) {
+          models = parsed.models.map(m => ({
+            value: m.id || m.model || m.value || JSON.stringify(m),
+            label: m.label || m.name || m.id || m.model || JSON.stringify(m),
+          }));
+        }
+      } catch {
+        // Fall back to line-by-line parsing
+        const lines = stdout.split('\n').map(l => l.trim()).filter(Boolean);
+        models = lines.map(modelId => ({
+          value: modelId,
+          label: formatModelLabel('opencode', modelId),
+        }));
+      }
+
+      resolve(models);
+    });
+  }), 10_000, 'opencode model discovery');
+}
+
 export async function listModelsForAgentType(type) {
   const cached = cache.get(type);
   if (cached && (Date.now() - cached.ts) < CACHE_TTL_MS) {
@@ -244,6 +305,17 @@ export async function listModelsForAgentType(type) {
         options.push({
           value: m.value,
           label: formatModelLabel('codex', m.value),
+        });
+      }
+    } else if (type === 'opencode') {
+      const opencode = await listOpenCodeModels();
+      const seen = new Set();
+      for (const m of opencode) {
+        if (seen.has(m.value)) continue;
+        seen.add(m.value);
+        options.push({
+          value: m.value,
+          label: formatModelLabel('opencode', m.value),
         });
       }
     } else if (type === 'claude') {

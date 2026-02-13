@@ -3,13 +3,16 @@
 export { BaseDriver } from './BaseDriver.js';
 export { ClaudeDriver } from './ClaudeDriver.js';
 export { CodexDriver } from './CodexDriver.js';
+export { OpenCodeDriver } from './OpenCodeDriver.js';
 
 import { ClaudeDriver } from './ClaudeDriver.js';
 import { CodexDriver } from './CodexDriver.js';
+import { OpenCodeDriver } from './OpenCodeDriver.js';
 
 const DRIVER_MAP = {
   claude: ClaudeDriver,
   codex: CodexDriver,
+  opencode: OpenCodeDriver,
 };
 
 /**
