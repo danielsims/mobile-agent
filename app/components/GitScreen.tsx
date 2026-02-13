@@ -18,6 +18,7 @@ import {
   type NativeScrollEvent,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
+import { OpenCodeLogo } from './OpenCodeLogo';
 import * as Haptics from 'expo-haptics';
 import { useAgentState } from '../state/AgentContext';
 import { useSettings } from '../state/SettingsContext';
@@ -156,6 +157,8 @@ function AgentAvatar({ type, size = 20 }: { type: AgentType; size?: number }) {
         <Svg width={iconSize} height={iconSize} viewBox="0 0 24 24">
           <Path d={OPENAI_LOGO_PATH} fill={brand.color} fillRule="evenodd" />
         </Svg>
+      ) : type === 'opencode' ? (
+        <OpenCodeLogo width={iconSize * 0.8} height={iconSize * 1.4} variant="dark" />
       ) : (
         <Text style={{ color: brand.color, fontSize: size * 0.45, fontWeight: '700', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }}>
           {brand.letter}
