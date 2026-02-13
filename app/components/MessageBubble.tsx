@@ -285,6 +285,22 @@ function AskUserQuestionCard({
   // Parse the user's answer from the result string (for read-only mode)
   const answerText = result ?? '';
 
+  // Show a submit button when there are multiple questions or any multi-select
+  // question, so the user can answer all of them before submitting.
+  const needsSubmitButton = questions.length > 1 || questions.some(q => q.multiSelect);
+
+  const buildAnswers = (sels: Record<number, Set<number>>): Record<string, string> => {
+    const answers: Record<string, string> = {};
+    questions.forEach((q, qi) => {
+      const selected = sels[qi] || new Set();
+      const labels = Array.from(selected).map(idx => q.options[idx]?.label).filter(Boolean);
+      if (labels.length > 0) {
+        answers[q.question] = labels.join(', ');
+      }
+    });
+    return answers;
+  };
+
   const handleTapOption = (qi: number, oi: number, multiSelect?: boolean) => {
     if (!interactive) return;
     if (Platform.OS === 'ios') {
@@ -299,41 +315,31 @@ function AskUserQuestionCard({
         updated[qi] = current;
       } else {
         updated[qi] = new Set([oi]);
-        const answers: Record<string, string> = {};
-        questions.forEach((q, qIdx) => {
-          const selected = qIdx === qi ? new Set([oi]) : (prev[qIdx] || new Set());
-          const labels = Array.from(selected).map(idx => q.options[idx]?.label).filter(Boolean);
-          if (labels.length > 0) {
-            answers[q.question] = labels.join(', ');
-          }
-        });
-        setSubmitted(true);
-        setTimeout(() => {
-          if (Platform.OS === 'ios') {
-            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-          }
-          onRespond!(answers);
-        }, 150);
+
+        // Auto-submit only for single-question, single-select cards.
+        // Multi-question cards need a submit button so the user can
+        // answer all questions before submitting.
+        if (!needsSubmitButton) {
+          setSubmitted(true);
+          setTimeout(() => {
+            if (Platform.OS === 'ios') {
+              Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+            }
+            onRespond!(buildAnswers(updated));
+          }, 150);
+        }
       }
       return updated;
     });
   };
 
-  const handleSubmitMulti = () => {
+  const handleSubmit = () => {
     if (!onRespond) return;
-    const answers: Record<string, string> = {};
-    questions.forEach((q, qi) => {
-      const selected = selections[qi] || new Set();
-      const labels = Array.from(selected).map(idx => q.options[idx]?.label).filter(Boolean);
-      if (labels.length > 0) {
-        answers[q.question] = labels.join(', ');
-      }
-    });
     if (Platform.OS === 'ios') {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     }
     setSubmitted(true);
-    onRespond(answers);
+    onRespond(buildAnswers(selections));
   };
 
   const handleDeny = () => {
@@ -344,7 +350,7 @@ function AskUserQuestionCard({
     onDeny();
   };
 
-  const hasMultiSelect = questions.some(q => q.multiSelect);
+  const allAnswered = questions.every((_, qi) => (selections[qi]?.size ?? 0) > 0);
 
   return (
     <View style={styles.questionCard}>
@@ -359,7 +365,11 @@ function AskUserQuestionCard({
             <Text style={styles.questionText}>{q.question}</Text>
             <View style={styles.questionOptions}>
               {q.options.map((opt, oi) => {
-                const isSelected = interactive
+                // Use local selections when the user has interacted;
+                // fall back to answerText for historical messages where
+                // selections state is empty (component just mounted).
+                const hasLocalSelections = Object.keys(selections).length > 0;
+                const isSelected = hasLocalSelections
                   ? (selections[qi]?.has(oi) ?? false)
                   : answerText.includes(opt.label);
                 const Wrapper = interactive ? TouchableOpacity : View;
@@ -389,8 +399,13 @@ function AskUserQuestionCard({
           </View>
         );
       })}
-      {interactive && hasMultiSelect && (
-        <TouchableOpacity style={styles.questionSubmitButton} onPress={handleSubmitMulti} activeOpacity={0.8}>
+      {interactive && needsSubmitButton && (
+        <TouchableOpacity
+          style={[styles.questionSubmitButton, !allAnswered && { opacity: 0.4 }]}
+          onPress={handleSubmit}
+          activeOpacity={0.8}
+          disabled={!allAnswered}
+        >
           <Text style={styles.questionSubmitText}>Submit</Text>
         </TouchableOpacity>
       )}
