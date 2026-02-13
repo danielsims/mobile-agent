@@ -22,14 +22,16 @@
 //   - plan — execution plan updates
 
 import { spawn, execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { basename } from 'node:path';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { basename, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { v4 as uuidv4 } from 'uuid';
 import { BaseDriver } from './BaseDriver.js';
 
 function findOpenCode() {
   const paths = [
     process.env.OPENCODE_PATH,
+    `${process.env.HOME}/.opencode/bin/opencode`,
     `${process.env.HOME}/.local/bin/opencode`,
     '/usr/local/bin/opencode',
   ].filter(Boolean);
@@ -53,11 +55,21 @@ export class OpenCodeDriver extends BaseDriver {
     this._buffer = '';            // incomplete line buffer for stdout
     this._initialized = false;
     this._currentStreamContent = '';
+    this._currentThinkingContent = '';
     this._autoApprovePermissions = false;
+    this._turnActive = false;
+    this._activeToolCalls = new Map(); // toolCallId -> { name, input }
 
     // Track pending permission requests keyed by our UI requestId.
     // entry: { rpcRequestId: string|number }
     this._approvalRequests = new Map();
+
+    // Terminal management: terminalId -> { process, output, exitCode, resolved }
+    this._terminals = new Map();
+    this._nextTerminalId = 1;
+
+    // Capabilities advertised by the agent during initialization
+    this._promptCapabilities = {};
   }
 
   async start(agentId, opts = {}) {
@@ -75,11 +87,20 @@ export class OpenCodeDriver extends BaseDriver {
       } catch { /* not a git repo */ }
     }
 
+    // Set the model via OPENCODE_CONFIG_CONTENT env var — this takes highest
+    // precedence in OpenCode's config chain and is the only reliable way to
+    // choose a model when spawning via ACP (session/new has no model param).
+    const env = { ...process.env };
+    if (model) {
+      const configOverride = { model };
+      env.OPENCODE_CONFIG_CONTENT = JSON.stringify(configOverride);
+      console.log(`[OpenCode ${agentId.slice(0, 8)}] Spawning with model override: ${model}`);
+    }
     console.log(`[OpenCode ${agentId.slice(0, 8)}] Spawning: ${OPENCODE_PATH} acp (stdio nd-JSON)`);
 
     this._process = spawn(OPENCODE_PATH, ['acp'], {
       cwd: cwd || process.env.HOME,
-      env: { ...process.env },
+      env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -94,9 +115,11 @@ export class OpenCodeDriver extends BaseDriver {
         const trimmed = line.trim();
         if (!trimmed) continue;
         try {
-          this._handleMessage(JSON.parse(trimmed));
-        } catch {
-          console.log(`[OpenCode ${agentId.slice(0, 8)}] Non-JSON stdout: ${trimmed.slice(0, 100)}`);
+          const parsed = JSON.parse(trimmed);
+          this._handleMessage(parsed);
+        } catch (err) {
+          console.log(`[OpenCode ${agentId.slice(0, 8)}] Non-JSON stdout: ${trimmed.slice(0, 200)}`);
+          console.log(`[OpenCode ${agentId.slice(0, 8)}] Parse error: ${err.message}`);
         }
       }
     });
@@ -120,56 +143,101 @@ export class OpenCodeDriver extends BaseDriver {
     });
 
     // Start the ACP initialization handshake
-    await this._initialize(cwd, gitBranch, resumeSessionId);
+    await this._initialize(cwd, gitBranch, resumeSessionId, model);
   }
 
-  async _initialize(cwd, gitBranch, resumeSessionId) {
+  async _initialize(cwd, gitBranch, resumeSessionId, model) {
     try {
-      // Step 1: Send initialize request with capabilities
-      const initResult = await this._rpcRequest('initialize', {
-        protocolVersion: 1,
-        clientCapabilities: {
-          fs: { readTextFile: true },
-          terminal: true,
-        },
-        clientInfo: {
-          name: 'mobile-agent',
-          version: '1.0.0',
-        },
-      });
-      console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Initialized:`, JSON.stringify(initResult).slice(0, 200));
+    // Step 1: Send initialize request with capabilities
+    const initResult = await this._rpcRequest('initialize', {
+      protocolVersion: 1,
+      clientCapabilities: {
+        fs: { readTextFile: true, writeTextFile: true },
+        terminal: true,
+      },
+      clientInfo: {
+        name: 'mobile-agent',
+        version: '1.0.0',
+      },
+    });
+    console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Initialized:`, JSON.stringify(initResult).slice(0, 200));
+
+    // Extract tools/capabilities from init response
+    const agentCapabilities = initResult?.agentCapabilities || {};
+    const availableTools = agentCapabilities?.tools || [];
+    const sessionCapabilities = agentCapabilities?.sessionCapabilities || {};
+    const promptCapabilities = agentCapabilities?.promptCapabilities || {};
+    this._promptCapabilities = promptCapabilities;
+    console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Prompt capabilities:`, JSON.stringify(promptCapabilities));
 
       // Step 2: Create or resume a session
+      // ACP's session/new does not accept a model parameter — model
+      // selection is done via session/set_config_option after creation.
       let sessionResult;
-      if (resumeSessionId) {
+      const sessionParams = {
+        cwd: cwd || process.env.HOME,
+        mcpServers: [],
+      };
+      console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] session/new (model set via env: ${model || 'auto'})`);
+
+      if (resumeSessionId && sessionCapabilities?.loadSession) {
         try {
           sessionResult = await this._rpcRequest('session/load', {
             sessionId: resumeSessionId,
+            cwd: sessionParams.cwd,
+            mcpServers: sessionParams.mcpServers,
           });
         } catch (err) {
           console.warn(`[OpenCode ${this._agentId?.slice(0, 8)}] session/load failed, creating new: ${err.message}`);
-          sessionResult = await this._rpcRequest('session/new', {
-            cwd: cwd || process.env.HOME,
-          });
+          sessionResult = await this._rpcRequest('session/new', sessionParams);
         }
       } else {
-        sessionResult = await this._rpcRequest('session/new', {
-          cwd: cwd || process.env.HOME,
-        });
+        sessionResult = await this._rpcRequest('session/new', sessionParams);
       }
 
       this._sessionId = sessionResult?.sessionId || sessionResult?.id || null;
       this._ready = true;
 
+      console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] session/new response:`, JSON.stringify(sessionResult).slice(0, 400));
+
+      // Verify the model — it should match what we requested since we set it
+      // via OPENCODE_CONFIG_CONTENT at spawn time.
+      const currentModelId = sessionResult?.models?.currentModelId;
+      let activeModel = currentModelId || null;
+
+      if (model && currentModelId && model !== currentModelId) {
+        console.warn(`[OpenCode ${this._agentId?.slice(0, 8)}] Model mismatch: expected=${model}, actual=${currentModelId}`);
+        activeModel = currentModelId;
+      } else if (model) {
+        activeModel = model;
+      }
+
+      // Extract modes from session result
+      const modes = sessionResult?.modes || {};
+      const availableModes = modes?.availableModes || [];
+      const currentMode = modes?.currentMode || null;
+
       console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Session started: ${this._sessionId?.slice(0, 8)}...`);
+      console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Available modes: ${JSON.stringify(availableModes).slice(0, 200) || 'none'}, current: ${currentMode}`);
+
+      // Use the active model (after potential switch), falling back to
+      // the agent product name only as a last resort.
+      const resolvedModel = activeModel
+        || model
+        || initResult?.agentInfo?.name
+        || null;
+      console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Active model: ${resolvedModel}`);
 
       this.emit('init', {
         sessionId: this._sessionId,
-        model: initResult?.agentInfo?.name || null,
-        tools: [],
+        model: resolvedModel,
+        tools: availableTools,
         cwd,
         projectName: cwd ? basename(cwd) : null,
         gitBranch,
+        capabilities: agentCapabilities,
+        availableModes,
+        currentMode,
       });
     } catch (err) {
       console.error(`[OpenCode ${this._agentId?.slice(0, 8)}] Initialization failed:`, err.message);
@@ -230,13 +298,7 @@ export class OpenCodeDriver extends BaseDriver {
       case 'terminal/wait_for_exit':
       case 'terminal/kill':
       case 'terminal/release': {
-        // Terminal operations — respond with unsupported for now.
-        // The agent handles tool execution internally in ACP mode.
-        if (isServerRequest) {
-          this._rpcRespond(msg.id, {
-            error: 'Terminal operations not supported by this client.',
-          });
-        }
+        this._handleTerminalRequest(msg, params, method);
         break;
       }
 
@@ -255,78 +317,107 @@ export class OpenCodeDriver extends BaseDriver {
 
   _handleSessionUpdate(params) {
     const update = params.update || params;
-    const type = update?.type || params?.type;
+    const type = update?.type || update?.sessionUpdate || params?.type || params?.sessionUpdate;
+
+    console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Session update type: ${type}, content:`, JSON.stringify(update).slice(0, 200));
 
     switch (type) {
       case 'agent_message_chunk': {
-        const blocks = update.content || update.blocks || [];
-        for (const block of blocks) {
-          if (block.type === 'text' && block.text) {
-            this._currentStreamContent += block.text;
-            this.emit('stream', { text: block.text });
+        // Don't flush thinking here — it will be combined with the final
+        // text message when sendPrompt completes, reducing message count.
+        const content = update.content;
+
+        // Handle different content formats
+        if (typeof content === 'string') {
+          // Direct string content
+          this._currentStreamContent += content;
+          this.emit('stream', { text: content });
+        } else if (content?.type === 'text' && content?.text) {
+          // Single content object with type and text
+          this._currentStreamContent += content.text;
+          this.emit('stream', { text: content.text });
+        } else if (Array.isArray(content)) {
+          // Array of content blocks
+          for (const block of content) {
+            if (block.type === 'text' && block.text) {
+              this._currentStreamContent += block.text;
+              this.emit('stream', { text: block.text });
+            }
           }
-        }
-        // If content is a string directly
-        if (typeof update.content === 'string' && update.content) {
-          this._currentStreamContent += update.content;
-          this.emit('stream', { text: update.content });
         }
         break;
       }
 
       case 'agent_thought_chunk': {
-        const text = typeof update.content === 'string'
-          ? update.content
-          : (update.content?.[0]?.text || update.text || '');
+        let text = '';
+        if (typeof update.content === 'string') {
+          text = update.content;
+        } else if (update.content?.type === 'text' && update.content?.text) {
+          // Single content object: { type: 'text', text: '...' }
+          text = update.content.text;
+        } else if (Array.isArray(update.content)) {
+          text = update.content
+            .filter(c => c.type === 'text' && c.text)
+            .map(c => c.text)
+            .join('');
+        } else {
+          text = update.text || '';
+        }
         if (text) {
-          this.emit('message', {
-            content: [{ type: 'thinking', text }],
-          });
+          // Accumulate thinking chunks — they arrive as many small fragments
+          // but should be rendered as a single thinking block (consistent
+          // with Claude which delivers thinking as one block).
+          this._currentThinkingContent += text;
         }
         break;
       }
 
       case 'tool_call': {
-        const toolCallId = update.toolCallId || update.id || uuidv4();
-        const title = update.title || update.name || 'unknown';
-        const status = update.status || 'pending';
+        const thinkingBlocks = this._flushThinking();
+        const toolCallId = this._extractToolCallId(update);
+        const toolName = this._extractToolName(update);
+        const toolInput = this._extractToolInput(update);
+        const status = this._normalizeStatus(update.status || 'pending');
 
         if (status === 'pending' || status === 'in_progress') {
-          this.emit('message', {
-            content: [{
-              type: 'tool_use',
-              id: toolCallId,
-              name: title,
-              input: update.input || {},
-            }],
-          });
-          this.emit('status', { status: 'running' });
+          this._emitToolUseIfNeeded(toolCallId, toolName, toolInput, thinkingBlocks);
+          if (this._turnActive || this._approvalRequests.size > 0) {
+            this.emit('status', { status: 'running' });
+          }
+        } else if (status === 'completed' || status === 'failed') {
+          this._emitToolUseIfNeeded(toolCallId, toolName, toolInput, thinkingBlocks);
+          if (status === 'completed') {
+            this._emitToolResult(toolCallId, this._extractToolResultContent(update));
+          } else {
+            const errorMsg = update.error || update.message || 'Tool call failed';
+            this._emitToolResult(toolCallId, typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg));
+          }
+          this._activeToolCalls.delete(toolCallId);
         }
         break;
       }
 
       case 'tool_call_update': {
-        const toolCallId = update.toolCallId || update.id || uuidv4();
-        const status = update.status;
+        const thinkingBlocks = this._flushThinking();
+        const toolCallId = this._extractToolCallId(update, true);
+        const toolName = this._extractToolName(update);
+        const toolInput = this._extractToolInput(update);
+        const status = this._normalizeStatus(update.status);
 
         if (status === 'completed') {
+          // Some OpenCode streams only send completion updates without a prior
+          // tool_call start event; emit a fallback tool_use so UI can render.
+          this._emitToolUseIfNeeded(toolCallId, toolName, toolInput, thinkingBlocks);
           const resultContent = this._extractToolResultContent(update);
-          this.emit('message', {
-            content: [{
-              type: 'tool_result',
-              toolUseId: toolCallId,
-              content: resultContent,
-            }],
-          });
+          this._emitToolResult(toolCallId, resultContent);
+          this._activeToolCalls.delete(toolCallId);
         } else if (status === 'failed') {
+          this._emitToolUseIfNeeded(toolCallId, toolName, toolInput, thinkingBlocks);
           const errorMsg = update.error || update.message || 'Tool call failed';
-          this.emit('message', {
-            content: [{
-              type: 'tool_result',
-              toolUseId: toolCallId,
-              content: typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg),
-            }],
-          });
+          this._emitToolResult(toolCallId, typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg));
+          this._activeToolCalls.delete(toolCallId);
+        } else if (status === 'in_progress' || status === 'pending') {
+          this._emitToolUseIfNeeded(toolCallId, toolName, toolInput, thinkingBlocks);
         }
         break;
       }
@@ -343,17 +434,60 @@ export class OpenCodeDriver extends BaseDriver {
       }
 
       case 'available_commands_update': {
-        // Slash commands available — log for now
+        // Slash commands available — emit for UI
+        const commands = update.availableCommands || [];
+        console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Available commands: ${commands.map(c => c.name).join(', ')}`);
+        this.emit('availableCommands', { commands });
         break;
       }
 
       case 'current_mode_update': {
         // Agent mode changed
+        const modeState = update.mode || update;
+        const currentMode = modeState?.currentMode || modeState?.mode || null;
+        console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Mode changed to: ${currentMode}`);
+        this.emit('modeChanged', { mode: currentMode });
         break;
       }
 
       case 'config_option_update': {
-        // Config changed
+        // Config changed — log details so we can see available config IDs
+        const configOptions = update.configOptions || [];
+        const summary = configOptions.map(o => `${o.id}(${o.category || '?'})=${o.value || '?'}`).join(', ');
+        console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Config options: ${summary || JSON.stringify(update).slice(0, 300)}`);
+        this.emit('configChanged', { configOptions });
+        break;
+      }
+
+      case 'message_stop': {
+        // End of agent message stream — thinking flushed at turn end in sendPrompt
+        console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Message stream complete`);
+        break;
+      }
+
+      case 'tool_call_start': {
+        const thinkingBlocks = this._flushThinking();
+        // Tool call is starting (alternative to tool_call)
+        const toolCallId = this._extractToolCallId(update);
+        const toolName = this._extractToolName(update);
+        const toolInput = this._extractToolInput(update);
+        this._emitToolUseIfNeeded(toolCallId, toolName, toolInput, thinkingBlocks);
+        if (this._turnActive || this._approvalRequests.size > 0) {
+          this.emit('status', { status: 'running' });
+        }
+        break;
+      }
+
+      case 'tool_call_end': {
+        const thinkingBlocks = this._flushThinking();
+        // Tool call completed (alternative to tool_call_update)
+        const toolCallId = this._extractToolCallId(update, true);
+        const toolName = this._extractToolName(update);
+        const toolInput = this._extractToolInput(update);
+        this._emitToolUseIfNeeded(toolCallId, toolName, toolInput, thinkingBlocks);
+        const resultContent = this._extractToolResultContent(update);
+        this._emitToolResult(toolCallId, resultContent);
+        this._activeToolCalls.delete(toolCallId);
         break;
       }
 
@@ -370,20 +504,24 @@ export class OpenCodeDriver extends BaseDriver {
     const rpcRequestId = msg.id;
     const options = params.options || [];
 
-    // Extract tool info from the permission request
-    const toolName = params.title || params.toolName || 'unknown';
-    const toolInput = params.input || params.description || {};
+    // Extract tool call info from the permission request
+    const toolCall = params.toolCall || {};
+    const toolName = toolCall.name || params.title || params.toolName || 'unknown';
+    const toolInput = toolCall.input || params.input || params.description || {};
+    const toolCallId = toolCall.id || toolCall.toolCallId || null;
 
-    this._approvalRequests.set(requestId, { rpcRequestId });
+    this._approvalRequests.set(requestId, { rpcRequestId, toolCallId });
 
     // Auto-approve if bypass mode is on
     if (this._autoApprovePermissions) {
-      const allowOption = options.find(o => o.kind === 'allow_once') || options[0];
+      const allowOption = options.find(o => o.kind === 'allow_once' || o.id === 'allow-once') || options[0];
       if (allowOption && rpcRequestId != null) {
-        this._rpcRespond(rpcRequestId, { optionId: allowOption.optionId });
+        this._rpcRespond(rpcRequestId, { optionId: allowOption.optionId || allowOption.id || 'allow-once' });
       }
       this._approvalRequests.delete(requestId);
-      this.emit('status', { status: 'running' });
+      if (this._turnActive) {
+        this.emit('status', { status: 'running' });
+      }
       return;
     }
 
@@ -391,6 +529,7 @@ export class OpenCodeDriver extends BaseDriver {
       requestId,
       toolName,
       toolInput: typeof toolInput === 'string' ? { description: toolInput } : toolInput,
+      toolCallId,
     });
     this.emit('status', { status: 'awaiting_permission' });
   }
@@ -415,10 +554,279 @@ export class OpenCodeDriver extends BaseDriver {
   _handleFsWriteTextFile(msg, params) {
     if (msg.id == null) return;
 
-    // For safety, we don't write files from the driver.
-    // The agent should handle file writes internally.
-    this._rpcRespond(msg.id, {
-      error: 'File write operations not supported by this client.',
+    const filePath = params.path || params.filePath;
+    const content = params.content;
+
+    if (!filePath) {
+      this._rpcRespond(msg.id, { error: 'No file path provided' });
+      return;
+    }
+
+    if (content == null) {
+      this._rpcRespond(msg.id, { error: 'No content provided' });
+      return;
+    }
+
+    try {
+      writeFileSync(filePath, content, 'utf-8');
+      console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Wrote file: ${filePath}`);
+      this._rpcRespond(msg.id, {});
+    } catch (err) {
+      console.error(`[OpenCode ${this._agentId?.slice(0, 8)}] Write failed: ${err.message}`);
+      this._rpcRespond(msg.id, { error: err.message });
+    }
+  }
+
+  _handleTerminalRequest(msg, params, method) {
+    if (msg.id == null) return;
+
+    const terminalId = params.terminalId || `term_${this._nextTerminalId++}`;
+    const sessionId = params.sessionId || this._sessionId;
+
+    switch (method) {
+      case 'terminal/create': {
+        const command = params.command;
+        const args = params.args || [];
+        const cwd = params.cwd || this._cwd || process.env.HOME;
+
+        if (!command) {
+          this._rpcRespond(msg.id, { error: 'No command provided' });
+          return;
+        }
+
+        try {
+          console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Spawning terminal: ${command} ${args.join(' ')} in ${cwd}`);
+
+          const proc = spawn(command, args, {
+            cwd,
+            env: { ...process.env },
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+
+          const termData = {
+            process: proc,
+            output: '',
+            exitCode: null,
+            resolved: false,
+          };
+          this._terminals.set(terminalId, termData);
+
+          proc.stdout.on('data', (data) => {
+            termData.output += data.toString();
+          });
+          proc.stderr.on('data', (data) => {
+            termData.output += data.toString();
+          });
+
+          proc.on('exit', (code, signal) => {
+            termData.exitCode = code;
+            termData.signal = signal;
+            console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Terminal ${terminalId} exited: code=${code} signal=${signal}`);
+            // Resolve any pending wait_for_exit request
+            if (termData.pendingWaitId != null) {
+              this._rpcRespond(termData.pendingWaitId, { exitCode: code, signal });
+              termData.pendingWaitId = null;
+            }
+          });
+
+          this._rpcRespond(msg.id, { terminalId });
+        } catch (err) {
+          this._rpcRespond(msg.id, { error: err.message });
+        }
+        break;
+      }
+
+      case 'terminal/output': {
+        const termData = this._terminals.get(terminalId);
+        if (!termData) {
+          this._rpcRespond(msg.id, { output: '', truncated: false, exitStatus: null });
+          return;
+        }
+
+        const truncated = false;
+        this._rpcRespond(msg.id, {
+          output: termData.output,
+          truncated,
+          exitStatus: termData.exitCode != null
+            ? { exitCode: termData.exitCode, signal: termData.signal }
+            : null,
+        });
+        break;
+      }
+
+      case 'terminal/wait_for_exit': {
+        const termData = this._terminals.get(terminalId);
+        if (!termData) {
+          this._rpcRespond(msg.id, { exitCode: null, signal: null });
+          return;
+        }
+
+        if (termData.exitCode != null) {
+          this._rpcRespond(msg.id, { exitCode: termData.exitCode, signal: termData.signal });
+        } else {
+          termData.pendingWaitId = msg.id;
+        }
+        break;
+      }
+
+      case 'terminal/kill': {
+        const termData = this._terminals.get(terminalId);
+        if (termData?.process) {
+          try {
+            termData.process.kill('SIGTERM');
+            setTimeout(() => {
+              try { termData.process.kill('SIGKILL'); } catch {}
+            }, 2000);
+          } catch {}
+        }
+        this._rpcRespond(msg.id, {});
+        break;
+      }
+
+      case 'terminal/release': {
+        const termData = this._terminals.get(terminalId);
+        if (termData?.process) {
+          try { termData.process.kill('SIGTERM'); } catch {}
+        }
+        this._terminals.delete(terminalId);
+        this._rpcRespond(msg.id, {});
+        break;
+      }
+
+      default:
+        this._rpcRespond(msg.id, { error: `Unknown terminal method: ${method}` });
+    }
+  }
+
+  _normalizeStatus(status) {
+    return typeof status === 'string' ? status.toLowerCase() : '';
+  }
+
+  _extractToolCallId(update, allowActiveFallback = false) {
+    const candidates = [
+      update?.toolCallId,
+      update?.tool_call_id,
+      update?.toolUseId,
+      update?.tool_use_id,
+      update?.id,
+      update?.callId,
+      update?.toolCall?.id,
+      update?.tool_call?.id,
+      update?.tool?.id,
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.trim()) return candidate;
+      if (typeof candidate === 'number') return String(candidate);
+    }
+
+    if (allowActiveFallback && this._activeToolCalls.size === 1) {
+      return Array.from(this._activeToolCalls.keys())[0];
+    }
+    if (allowActiveFallback && this._activeToolCalls.size > 1) {
+      const toolName = this._extractToolName(update);
+      const matches = Array.from(this._activeToolCalls.entries())
+        .filter(([, meta]) => meta.name === toolName);
+      if (matches.length === 1) return matches[0][0];
+    }
+    return uuidv4();
+  }
+
+  _extractToolName(update) {
+    const candidates = [
+      update?.title,
+      update?.name,
+      update?.toolName,
+      update?.tool_name,
+      update?.tool?.name,
+      update?.toolCall?.name,
+      update?.tool_call?.name,
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+    }
+    return 'unknown';
+  }
+
+  _extractToolInput(update) {
+    const candidate =
+      update?.input ??
+      update?.rawInput ??
+      update?.arguments ??
+      update?.args ??
+      update?.toolInput ??
+      update?.tool_input ??
+      update?.toolCall?.input ??
+      update?.toolCall?.arguments ??
+      update?.tool_call?.input;
+
+    if (candidate == null) return {};
+    if (typeof candidate === 'object' && !Array.isArray(candidate)) return candidate;
+
+    if (typeof candidate === 'string') {
+      try {
+        const parsed = JSON.parse(candidate);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+      } catch {}
+      return { value: candidate };
+    }
+
+    return { value: candidate };
+  }
+
+  _flushThinking() {
+    if (this._currentThinkingContent) {
+      const blocks = [{ type: 'thinking', text: this._currentThinkingContent }];
+      this._currentThinkingContent = '';
+      return blocks;
+    }
+    return [];
+  }
+
+  _emitToolUseIfNeeded(toolCallId, toolName, toolInput, prefixBlocks = []) {
+    if (!this._activeToolCalls.has(toolCallId)) {
+      this._activeToolCalls.set(toolCallId, {
+        name: toolName,
+        input: toolInput,
+      });
+      this.emit('message', {
+        content: [
+          ...prefixBlocks,
+          {
+            type: 'tool_use',
+            id: toolCallId,
+            name: toolName,
+            input: toolInput,
+          },
+        ],
+      });
+    } else {
+      // Emit any pending thinking blocks as their own message
+      if (prefixBlocks.length > 0) {
+        this.emit('message', { content: prefixBlocks });
+      }
+      // Update input if the new payload has richer data (e.g. rawInput
+      // populated after the initial pending event with empty input).
+      const existing = this._activeToolCalls.get(toolCallId);
+      const newKeys = Object.keys(toolInput || {});
+      const existingKeys = Object.keys(existing.input || {});
+      if (newKeys.length > existingKeys.length) {
+        existing.input = toolInput;
+        this.emit('toolUseUpdated', {
+          toolCallId,
+          input: toolInput,
+        });
+      }
+    }
+  }
+
+  _emitToolResult(toolCallId, content) {
+    this.emit('message', {
+      content: [{
+        type: 'tool_result',
+        toolUseId: toolCallId,
+        content,
+      }],
     });
   }
 
@@ -426,10 +834,17 @@ export class OpenCodeDriver extends BaseDriver {
     const content = update.content;
     if (typeof content === 'string') return content;
     if (Array.isArray(content)) {
-      return content
-        .filter(c => c.type === 'text' && c.text)
-        .map(c => c.text)
-        .join('\n') || 'Completed';
+      const texts = [];
+      for (const c of content) {
+        // Direct text blocks: { type: 'text', text: '...' }
+        if (c.type === 'text' && c.text) {
+          texts.push(c.text);
+        // Nested content blocks (OpenCode format): { type: 'content', content: { type: 'text', text: '...' } }
+        } else if (c.type === 'content' && c.content?.type === 'text' && c.content?.text) {
+          texts.push(c.content.text);
+        }
+      }
+      return texts.join('\n') || 'Completed';
     }
     if (content && typeof content === 'object' && content.text) {
       return content.text;
@@ -437,31 +852,74 @@ export class OpenCodeDriver extends BaseDriver {
     return update.result || update.output || 'Completed';
   }
 
-  async sendPrompt(text, sessionId) {
+  async sendPrompt(text, sessionId, imageData) {
     if (!this._ready || !this._sessionId) {
       console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Not ready, cannot send prompt`);
       this.emit('error', { message: 'OpenCode not ready' });
       return;
     }
 
+    this._turnActive = true;
+    this._activeToolCalls.clear();
     this.emit('status', { status: 'running' });
     this._currentStreamContent = '';
+    this._currentThinkingContent = '';
 
     try {
+      const prompt = [];
+      let promptText = text;
+
+      // Add image if provided
+      if (imageData?.base64) {
+        const mimeType = imageData.mimeType || 'image/png';
+        const b64Len = imageData.base64.length;
+        console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Image: ${mimeType}, base64 length=${b64Len}, promptCapabilities.image=${this._promptCapabilities?.image}`);
+
+        if (this._promptCapabilities?.image) {
+          // ACP image support is advertised — send as a content block
+          prompt.push({ type: 'text', text: promptText });
+          prompt.push({ type: 'image', data: imageData.base64, mimeType });
+          promptText = null; // already added to prompt
+        } else {
+          // ACP image support NOT advertised — save to a temp file so the
+          // agent can read it via its filesystem tools.
+          const ext = mimeType === 'image/png' ? '.png'
+            : mimeType === 'image/gif' ? '.gif'
+            : '.jpg';
+          const imgDir = join(this._cwd || tmpdir(), '.opencode-images');
+          try { mkdirSync(imgDir, { recursive: true }); } catch {}
+          const imgPath = join(imgDir, `image_${Date.now()}${ext}`);
+          writeFileSync(imgPath, Buffer.from(imageData.base64, 'base64'));
+          console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Saved image to ${imgPath} (ACP image capability not advertised)`);
+          promptText = `${text}\n\n[An image has been saved to ${imgPath} for your reference.]`;
+        }
+      }
+
+      if (promptText != null) {
+        prompt.unshift({ type: 'text', text: promptText });
+      }
+
+      // No timeout — agent turns can run for many minutes (tool calls,
+      // subagents, etc.).  Cleanup is handled by process exit or interrupt.
       const result = await this._rpcRequest('session/prompt', {
         sessionId: this._sessionId,
-        prompt: [{ type: 'text', text }],
-      });
+        prompt,
+      }, 0);
 
       // Prompt returned — turn is complete
       const stopReason = result?.stopReason || 'end_turn';
       const isError = stopReason === 'refusal';
 
-      // Emit any accumulated stream content as a final message
-      if (this._currentStreamContent) {
-        this.emit('message', {
-          content: [{ type: 'text', text: this._currentStreamContent }],
-        });
+      // Flush any remaining thinking/stream content as a single message
+      const thinkingBlocks = this._flushThinking();
+      if (this._currentStreamContent || thinkingBlocks.length > 0) {
+        const content = [
+          ...thinkingBlocks,
+          ...(this._currentStreamContent
+            ? [{ type: 'text', text: this._currentStreamContent }]
+            : []),
+        ];
+        this.emit('message', { content });
         this._currentStreamContent = '';
       }
 
@@ -473,16 +931,23 @@ export class OpenCodeDriver extends BaseDriver {
         isError,
         sessionId: this._sessionId,
       });
+      this._turnActive = false;
+      this._activeToolCalls.clear();
       this.emit('status', { status: 'idle' });
       this._checkBranchChange();
     } catch (err) {
       console.error(`[OpenCode ${this._agentId?.slice(0, 8)}] session/prompt failed:`, err.message);
 
       // Emit any accumulated content before the error
-      if (this._currentStreamContent) {
-        this.emit('message', {
-          content: [{ type: 'text', text: this._currentStreamContent }],
-        });
+      const errorThinkingBlocks = this._flushThinking();
+      if (this._currentStreamContent || errorThinkingBlocks.length > 0) {
+        const content = [
+          ...errorThinkingBlocks,
+          ...(this._currentStreamContent
+            ? [{ type: 'text', text: this._currentStreamContent }]
+            : []),
+        ];
+        this.emit('message', { content });
         this._currentStreamContent = '';
       }
 
@@ -495,6 +960,8 @@ export class OpenCodeDriver extends BaseDriver {
         isError: true,
         sessionId: this._sessionId,
       });
+      this._turnActive = false;
+      this._activeToolCalls.clear();
       this.emit('status', { status: 'idle' });
     }
   }
@@ -507,15 +974,21 @@ export class OpenCodeDriver extends BaseDriver {
     }
     this._approvalRequests.delete(requestId);
 
-    const optionId = behavior === 'allow' ? 'allow-once' : 'reject-once';
+    const response = { 
+      optionId: behavior === 'allow' ? 'allow-once' : 'reject-once' 
+    };
+
+    if (behavior === 'allow' && updatedInput) {
+      response.updatedInput = updatedInput;
+    }
 
     if (pending.rpcRequestId != null) {
-      this._rpcRespond(pending.rpcRequestId, { optionId });
+      this._rpcRespond(pending.rpcRequestId, response);
     } else {
       console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Missing rpcRequestId for permission: ${requestId}`);
     }
 
-    if (this._approvalRequests.size === 0) {
+    if (this._approvalRequests.size === 0 && this._turnActive) {
       this.emit('status', { status: 'running' });
     }
   }
@@ -527,6 +1000,8 @@ export class OpenCodeDriver extends BaseDriver {
       await this._rpcRequest('session/cancel', {
         sessionId: this._sessionId,
       });
+      this._turnActive = false;
+      this._activeToolCalls.clear();
     } catch (err) {
       console.error(`[OpenCode ${this._agentId?.slice(0, 8)}] Cancel failed:`, err.message);
     }
@@ -543,9 +1018,56 @@ export class OpenCodeDriver extends BaseDriver {
     );
   }
 
+  async setSessionMode(modeId) {
+    if (!this._ready || !this._sessionId) {
+      console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Not ready, cannot set mode`);
+      return;
+    }
+
+    try {
+      const result = await this._rpcRequest('session/set_mode', {
+        sessionId: this._sessionId,
+        modeId,
+      });
+      console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Mode set to ${modeId}`);
+      return result;
+    } catch (err) {
+      console.error(`[OpenCode ${this._agentId?.slice(0, 8)}] setSessionMode failed:`, err.message);
+      throw err;
+    }
+  }
+
+  async setConfigOption(configId, value) {
+    if (!this._ready || !this._sessionId) {
+      console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Not ready, cannot set config`);
+      return;
+    }
+
+    try {
+      const result = await this._rpcRequest('session/set_config_option', {
+        sessionId: this._sessionId,
+        configId,
+        value,
+      });
+      console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Config ${configId} set to ${value}`);
+      return result;
+    } catch (err) {
+      console.error(`[OpenCode ${this._agentId?.slice(0, 8)}] setConfigOption failed:`, err.message);
+      throw err;
+    }
+  }
+
   async stop() {
     this._ready = false;
     this._rejectAllPending('Driver stopped');
+
+    // Clean up all terminals
+    for (const [termId, termData] of this._terminals) {
+      if (termData.process) {
+        try { termData.process.kill('SIGTERM'); } catch {}
+      }
+    }
+    this._terminals.clear();
 
     if (this._process) {
       try { this._process.kill('SIGTERM'); } catch {}
@@ -558,20 +1080,25 @@ export class OpenCodeDriver extends BaseDriver {
 
     this._sessionId = null;
     this._approvalRequests.clear();
+    this._turnActive = false;
+    this._activeToolCalls.clear();
   }
 
   // --- JSON-RPC helpers (same pattern as CodexDriver) ---
 
-  _rpcRequest(method, params = {}) {
+  _rpcRequest(method, params = {}, timeoutMs = 30000) {
     return new Promise((resolve, reject) => {
       const id = ++this._rpcId;
 
-      const timer = setTimeout(() => {
-        if (this._pendingRpc.has(id)) {
-          this._pendingRpc.delete(id);
-          reject(new Error(`RPC timeout: ${method}`));
-        }
-      }, 30000);
+      // timeoutMs <= 0 means no timeout (wait indefinitely for the response)
+      const timer = timeoutMs > 0
+        ? setTimeout(() => {
+            if (this._pendingRpc.has(id)) {
+              this._pendingRpc.delete(id);
+              reject(new Error(`RPC timeout: ${method}`));
+            }
+          }, timeoutMs)
+        : null;
 
       this._pendingRpc.set(id, { resolve, reject, timer });
 
