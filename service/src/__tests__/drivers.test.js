@@ -1264,6 +1264,7 @@ describe('OpenCodeDriver', () => {
 
   describe('Message handling (session lifecycle)', () => {
     it('emits running status on session/update with tool_call', () => {
+      driver._turnActive = true;
       driver._handleMessage({
         method: 'session/update',
         params: {
@@ -1280,6 +1281,25 @@ describe('OpenCodeDriver', () => {
       const statusEvent = events.find(e => e.event === 'status');
       expect(statusEvent).toBeTruthy();
       expect(statusEvent.data.status).toBe('running');
+    });
+
+    it('does not emit running status for late tool_call when turn is not active', () => {
+      driver._turnActive = false;
+      driver._handleMessage({
+        method: 'session/update',
+        params: {
+          update: {
+            type: 'tool_call',
+            toolCallId: 'tc-late',
+            title: 'Read',
+            status: 'in_progress',
+            input: { path: '/late.txt' },
+          },
+        },
+      });
+
+      const statusEvents = events.filter(e => e.event === 'status');
+      expect(statusEvents.some(e => e.data.status === 'running')).toBe(false);
     });
 
     it('emits result and idle when session/prompt RPC returns', async () => {
@@ -1423,6 +1443,10 @@ describe('OpenCodeDriver', () => {
     });
 
     it('emits tool_result for completed tool_call_update', () => {
+      driver._activeToolCalls.set('tc-1', {
+        name: 'Bash',
+        input: { command: 'ls -la' },
+      });
       driver._handleMessage({
         method: 'session/update',
         params: {
@@ -1443,6 +1467,10 @@ describe('OpenCodeDriver', () => {
     });
 
     it('emits tool_result with error for failed tool_call_update', () => {
+      driver._activeToolCalls.set('tc-1', {
+        name: 'Bash',
+        input: { command: 'rm -rf /tmp/test' },
+      });
       driver._handleMessage({
         method: 'session/update',
         params: {
@@ -1461,7 +1489,31 @@ describe('OpenCodeDriver', () => {
       expect(msgEvent.data.content[0].content).toBe('Permission denied');
     });
 
-    it('emits thinking block for agent_thought_chunk', () => {
+    it('emits fallback tool_use before tool_result when completion arrives without start', () => {
+      driver._handleMessage({
+        method: 'session/update',
+        params: {
+          update: {
+            type: 'tool_call_update',
+            toolCallId: 'tc-missing-start',
+            title: 'read',
+            status: 'completed',
+            input: { path: '/tmp/a.txt' },
+            content: 'done',
+          },
+        },
+      });
+
+      const msgEvents = events.filter(e => e.event === 'message');
+      expect(msgEvents).toHaveLength(2);
+      expect(msgEvents[0].data.content[0].type).toBe('tool_use');
+      expect(msgEvents[0].data.content[0].id).toBe('tc-missing-start');
+      expect(msgEvents[1].data.content[0].type).toBe('tool_result');
+      expect(msgEvents[1].data.content[0].toolUseId).toBe('tc-missing-start');
+      expect(msgEvents[1].data.content[0].content).toBe('done');
+    });
+
+    it('accumulates thinking and includes it in next tool message', () => {
       driver._handleMessage({
         method: 'session/update',
         params: {
@@ -1472,12 +1524,30 @@ describe('OpenCodeDriver', () => {
         },
       });
 
-      const msgEvent = events.find(e => e.event === 'message');
-      expect(msgEvent).toBeTruthy();
-      expect(msgEvent.data.content[0]).toEqual({
+      // Thinking is accumulated, not emitted immediately
+      expect(events.filter(e => e.event === 'message').length).toBe(0);
+
+      // Trigger flush via tool_call — thinking is combined with tool_use
+      driver._handleMessage({
+        method: 'session/update',
+        params: {
+          update: {
+            type: 'tool_call',
+            toolCallId: 'tc-think-flush',
+            title: 'Read',
+            input: { file_path: '/tmp/test' },
+            status: 'pending',
+          },
+        },
+      });
+
+      const msgEvents = events.filter(e => e.event === 'message');
+      expect(msgEvents.length).toBe(1);
+      expect(msgEvents[0].data.content[0]).toEqual({
         type: 'thinking',
         text: 'I should check the tests first',
       });
+      expect(msgEvents[0].data.content[1].type).toBe('tool_use');
     });
   });
 
@@ -1608,34 +1678,36 @@ describe('OpenCodeDriver', () => {
       expect(msg.result.error).toBeTruthy();
     });
 
-    it('responds to fs/write_text_file with unsupported error', () => {
+    it('responds to fs/write_text_file requests with success', () => {
       const proc = createMockProcess();
       driver._process = proc;
 
       driver._handleMessage({
         id: 'fs-2',
         method: 'fs/write_text_file',
-        params: { path: '/tmp/test.txt', content: 'hello' },
+        params: { path: '/tmp/test-write.txt', content: 'hello world' },
       });
 
       const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
       expect(msg.id).toBe('fs-2');
-      expect(msg.result.error).toContain('not supported');
+      expect(msg.result).toBeTruthy();
+      expect(msg.result.error).toBeUndefined();
     });
 
-    it('responds to terminal operations with unsupported error', () => {
+    it('responds to terminal/create requests', () => {
       const proc = createMockProcess();
       driver._process = proc;
 
       driver._handleMessage({
         id: 'term-1',
         method: 'terminal/create',
-        params: { command: 'ls' },
+        params: { command: 'ls', args: ['-la'], sessionId: 'sess-1' },
       });
 
       const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
       expect(msg.id).toBe('term-1');
-      expect(msg.result.error).toContain('not supported');
+      expect(msg.result).toBeTruthy();
+      expect(msg.result.terminalId).toBeTruthy();
     });
   });
 
@@ -1708,6 +1780,60 @@ describe('OpenCodeDriver', () => {
       expect(msg.method).toBe('session/prompt');
       expect(msg.params.sessionId).toBe('sess-123');
       expect(msg.params.prompt).toEqual([{ type: 'text', text: 'Fix the bug' }]);
+
+      driver._handleMessage({ id: msg.id, result: { stopReason: 'end_turn' } });
+      await sendPromise;
+    });
+
+    it('includes image content block when promptCapabilities.image is true', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+      driver._ready = true;
+      driver._sessionId = 'sess-123';
+      driver._promptCapabilities = { image: true };
+
+      const imageData = {
+        uri: 'file:///tmp/test.png',
+        base64: 'dGVzdA==',
+        mimeType: 'image/png',
+      };
+
+      const sendPromise = driver.sendPrompt('What is in this image?', 'sess-123', imageData);
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.method).toBe('session/prompt');
+      expect(msg.params.prompt).toEqual([
+        { type: 'text', text: 'What is in this image?' },
+        { type: 'image', data: 'dGVzdA==', mimeType: 'image/png' },
+      ]);
+
+      driver._handleMessage({ id: msg.id, result: { stopReason: 'end_turn' } });
+      await sendPromise;
+    });
+
+    it('falls back to temp file when promptCapabilities.image is not set', async () => {
+      const proc = createMockProcess();
+      driver._process = proc;
+      driver._ready = true;
+      driver._sessionId = 'sess-123';
+      driver._promptCapabilities = {};
+
+      const imageData = {
+        uri: 'file:///tmp/test.png',
+        base64: 'dGVzdA==',
+        mimeType: 'image/png',
+      };
+
+      const sendPromise = driver.sendPrompt('Describe this', 'sess-123', imageData);
+
+      const msg = JSON.parse(proc.stdin.write.mock.calls[0][0].trim());
+      expect(msg.method).toBe('session/prompt');
+      // Should have only text, no image block
+      expect(msg.params.prompt).toHaveLength(1);
+      expect(msg.params.prompt[0].type).toBe('text');
+      expect(msg.params.prompt[0].text).toContain('Describe this');
+      expect(msg.params.prompt[0].text).toContain('[An image has been saved to');
+      expect(msg.params.prompt[0].text).toContain('.png');
 
       driver._handleMessage({ id: msg.id, result: { stopReason: 'end_turn' } });
       await sendPromise;
@@ -1844,7 +1970,7 @@ describe('Cross-Driver Consistency', () => {
       params: { item: { type: 'agentMessage', text: 'Hello from Codex' } },
     });
 
-    // OpenCode — accumulated stream content emitted as final message
+    // OpenCode — thinking is accumulated and flushed with next event
     const opencode = new OpenCodeDriver();
     const opencodeEvents = collectEvents(opencode, ['message']);
 
@@ -1854,6 +1980,20 @@ describe('Cross-Driver Consistency', () => {
         update: {
           type: 'agent_thought_chunk',
           content: 'Hello from OpenCode',
+        },
+      },
+    });
+
+    // Flush thinking via a tool_call so it emits as a combined message
+    opencode._handleMessage({
+      method: 'session/update',
+      params: {
+        update: {
+          type: 'tool_call',
+          toolCallId: 'tc-consistency',
+          title: 'Read',
+          input: {},
+          status: 'pending',
         },
       },
     });
