@@ -267,6 +267,16 @@ export class AgentSession {
       }
     });
 
+    d.on('questionAnswered', (data) => {
+      // ACP doesn't support answering questions via RPC. The driver interrupted
+      // the stuck turn and asks us to re-send the user's answer as a new prompt.
+      const text = data.text;
+      console.log(`[Agent ${this.id.slice(0, 8)}] Auto-sending question answer: "${text.slice(0, 60)}"`);
+      setTimeout(() => {
+        this.sendPrompt(text);
+      }, 300);
+    });
+
     d.on('status', (data) => {
       this._setStatus(data.status);
     });

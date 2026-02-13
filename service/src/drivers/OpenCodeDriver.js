@@ -50,6 +50,7 @@ export class OpenCodeDriver extends BaseDriver {
     this._agentId = null;
     this._sessionId = null;
     this._cwd = null;
+    this._model = null;
     this._rpcId = 0;
     this._pendingRpc = new Map(); // id -> { resolve, reject, timer }
     this._buffer = '';            // incomplete line buffer for stdout
@@ -61,8 +62,18 @@ export class OpenCodeDriver extends BaseDriver {
     this._activeToolCalls = new Map(); // toolCallId -> { name, input }
 
     // Track pending permission requests keyed by our UI requestId.
-    // entry: { rpcRequestId: string|number }
+    // entry: { rpcRequestId: string|number, toolCallId?: string }
     this._approvalRequests = new Map();
+
+    // Question tool handling: ACP delivers question data via tool_call events
+    // but session/request_permission NEVER arrives for questions (ACP only
+    // subscribes to permission.asked, not question.asked). We emit the
+    // permission from tool_call so the UI is interactive, then when the user
+    // answers, we kill the process, restart it with session/load, and send
+    // the answer as a new user prompt.
+    this._emittedQuestionToolCalls = new Set();  // toolCallIds already shown
+    this._isRestartingForQuestion = false;       // suppresses error events during restart
+    this._suppressReplayEvents = false;          // suppresses session/load history replay
 
     // Terminal management: terminalId -> { process, output, exitCode, resolved }
     this._terminals = new Map();
@@ -76,6 +87,7 @@ export class OpenCodeDriver extends BaseDriver {
     const { cwd = null, resumeSessionId = null, model = null } = opts;
     this._agentId = agentId;
     this._cwd = cwd;
+    if (model) this._model = model;
 
     // Detect git info
     let gitBranch = null;
@@ -178,9 +190,11 @@ export class OpenCodeDriver extends BaseDriver {
         cwd: cwd || process.env.HOME,
         mcpServers: [],
       };
-      console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] session/new (model set via env: ${model || 'auto'})`);
-
-      if (resumeSessionId && sessionCapabilities?.loadSession) {
+      if (resumeSessionId && (agentCapabilities?.loadSession || sessionCapabilities?.loadSession)) {
+        console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] session/load ${resumeSessionId.slice(0, 12)}... (model: ${model || 'auto'})`);
+        // Suppress replay events — session/load replays conversation history
+        // as notifications, which would duplicate thinking/messages/tools.
+        this._suppressReplayEvents = true;
         try {
           sessionResult = await this._rpcRequest('session/load', {
             sessionId: resumeSessionId,
@@ -190,8 +204,14 @@ export class OpenCodeDriver extends BaseDriver {
         } catch (err) {
           console.warn(`[OpenCode ${this._agentId?.slice(0, 8)}] session/load failed, creating new: ${err.message}`);
           sessionResult = await this._rpcRequest('session/new', sessionParams);
+        } finally {
+          this._suppressReplayEvents = false;
+          // Discard any thinking/stream content accumulated during replay
+          this._currentThinkingContent = '';
+          this._currentStreamContent = '';
         }
       } else {
+        console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] session/new (model: ${model || 'auto'})`);
         sessionResult = await this._rpcRequest('session/new', sessionParams);
       }
 
@@ -319,6 +339,13 @@ export class OpenCodeDriver extends BaseDriver {
     const update = params.update || params;
     const type = update?.type || update?.sessionUpdate || params?.type || params?.sessionUpdate;
 
+    // During session/load, OpenCode replays the conversation history as
+    // notifications. Suppress content events to avoid duplicating thinking,
+    // messages, and tool calls that the UI already has.
+    if (this._suppressReplayEvents) {
+      return;
+    }
+
     console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Session update type: ${type}, content:`, JSON.stringify(update).slice(0, 200));
 
     switch (type) {
@@ -381,6 +408,7 @@ export class OpenCodeDriver extends BaseDriver {
 
         if (status === 'pending' || status === 'in_progress') {
           this._emitToolUseIfNeeded(toolCallId, toolName, toolInput, thinkingBlocks);
+          this._maybeEmitQuestionPermission(toolCallId, toolName, toolInput);
           if (this._turnActive || this._approvalRequests.size > 0) {
             this.emit('status', { status: 'running' });
           }
@@ -418,6 +446,7 @@ export class OpenCodeDriver extends BaseDriver {
           this._activeToolCalls.delete(toolCallId);
         } else if (status === 'in_progress' || status === 'pending') {
           this._emitToolUseIfNeeded(toolCallId, toolName, toolInput, thinkingBlocks);
+          this._maybeEmitQuestionPermission(toolCallId, toolName, toolInput);
         }
         break;
       }
@@ -500,20 +529,40 @@ export class OpenCodeDriver extends BaseDriver {
   }
 
   _handlePermissionRequest(msg, params) {
-    const requestId = uuidv4();
     const rpcRequestId = msg.id;
     const options = params.options || [];
 
     // Extract tool call info from the permission request
     const toolCall = params.toolCall || {};
-    const toolName = toolCall.name || params.title || params.toolName || 'unknown';
-    const toolInput = toolCall.input || params.input || params.description || {};
+    const rawToolName = toolCall.name || params.title || params.toolName || 'unknown';
+    const rawToolInput = toolCall.input || params.input || params.description || {};
+    const toolInput = this._normalizePermissionToolInput(rawToolInput, params, toolCall);
+    const isQuestionPermission = this._isQuestionPermission(rawToolName, toolInput, params);
+    const toolName = isQuestionPermission ? 'AskUserQuestion' : rawToolName;
     const toolCallId = toolCall.id || toolCall.toolCallId || null;
 
+    console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Permission request: rpc=${rpcRequestId} tool=${toolName} isQuestion=${isQuestionPermission} questions=${Array.isArray(toolInput?.questions) ? toolInput.questions.length : 0}`);
+
+    // If a question permission arrives via RPC (unlikely for ACP, but handle
+    // gracefully), link it to any existing synthetic permission we emitted.
+    if (isQuestionPermission) {
+      const existing = [...this._approvalRequests.entries()]
+        .find(([, v]) => v.rpcRequestId == null && v.toolCallId);
+
+      if (existing) {
+        const [, entry] = existing;
+        entry.rpcRequestId = rpcRequestId;
+        console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Linked question RPC ${rpcRequestId}`);
+        return;
+      }
+    }
+
+    const requestId = uuidv4();
     this._approvalRequests.set(requestId, { rpcRequestId, toolCallId });
 
-    // Auto-approve if bypass mode is on
-    if (this._autoApprovePermissions) {
+    // Auto-approve if bypass mode is on (except question prompts, which
+    // require explicit user interaction in the mobile UI).
+    if (this._autoApprovePermissions && !isQuestionPermission) {
       const allowOption = options.find(o => o.kind === 'allow_once' || o.id === 'allow-once') || options[0];
       if (allowOption && rpcRequestId != null) {
         this._rpcRespond(rpcRequestId, { optionId: allowOption.optionId || allowOption.id || 'allow-once' });
@@ -528,7 +577,7 @@ export class OpenCodeDriver extends BaseDriver {
     this.emit('permission', {
       requestId,
       toolName,
-      toolInput: typeof toolInput === 'string' ? { description: toolInput } : toolInput,
+      toolInput,
       toolCallId,
     });
     this.emit('status', { status: 'awaiting_permission' });
@@ -774,6 +823,135 @@ export class OpenCodeDriver extends BaseDriver {
     return { value: candidate };
   }
 
+  _normalizePermissionToolInput(rawToolInput, params, toolCall) {
+    let toolInput = {};
+
+    if (rawToolInput && typeof rawToolInput === 'object' && !Array.isArray(rawToolInput)) {
+      toolInput = { ...rawToolInput };
+    } else if (typeof rawToolInput === 'string' && rawToolInput.trim()) {
+      try {
+        const parsed = JSON.parse(rawToolInput);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          toolInput = parsed;
+        } else {
+          toolInput = { description: rawToolInput };
+        }
+      } catch {
+        toolInput = { description: rawToolInput };
+      }
+    }
+
+    if (!Array.isArray(toolInput.questions) && Array.isArray(params?.questions)) {
+      toolInput.questions = params.questions;
+    } else if (!Array.isArray(toolInput.questions) && Array.isArray(toolCall?.questions)) {
+      toolInput.questions = toolCall.questions;
+    }
+
+    return toolInput;
+  }
+
+  _isQuestionPermission(toolName, toolInput, params) {
+    const normalizedName =
+      typeof toolName === 'string'
+        ? toolName.toLowerCase().replace(/[^a-z0-9]/g, '')
+        : '';
+
+    if (normalizedName === 'askuserquestion' || normalizedName === 'question' || normalizedName === 'requestuserinput') {
+      return true;
+    }
+
+    if (Array.isArray(toolInput?.questions) && toolInput.questions.length > 0) {
+      return true;
+    }
+
+    if (Array.isArray(params?.questions) && params.questions.length > 0) {
+      return true;
+    }
+
+    return false;
+  }
+
+  _formatQuestionAnswer(updatedInput) {
+    const answers = updatedInput?.answers || {};
+    const entries = Object.entries(answers);
+    if (entries.length === 0) return 'Yes';
+
+    if (entries.length === 1) {
+      const [question, answer] = entries[0];
+      return `For "${question}": ${answer}`;
+    }
+
+    return entries.map(([question, answer]) => `- ${question}: ${answer}`).join('\n');
+  }
+
+  _maybeEmitQuestionPermission(toolCallId, toolName, toolInput) {
+    // Only emit for question tools that have actual question data.
+    // The initial tool_call arrives with empty rawInput; the actual
+    // questions come in tool_call_update — so we wait for real data.
+    if (!this._isQuestionPermission(toolName, toolInput, {})) return;
+    if (!Array.isArray(toolInput?.questions) || toolInput.questions.length === 0) return;
+    if (this._emittedQuestionToolCalls.has(toolCallId)) return;
+
+    this._emittedQuestionToolCalls.add(toolCallId);
+    const requestId = uuidv4();
+    this._approvalRequests.set(requestId, { rpcRequestId: null, toolCallId });
+
+    console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Question permission: ${toolCallId} (${toolInput.questions.length} questions)`);
+
+    this.emit('permission', {
+      requestId,
+      toolName: 'AskUserQuestion',
+      toolInput,
+      toolCallId,
+    });
+    this.emit('status', { status: 'awaiting_permission' });
+  }
+
+  async _restartForQuestion(answerText) {
+    const sessionId = this._sessionId;
+    const cwd = this._cwd;
+    const agentId = this._agentId;
+    const model = this._model;
+
+    this._isRestartingForQuestion = true;
+
+    // Tear down the current process without emitting exit/error events.
+    this._ready = false;
+    this._rejectAllPending('Restarting for question answer');
+    if (this._process) {
+      this._process.removeAllListeners();
+      this._process.stdout.removeAllListeners();
+      this._process.stderr.removeAllListeners();
+      try { this._process.kill('SIGTERM'); } catch {}
+      const proc = this._process;
+      this._process = null;
+      setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 3000);
+    }
+
+    // Clean up turn state (keep _emittedQuestionToolCalls so the replayed
+    // question from session/load is recognized as already-shown and skipped).
+    this._turnActive = false;
+    this._activeToolCalls.clear();
+    this._approvalRequests.clear();
+    this._buffer = '';
+
+    // Brief pause for process cleanup
+    await new Promise(r => setTimeout(r, 300));
+    this._isRestartingForQuestion = false;
+
+    // Restart the process and resume the session
+    try {
+      console.log(`[OpenCode ${agentId?.slice(0, 8)}] Restarting to re-send question answer`);
+      await this.start(agentId, { cwd, resumeSessionId: sessionId, model });
+      console.log(`[OpenCode ${agentId?.slice(0, 8)}] Restarted, emitting questionAnswered`);
+      this.emit('questionAnswered', { text: answerText });
+    } catch (err) {
+      console.error(`[OpenCode ${agentId?.slice(0, 8)}] Restart failed:`, err.message);
+      this.emit('error', { message: `Restart failed: ${err.message}` });
+      this.emit('exit', { code: 1, signal: null });
+    }
+  }
+
   _flushThinking() {
     if (this._currentThinkingContent) {
       const blocks = [{ type: 'thinking', text: this._currentThinkingContent }];
@@ -936,6 +1114,14 @@ export class OpenCodeDriver extends BaseDriver {
       this.emit('status', { status: 'idle' });
       this._checkBranchChange();
     } catch (err) {
+      // If we're restarting for a question answer, suppress error events —
+      // the restart handler will re-establish the session and send the answer.
+      if (this._isRestartingForQuestion) {
+        this._turnActive = false;
+        this._activeToolCalls.clear();
+        return;
+      }
+
       console.error(`[OpenCode ${this._agentId?.slice(0, 8)}] session/prompt failed:`, err.message);
 
       // Emit any accumulated content before the error
@@ -972,10 +1158,9 @@ export class OpenCodeDriver extends BaseDriver {
       console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] No approval found for requestId: ${requestId}`);
       return;
     }
-    this._approvalRequests.delete(requestId);
 
-    const response = { 
-      optionId: behavior === 'allow' ? 'allow-once' : 'reject-once' 
+    const response = {
+      optionId: behavior === 'allow' ? 'allow-once' : 'reject-once'
     };
 
     if (behavior === 'allow' && updatedInput) {
@@ -983,8 +1168,21 @@ export class OpenCodeDriver extends BaseDriver {
     }
 
     if (pending.rpcRequestId != null) {
+      // RPC available — respond immediately
+      this._approvalRequests.delete(requestId);
+      console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Responding to permission RPC ${pending.rpcRequestId}`);
       this._rpcRespond(pending.rpcRequestId, response);
+    } else if (pending.toolCallId) {
+      // Question from tool_call — ACP never sends session/request_permission
+      // for questions. Kill the process, restart with session/load, and send
+      // the answer as a new user prompt.
+      this._approvalRequests.delete(requestId);
+      const answerText = this._formatQuestionAnswer(updatedInput);
+      console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Question answered, restarting to re-send: "${answerText.slice(0, 80)}"`);
+      this._restartForQuestion(answerText);
+      return;
     } else {
+      this._approvalRequests.delete(requestId);
       console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] Missing rpcRequestId for permission: ${requestId}`);
     }
 
@@ -994,17 +1192,19 @@ export class OpenCodeDriver extends BaseDriver {
   }
 
   async interrupt() {
-    if (!this._sessionId) return;
+    if (!this._process) return;
 
+    // ACP does not define a cancel RPC — send SIGINT to the process,
+    // which triggers the agent's graceful abort handler.
     try {
-      await this._rpcRequest('session/cancel', {
-        sessionId: this._sessionId,
-      });
-      this._turnActive = false;
-      this._activeToolCalls.clear();
+      this._process.kill('SIGINT');
+      console.log(`[OpenCode ${this._agentId?.slice(0, 8)}] SIGINT sent`);
     } catch (err) {
-      console.error(`[OpenCode ${this._agentId?.slice(0, 8)}] Cancel failed:`, err.message);
+      console.error(`[OpenCode ${this._agentId?.slice(0, 8)}] SIGINT failed:`, err.message);
     }
+
+    this._turnActive = false;
+    this._activeToolCalls.clear();
   }
 
   async setPermissionMode(mode) {
@@ -1080,6 +1280,8 @@ export class OpenCodeDriver extends BaseDriver {
 
     this._sessionId = null;
     this._approvalRequests.clear();
+    this._emittedQuestionToolCalls.clear();
+    this._isRestartingForQuestion = false;
     this._turnActive = false;
     this._activeToolCalls.clear();
   }
