@@ -10,6 +10,7 @@
 //   'message'        → { content: ContentBlock[] }
 //   'result'         → { cost, totalCost, usage, duration, isError, sessionId }
 //   'permission'     → { requestId, toolName, toolInput }
+//   'toolUseUpdated' → { toolCallId, input }   (input became richer after initial emit)
 //   'toolProgress'   → { toolName, elapsed }
 //   'status'         → { status }
 //   'error'          → { message }
@@ -53,7 +54,7 @@ export class BaseDriver extends EventEmitter {
    * @param {string} text — user message text
    * @param {string|null} sessionId — session identifier for multi-turn
    */
-  async sendPrompt(text, sessionId) {
+  async sendPrompt(text, sessionId, imageData) {
     throw new Error(`${this.name}: sendPrompt() not implemented`);
   }
 

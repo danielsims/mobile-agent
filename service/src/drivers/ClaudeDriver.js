@@ -244,7 +244,8 @@ export class ClaudeDriver extends BaseDriver {
     }
   }
 
-  async sendPrompt(text, sessionId) {
+  async sendPrompt(text, sessionId, imageData) {
+    // TODO: Add image support for Claude driver
     const message = {
       type: 'user',
       message: { role: 'user', content: text },

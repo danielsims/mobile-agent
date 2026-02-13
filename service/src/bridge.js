@@ -34,7 +34,7 @@ import {
   getGitLog,
 } from './projects.js';
 
-const MAX_CONCURRENT_AGENTS = 10;
+const MAX_CONCURRENT_AGENTS = 25;
 const IDLE_TIMEOUT_MS = 30 * 60_000; // 30 minutes
 const AUTH_TIMEOUT_MS = 10_000; // 10 seconds to authenticate after WebSocket connect
 
@@ -535,17 +535,18 @@ export class Bridge {
 
   async _handleListModels(ws, msg) {
     const agentType = msg.agentType || 'claude';
+    const autoOption = { value: '', label: 'Auto (Recommended)' };
     try {
       const models = await listModelsForAgentType(agentType);
       this._sendTo(ws, 'modelList', {
         agentType,
-        models,
+        models: [autoOption, ...models],
       });
     } catch (e) {
       console.error(`[models] listModels failed for ${agentType}:`, e.message);
       this._sendTo(ws, 'modelList', {
         agentType,
-        models: [{ value: 'auto', label: 'Auto (Recommended)', note: 'Use provider default model' }],
+        models: [autoOption],
       });
     }
   }
@@ -582,11 +583,11 @@ export class Bridge {
       return;
     }
 
-    logAudit('message_sent', { agentId: msg.agentId.slice(0, 8), deviceId, length: text.length });
-    session.sendPrompt(text);
+    logAudit('message_sent', { agentId: msg.agentId.slice(0, 8), deviceId, length: text.length, hasImage: !!msg.imageData });
+    session.sendPrompt(text, null, msg.imageData);
 
     // Echo the user message to all mobile clients
-    this._broadcastToMobile('userMessage', { agentId: msg.agentId, content: text });
+    this._broadcastToMobile('userMessage', { agentId: msg.agentId, content: text, imageData: msg.imageData });
   }
 
   async _handleInterruptAgent(ws, msg, deviceId) {

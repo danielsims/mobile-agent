@@ -530,7 +530,8 @@ export class CodexDriver extends BaseDriver {
     }
   }
 
-  async sendPrompt(text, sessionId) {
+  async sendPrompt(text, sessionId, imageData) {
+    // TODO: Add image support for Codex driver
     if (!this._ready || !this._threadId) {
       console.log(`[Codex ${this._agentId?.slice(0, 8)}] Not ready, cannot send prompt`);
       this.emit('error', { message: 'Codex not ready' });
