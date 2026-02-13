@@ -179,6 +179,28 @@ function StatusDot({ status, size = 6 }: { status: AgentStatus; size?: number })
   );
 }
 
+// Pulsing placeholder shown while the agent is loading (no model icon needed)
+function PulsingIcon({ size = 28 }: { size?: number }) {
+  const opacity = useRef(new Animated.Value(0.08)).current;
+
+  useEffect(() => {
+    const animation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(opacity, { toValue: 0.18, duration: 1000, useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 0.08, duration: 1000, useNativeDriver: true }),
+      ]),
+    );
+    animation.start();
+    return () => animation.stop();
+  }, [opacity]);
+
+  return (
+    <Animated.View
+      style={[styles.agentIcon, { width: size, height: size, backgroundColor: '#fff', opacity, marginRight: 8 }]}
+    />
+  );
+}
+
 // Agent type icon — SVG logo or colored letter fallback
 function AgentIcon({ type, size = 28 }: { type: AgentType; size?: number }) {
   const brand = getAgentBrand(type);
@@ -316,21 +338,34 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
   }, [agentCwd, agentProjectName, projects]);
 
   const iconSize = isFull ? 32 : 28;
-  const iconElement = matchedProject ? (
-    matchedProject.icon ? (
+  const [iconLoaded, setIconLoaded] = useState(false);
+  const projectIconUrl = matchedProject?.icon || null;
+
+  // Reset loaded state when the icon URL changes
+  useEffect(() => {
+    setIconLoaded(false);
+  }, [projectIconUrl]);
+
+  const iconElement = projectIconUrl ? (
+    <View style={{ width: iconSize, height: iconSize, marginRight: 8 }}>
+      {!iconLoaded && <PulsingIcon size={iconSize} />}
       <Image
-        source={{ uri: matchedProject.icon }}
-        style={{ width: iconSize, height: iconSize, borderRadius: iconSize * 0.22, marginRight: 8 }}
+        source={{ uri: projectIconUrl }}
+        style={[
+          { width: iconSize, height: iconSize, borderRadius: iconSize * 0.22 },
+          !iconLoaded && { position: 'absolute', opacity: 0 },
+        ]}
+        onLoad={() => setIconLoaded(true)}
       />
-    ) : (
-      <View style={[styles.agentIcon, { width: iconSize, height: iconSize, backgroundColor: 'rgba(255,255,255,0.06)' }]}>
-        <Text style={[styles.agentIconLetter, { color: '#888', fontSize: iconSize * 0.48 }]}>
-          {matchedProject.name.charAt(0).toUpperCase()}
-        </Text>
-      </View>
-    )
+    </View>
+  ) : matchedProject ? (
+    <View style={[styles.agentIcon, { width: iconSize, height: iconSize, backgroundColor: 'rgba(255,255,255,0.06)' }]}>
+      <Text style={[styles.agentIconLetter, { color: '#888', fontSize: iconSize * 0.48 }]}>
+        {matchedProject.name.charAt(0).toUpperCase()}
+      </Text>
+    </View>
   ) : (
-    <AgentIcon type={agent.type} size={iconSize} />
+    <PulsingIcon size={iconSize} />
   );
 
   const headerContent = (
