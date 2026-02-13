@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import { BottomModal } from './BottomModal';
+import { OpenCodeLogo } from './OpenCodeLogo';
 import type { AgentType, Project, ProviderModelOption } from '../state/types';
 
 interface CreateAgentModalProps {
@@ -102,6 +103,19 @@ export function CreateAgentModal({
   const [expandedNewWorktree, setExpandedNewWorktree] = useState<string | null>(null);
   const [newBranchName, setNewBranchName] = useState('');
   const [menuProjectId, setMenuProjectId] = useState<string | null>(null);
+
+  // Reset internal state when modal closes
+  useEffect(() => {
+    if (!visible) {
+      // Reset state after modal closes
+      setStep('type');
+      setSelectedType('claude');
+      setSelectedModel('');
+      setExpandedNewWorktree(null);
+      setNewBranchName('');
+      setMenuProjectId(null);
+    }
+  }, [visible]);
 
   // Reset internal state — called after the Drawer's close animation completes
   const handleDrawerClose = useCallback(() => {
@@ -239,6 +253,8 @@ export function CreateAgentModal({
                   <Svg width={16} height={16} viewBox="0 0 24 24">
                     <Path d={OPENAI_LOGO_PATH} fill={color} fillRule="evenodd" />
                   </Svg>
+                ) : type === 'opencode' ? (
+                  <OpenCodeLogo width={16} height={28} variant="dark" />
                 ) : (
                   <Text style={[styles.typeIconLetter, { color }]}>
                     {type.charAt(0).toUpperCase()}
@@ -276,21 +292,23 @@ export function CreateAgentModal({
               </TouchableOpacity>
             </View>
           ) : (
-            models.map(({ value, label }) => (
-              <TouchableOpacity
-                key={value}
-                style={styles.typeRow}
-                onPress={() => handleModelSelect(value)}
-                activeOpacity={0.7}
-              >
-                <View style={styles.modelRowInfo}>
-                  <Text style={styles.typeLabel}>{label}</Text>
-                </View>
-                <View style={styles.chevron}>
-                  <View style={[styles.chevronArrow, { borderColor: '#444' }]} />
-                </View>
-              </TouchableOpacity>
-            ))
+            <ScrollView style={styles.modelList} showsVerticalScrollIndicator={false}>
+              {models.map(({ value, label }) => (
+                <TouchableOpacity
+                  key={value}
+                  style={styles.typeRow}
+                  onPress={() => handleModelSelect(value)}
+                  activeOpacity={0.7}
+                >
+                  <View style={styles.modelRowInfo}>
+                    <Text style={styles.typeLabel}>{label}</Text>
+                  </View>
+                  <View style={styles.chevron}>
+                    <View style={[styles.chevronArrow, { borderColor: '#444' }]} />
+                  </View>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
           )}
         </>
       )}
@@ -477,6 +495,9 @@ const styles = StyleSheet.create({
   },
   modelRowInfo: {
     flex: 1,
+  },
+  modelList: {
+    maxHeight: 400,
   },
   chevron: {
     width: 20,
