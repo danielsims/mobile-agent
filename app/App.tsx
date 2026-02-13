@@ -444,8 +444,8 @@ function AppInner() {
     });
   };
 
-  const handleSendMessage = (agentId: string, text: string) => {
-    send('sendMessage', { agentId, text });
+  const handleSendMessage = (agentId: string, text: string, imageData?: { uri: string; base64: string; mimeType: string }) => {
+    send('sendMessage', { agentId, text, imageData });
   };
 
   const handleStopAgent = (agentId: string) => {

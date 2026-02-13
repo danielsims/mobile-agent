@@ -9,6 +9,7 @@ import {
   Keyboard,
   LayoutAnimation,
   UIManager,
+  Image,
 } from 'react-native';
 import Svg, { Path, Line } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
@@ -32,12 +33,14 @@ interface InputBarProps {
   onDraftChange?: (text: string) => void;
   autoFocus?: boolean;
   shimmer?: boolean;
+  attachedImage?: { uri: string; base64: string; mimeType: string } | null;
+  onRemoveImage?: () => void;
 }
 
 // Throttle activity notifications to avoid excessive pings
 const ACTIVITY_THROTTLE = 5000;
 
-export function InputBar({ onSend, onStop, showStop = false, onVoice, onPlus, disabled, placeholder = 'Ask anything...', onActivity, initialValue = '', onDraftChange, autoFocus, shimmer }: InputBarProps) {
+export function InputBar({ onSend, onStop, showStop = false, onVoice, onPlus, disabled, placeholder = 'Ask anything...', onActivity, initialValue = '', onDraftChange, autoFocus, shimmer, attachedImage, onRemoveImage }: InputBarProps) {
   const [text, setText] = useState(initialValue);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const inputRef = useRef<TextInput>(null);
@@ -107,20 +110,21 @@ export function InputBar({ onSend, onStop, showStop = false, onVoice, onPlus, di
   };
 
   const handleSend = async () => {
-    if (!text.trim() || disabled) return;
+    // Allow sending if there's text or an attached image
+    if ((!text.trim() && !attachedImage) || disabled) return;
 
     if (Platform.OS === 'ios') {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     }
 
-    const message = text.trim();
+    const message = text.trim() || 'What do you see in this image?';
     setText('');
     onSend(message);
     inputRef.current?.focus();
   };
 
   const canStop = Boolean(onStop) && showStop && !disabled;
-  const canSend = text.trim().length > 0 && !disabled && !canStop;
+  const canSend = (text.trim().length > 0 || attachedImage) && !disabled && !canStop;
 
   const handlePrimaryAction = async () => {
     if (canStop) {
@@ -135,6 +139,25 @@ export function InputBar({ onSend, onStop, showStop = false, onVoice, onPlus, di
 
   return (
     <View style={styles.container}>
+      {attachedImage && (
+        <View style={styles.imagePreviewContainer}>
+          <View style={styles.imageChip}>
+            <Image source={{ uri: attachedImage.uri }} style={styles.previewImage} />
+            <TouchableOpacity
+              style={styles.removeImageBtn}
+              onPress={() => {
+                if (Platform.OS === 'ios') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                onRemoveImage?.();
+              }}
+              activeOpacity={0.7}
+            >
+              <Svg width={14} height={14} viewBox="0 0 24 24" fill="none">
+                <Path d="M18 6L6 18M6 6l12 12" stroke="#fff" strokeWidth={2.5} strokeLinecap="round" />
+              </Svg>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
       <View style={styles.content}>
         {onPlus && (
           <TouchableOpacity
@@ -265,6 +288,35 @@ const styles = StyleSheet.create({
     backgroundColor: '#0a0a0a',
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: 'rgba(255,255,255,0.1)',
+  },
+  imagePreviewContainer: {
+    paddingHorizontal: 12,
+    paddingTop: 12,
+    paddingBottom: 4,
+  },
+  imageChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1a1a1a',
+    borderRadius: 12,
+    padding: 6,
+    alignSelf: 'flex-start',
+    gap: 8,
+  },
+  previewImage: {
+    width: 60,
+    height: 60,
+    borderRadius: 8,
+    backgroundColor: '#2a2a2a',
+  },
+  removeImageBtn: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 4,
   },
   content: {
     flexDirection: 'row',

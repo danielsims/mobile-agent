@@ -906,7 +906,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
             const worktreeAgents = Array.from(state.agents.values()).filter(a => a.cwd === selectedWorktree.path);
             const filteredSkills = skills.filter(s => s.source === 'builtin' && s.name !== 'create-worktree');
             return (
-              <View style={actionStyles.container}>
+              <ScrollView style={actionStyles.scroll} showsVerticalScrollIndicator={false}><View style={actionStyles.container}>
                 {/* New chat */}
                 <TouchableOpacity
                   style={actionStyles.row}
@@ -1009,7 +1009,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                     </TouchableOpacity>
                   </>
                 )}
-              </View>
+              </View></ScrollView>
             );
           })()}
 
@@ -1017,7 +1017,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
           {selectedWorktree && modalStep === 'pickAgent' && pendingSkillPrompt && (() => {
             const worktreeAgents = Array.from(state.agents.values()).filter(a => a.cwd === selectedWorktree.path);
             return (
-              <View style={actionStyles.container}>
+              <ScrollView style={actionStyles.scroll} showsVerticalScrollIndicator={false}><View style={actionStyles.container}>
                 {worktreeAgents.map(agent => (
                   <TouchableOpacity
                     key={agent.id}
@@ -1062,7 +1062,7 @@ export function GitScreen({ onBack, onRequestGitStatus, onRequestGitLog, onSelec
                     <Text style={actionStyles.description}>Start a fresh chat with this skill</Text>
                   </View>
                 </TouchableOpacity>
-              </View>
+              </View></ScrollView>
             );
           })()}
 
@@ -1711,6 +1711,9 @@ const overlayStyles = StyleSheet.create({
 });
 
 const actionStyles = StyleSheet.create({
+  scroll: {
+    maxHeight: Dimensions.get('window').height * 0.5,
+  },
   container: {
     paddingBottom: 4,
   },
