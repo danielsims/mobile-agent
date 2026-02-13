@@ -38,12 +38,19 @@ export interface ThinkingBlock {
 
 export type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock | ThinkingBlock;
 
+export interface ImageAttachment {
+  uri?: string;
+  base64?: string;
+  mimeType?: string;
+}
+
 // --- Messages ---
 
 export interface AgentMessage {
   id: string;
   type: 'user' | 'assistant' | 'system';
   content: string | ContentBlock[];
+  imageData?: ImageAttachment;
   timestamp: number;
 }
 
@@ -105,6 +112,7 @@ export type AgentAction =
   | { type: 'SET_SESSION_INFO'; agentId: string; sessionId?: string; model?: string; tools?: string[]; sessionName?: string; status?: AgentStatus; cwd?: string; gitBranch?: string; projectName?: string; autoApprove?: boolean }
   | { type: 'UPDATE_COST'; agentId: string; totalCost: number; outputTokens: number; contextUsedPercent: number }
   | { type: 'SET_PERMISSIONS'; agentId: string; permissions: PermissionRequest[] }
+  | { type: 'UPDATE_TOOL_INPUT'; agentId: string; toolCallId: string; input: Record<string, unknown> }
   | { type: 'SET_DRAFT'; agentId: string; text: string }
   | { type: 'SET_LAST_OUTPUT'; agentId: string; text: string }
   | { type: 'SET_ACTIVE_AGENT'; agentId: string | null };
@@ -189,8 +197,13 @@ export interface ServerMessage {
   text?: string;
 
   // assistantMessage
-  content?: ContentBlock[];
+  content?: ContentBlock[] | string;
+  imageData?: ImageAttachment;
   results?: Array<{ toolUseId: string; content: string | unknown }>;
+
+  // toolUseUpdated
+  toolCallId?: string;
+  input?: Record<string, unknown>;
 
   // permissionRequest
   requestId?: string;
