@@ -16,6 +16,14 @@ import type { SkillSearchResult } from './components/SkillsPanel';
 interface ServiceInfo {
   port: number;
   token: string;
+  tunnel_url: string | null;
+}
+
+interface PairingInfoState {
+  url: string;
+  pairingToken: string;
+  serverPublicKey: string;
+  expiresAt: number;
 }
 
 function AppInner() {
@@ -53,6 +61,10 @@ function AppInner() {
   const [skillSearchResults, setSkillSearchResults] = useState<SkillSearchResult[]>([]);
   const [skillSearchLoading, setSkillSearchLoading] = useState(false);
   const [installStatus, setInstallStatus] = useState<string | null>(null);
+
+  // Mobile pairing state
+  const [pairingInfo, setPairingInfo] = useState<PairingInfoState | null>(null);
+  const [pairingError, setPairingError] = useState<string | null>(null);
 
   const onConnect = useCallback(() => {
     // Connected and authenticated
@@ -104,6 +116,22 @@ function AppInner() {
       setSkillSearchResults(msg.searchResults);
       setSkillSearchLoading(false);
     }
+    // Handle pairing info response
+    if (msg.type === 'pairingInfo') {
+      if (msg.error) {
+        setPairingError(msg.error);
+        setPairingInfo(null);
+      } else if (msg.url && msg.pairingToken && msg.serverPublicKey && msg.expiresAt) {
+        setPairingInfo({
+          url: msg.url,
+          pairingToken: msg.pairingToken,
+          serverPublicKey: msg.serverPublicKey,
+          expiresAt: msg.expiresAt,
+        });
+        setPairingError(null);
+      }
+    }
+
     if (msg.type === 'skillInstallProgress' && msg.installStatus) {
       setInstallStatus(msg.installStatus);
       if (msg.installStatus === 'installed' || msg.installStatus === 'error') {
@@ -127,7 +155,7 @@ function AppInner() {
     let cancelled = false;
 
     async function waitForService() {
-      const maxAttempts = 30;
+      const maxAttempts = 90; // 90 * 500ms = 45s to match Tauri timeout
       for (let i = 0; i < maxAttempts; i++) {
         if (cancelled) return;
         try {
@@ -320,6 +348,13 @@ function AppInner() {
     sendRef.current('updateSkill', { name, body });
   }, []);
 
+  // Mobile pairing
+  const handleRequestPairingInfo = useCallback(() => {
+    sendRef.current('getPairingInfo', {});
+  }, []);
+
+  const tunnelAvailable = !!serviceInfo?.tunnel_url;
+
   if (serviceError) {
     return (
       <div style={{
@@ -375,6 +410,10 @@ function AppInner() {
         onClearSearchResults={() => { setSkillSearchResults([]); setSkillSearchLoading(false); }}
         onInstallSkill={handleInstallSkill}
         onUpdateSkill={handleUpdateSkill}
+        onRequestPairingInfo={handleRequestPairingInfo}
+        pairingInfo={pairingInfo}
+        pairingError={pairingError}
+        tunnelAvailable={tunnelAvailable}
       />
       <div className="main-content">
         <Toolbar
@@ -394,7 +433,19 @@ function AppInner() {
             projects={projects}
             colorfulGitLabels={settings.colorfulGitLabels}
             dispatch={dispatch}
-            onSendMessage={(agentId, text) => sendRef.current('sendMessage', { agentId, text })}
+            onSendMessage={(agentId, text) => {
+              sendRef.current('sendMessage', { agentId, text });
+              dispatch({
+                type: 'ADD_MESSAGE',
+                agentId,
+                message: {
+                  id: `local-${Date.now()}`,
+                  type: 'user',
+                  content: text,
+                  timestamp: Date.now(),
+                },
+              });
+            }}
             onInterrupt={(agentId) => sendRef.current('interruptAgent', { agentId })}
             onRespondPermission={(agentId, requestId, behavior) => {
               sendRef.current('respondPermission', { agentId, requestId, behavior });

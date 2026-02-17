@@ -6,6 +6,7 @@ use tauri::{Emitter, Manager};
 struct ServiceInfo {
     port: u16,
     token: String,
+    tunnel_url: Option<String>,
 }
 
 struct ServiceState {
@@ -102,7 +103,8 @@ async fn start_service(handle: &tauri::AppHandle) -> Result<(), String> {
 
     // Read stdout lines looking for the ready event
     let mut port: u16 = 3001;
-    let timeout = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+    let mut tunnel_url: Option<String> = None;
+    let timeout = tokio::time::timeout(std::time::Duration::from_secs(45), async {
         while let Ok(Some(line)) = reader.next_line().await {
             eprintln!("[service] {}", line);
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
@@ -110,6 +112,10 @@ async fn start_service(handle: &tauri::AppHandle) -> Result<(), String> {
                     if let Some(p) = parsed.get("port").and_then(|v| v.as_u64()) {
                         port = p as u16;
                     }
+                    tunnel_url = parsed
+                        .get("tunnelUrl")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
                     return Ok(());
                 }
             }
@@ -121,12 +127,13 @@ async fn start_service(handle: &tauri::AppHandle) -> Result<(), String> {
     match timeout {
         Ok(Ok(())) => {}
         Ok(Err(e)) => return Err(e),
-        Err(_) => return Err("Service startup timed out after 15s".to_string()),
+        Err(_) => return Err("Service startup timed out after 45s".to_string()),
     }
 
     let info = ServiceInfo {
         port,
         token: token.clone(),
+        tunnel_url,
     };
 
     // Keep draining stdout in the background so the service doesn't get

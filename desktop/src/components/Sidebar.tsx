@@ -4,6 +4,7 @@ import type { Settings } from '../hooks/useSettings';
 import type { ActivityTab } from './ActivityBar';
 import { SettingsPanel } from './SettingsPanel';
 import { SkillsPanel, type SkillSearchResult } from './SkillsPanel';
+import { MobilePanel, type PairingInfo } from './MobilePanel';
 
 export interface GitFileEntry {
   file: string;
@@ -36,6 +37,11 @@ interface SidebarProps {
   onClearSearchResults: () => void;
   onInstallSkill: (packageRef: string) => void;
   onUpdateSkill: (name: string, body: string) => void;
+  // Mobile
+  onRequestPairingInfo: () => void;
+  pairingInfo: PairingInfo | null;
+  pairingError: string | null;
+  tunnelAvailable: boolean;
 }
 
 const statusColors: Record<string, string> = {
@@ -196,6 +202,10 @@ export function Sidebar({
   onClearSearchResults,
   onInstallSkill,
   onUpdateSkill,
+  onRequestPairingInfo,
+  pairingInfo,
+  pairingError,
+  tunnelAvailable,
 }: SidebarProps) {
   return (
     <div className="sidebar">
@@ -220,6 +230,15 @@ export function Sidebar({
           onClearSearchResults={onClearSearchResults}
           onInstallSkill={onInstallSkill}
           onUpdateSkill={onUpdateSkill}
+        />
+      )}
+
+      {activeTab === 'mobile' && (
+        <MobilePanel
+          onRequestPairingInfo={onRequestPairingInfo}
+          pairingInfo={pairingInfo}
+          pairingError={pairingError}
+          tunnelAvailable={tunnelAvailable}
         />
       )}
 
