@@ -13,6 +13,7 @@ import {
   verifyChallenge,
   hasDevices,
   logAudit,
+  PAIRING_TOKEN_TTL_MS,
 } from './auth.js';
 import { loadSessions, getSavedSessions, saveSession, removeSession } from './sessions.js';
 import { readTranscript } from './transcripts.js';
@@ -49,6 +50,9 @@ export class Bridge {
 
     // Idle timeout tracking per mobile client
     this._idleTimers = new Map(); // ws -> timeout handle
+
+    // Tunnel URL (set by launcher after tunnel starts)
+    this.tunnelUrl = null;
 
     // Called after any pairing attempt so the launcher can refresh the QR
     this.onPairingAttempt = null;
@@ -90,11 +94,12 @@ export class Bridge {
    * Get pairing info for the QR code.
    */
   getPairingInfo(tunnelUrl) {
+    const url = tunnelUrl || this.tunnelUrl;
     const pairingToken = generatePairingToken();
     const serverPublicKey = getServerPublicKeyRaw().toString('hex');
 
     return {
-      url: tunnelUrl,
+      url,
       pairingToken,
       serverPublicKey,
     };
@@ -486,6 +491,10 @@ export class Bridge {
         this._handleUpdateSkill(ws, msg);
         break;
 
+      case 'getPairingInfo':
+        this._handleGetPairingInfo(ws);
+        break;
+
       case 'searchSkills':
         this._handleSearchSkills(ws, msg);
         break;
@@ -604,8 +613,8 @@ export class Bridge {
     logAudit('message_sent', { agentId: msg.agentId.slice(0, 8), deviceId, length: text.length, hasImage: !!msg.imageData });
     session.sendPrompt(text, null, msg.imageData);
 
-    // Echo the user message to all mobile clients
-    this._broadcastToMobile('userMessage', { agentId: msg.agentId, content: text, imageData: msg.imageData });
+    // Echo the user message to other mobile clients (not the sender)
+    this._broadcastToMobileExcept(ws, 'userMessage', { agentId: msg.agentId, content: text, imageData: msg.imageData });
   }
 
   async _handleInterruptAgent(ws, msg, deviceId) {
@@ -980,6 +989,20 @@ export class Bridge {
     }
   }
 
+  _handleGetPairingInfo(ws) {
+    if (!this.tunnelUrl) {
+      this._sendTo(ws, 'pairingInfo', { error: 'Tunnel not available' });
+      return;
+    }
+    const info = this.getPairingInfo();
+    this._sendTo(ws, 'pairingInfo', {
+      url: info.url,
+      pairingToken: info.pairingToken,
+      serverPublicKey: info.serverPublicKey,
+      expiresAt: Date.now() + PAIRING_TOKEN_TTL_MS,
+    });
+  }
+
   async _handleSearchSkills(ws, msg) {
     const { query } = msg;
     if (!query) {
@@ -1054,6 +1077,15 @@ export class Bridge {
     const msg = JSON.stringify({ type, ...data, ts: Date.now() });
     for (const client of this.mobileClients) {
       if (client.readyState === 1) {
+        client.send(msg);
+      }
+    }
+  }
+
+  _broadcastToMobileExcept(excludeWs, type, data = {}) {
+    const msg = JSON.stringify({ type, ...data, ts: Date.now() });
+    for (const client of this.mobileClients) {
+      if (client !== excludeWs && client.readyState === 1) {
         client.send(msg);
       }
     }

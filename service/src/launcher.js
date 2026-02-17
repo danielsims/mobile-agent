@@ -125,24 +125,27 @@ async function main() {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
-  // --- Headless mode: skip tunnel, QR, and stdin ---
-  if (headless) {
-    logAudit('server_started', { port: PORT, mode: 'headless' });
-    // Emit a JSON ready event on stdout for the desktop app to detect
-    console.log(JSON.stringify({ event: 'ready', port: PORT }));
-    return;
-  }
-
-  // --- Interactive mode (default): tunnel + QR pairing ---
+  // --- Start tunnel (both modes need it for mobile pairing) ---
   let tunnelUrl = null;
   try {
     tunnelUrl = await startTunnel();
-    logAudit('server_started', { port: PORT, tunnel: tunnelUrl });
+    logAudit('server_started', { port: PORT, tunnel: tunnelUrl, mode: headless ? 'headless' : 'interactive' });
   } catch (e) {
     console.error('Tunnel failed:', e.message);
-    console.log('Server is running on localhost only (no remote access).');
     logAudit('tunnel_failed', { error: e.message });
-    tunnelUrl = `ws://127.0.0.1:${PORT}`;
+    if (!headless) {
+      console.log('Server is running on localhost only (no remote access).');
+      tunnelUrl = `ws://127.0.0.1:${PORT}`;
+    }
+  }
+
+  // Store tunnel URL on bridge so WebSocket handlers can access it
+  bridge.tunnelUrl = tunnelUrl;
+
+  // --- Headless mode: emit ready event and return ---
+  if (headless) {
+    console.log(JSON.stringify({ event: 'ready', port: PORT, tunnelUrl }));
+    return;
   }
 
   let refreshTimer = null;

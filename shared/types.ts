@@ -275,6 +275,12 @@ export interface ServerMessage {
   // skillInstallProgress
   installStatus?: string;
 
+  // pairingInfo
+  url?: string;
+  pairingToken?: string;
+  serverPublicKey?: string;
+  expiresAt?: number;
+
   // error
   error?: string;
 }
