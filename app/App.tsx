@@ -445,7 +445,20 @@ function AppInner() {
   };
 
   const handleSendMessage = (agentId: string, text: string, imageData?: { uri: string; base64: string; mimeType: string }) => {
-    send('sendMessage', { agentId, text, imageData });
+    const sent = send('sendMessage', { agentId, text, imageData });
+    if (!sent) return;
+
+    dispatch({
+      type: 'ADD_MESSAGE',
+      agentId,
+      message: {
+        id: `local-user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        type: 'user',
+        content: text,
+        imageData,
+        timestamp: Date.now(),
+      },
+    });
   };
 
   const handleStopAgent = (agentId: string) => {

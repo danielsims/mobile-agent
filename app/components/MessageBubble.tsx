@@ -35,9 +35,9 @@ function hasVisibleContent(message: AgentMessage, agentType?: AgentType): boolea
         if (rendererKind === 'todo') {
           const input = block.input as Record<string, unknown> | undefined;
           const todos = Array.isArray(input?.todos)
-            ? input!.todos
+            ? input.todos
             : Array.isArray(input?.items)
-              ? input!.items
+              ? input.items
               : [];
           return todos.length > 0;
         }
@@ -256,6 +256,18 @@ function TodoWriteCard({ block }: { block: ContentBlock & { type: 'tool_use' } }
   );
 }
 
+interface AskUserQuestionOption {
+  label: string;
+  description?: string;
+}
+
+interface AskUserQuestion {
+  question: string;
+  header?: string;
+  options: AskUserQuestionOption[];
+  multiSelect?: boolean;
+}
+
 // --- AskUserQuestion card: renders question options as tappable buttons ---
 // Interactive when pending (onRespond provided), read-only when answered.
 function AskUserQuestionCard({
@@ -269,12 +281,32 @@ function AskUserQuestionCard({
   onRespond?: (answers: Record<string, string>) => void;
   onDeny?: () => void;
 }) {
-  const questions: Array<{
-    question: string;
-    header?: string;
-    options: Array<{ label: string; description?: string }>;
-    multiSelect?: boolean;
-  }> = Array.isArray(block.input?.questions) ? (block.input.questions as any[]) : [];
+  const rawQuestions = Array.isArray(block.input?.questions) ? block.input.questions : [];
+  const questions: AskUserQuestion[] = rawQuestions.flatMap((q) => {
+    if (!q || typeof q !== 'object') return [];
+
+    const raw = q as Record<string, unknown>;
+    if (typeof raw.question !== 'string' || raw.question.trim().length === 0) return [];
+
+    const rawOptions = Array.isArray(raw.options) ? raw.options : [];
+    const options: AskUserQuestionOption[] = rawOptions.flatMap((opt) => {
+      if (!opt || typeof opt !== 'object') return [];
+      const option = opt as Record<string, unknown>;
+      if (typeof option.label !== 'string' || option.label.trim().length === 0) return [];
+      return [{
+        label: option.label,
+        ...(typeof option.description === 'string' ? { description: option.description } : {}),
+      }];
+    });
+    if (options.length === 0) return [];
+
+    return [{
+      question: raw.question,
+      ...(typeof raw.header === 'string' ? { header: raw.header } : {}),
+      options,
+      ...(typeof raw.multiSelect === 'boolean' ? { multiSelect: raw.multiSelect } : {}),
+    }];
+  });
 
   const [selections, setSelections] = useState<Record<number, Set<number>>>({});
   const [submitted, setSubmitted] = useState(false);
@@ -325,7 +357,7 @@ function AskUserQuestionCard({
             if (Platform.OS === 'ios') {
               Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
             }
-            onRespond!(buildAnswers(updated));
+            if (onRespond) onRespond(buildAnswers(updated));
           }, 150);
         }
       }

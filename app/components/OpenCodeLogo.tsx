@@ -18,10 +18,8 @@ export function OpenCodeLogo({
   color,
   variant = 'dark'
 }: OpenCodeLogoProps) {
-  // Auto-select color based on variant if not explicitly provided
-  const fillColor = color || (variant === 'dark' ? '#F1ECEC' : '#211E1E');
   const innerColor = variant === 'dark' ? '#4B4646' : '#CFCECD';
-  const outerColor = variant === 'dark' ? '#B7B1B1' : '#656363';
+  const outerColor = color || (variant === 'dark' ? '#B7B1B1' : '#656363');
 
   return (
     <Svg width={width} height={height} viewBox="0 0 24 42" fill="none">

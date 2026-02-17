@@ -76,6 +76,7 @@ function updateAgent(
 
 export const initialState: AppState = {
   agents: new Map(),
+  agentOrder: [],
   activeAgentId: null,
 };
 
@@ -84,7 +85,10 @@ export function agentReducer(state: AppState, action: AgentAction): AppState {
     case 'ADD_AGENT': {
       const newAgents = new Map(state.agents);
       newAgents.set(action.agent.id, snapshotToAgentState(action.agent));
-      return { ...state, agents: newAgents };
+      const agentOrder = state.agentOrder.includes(action.agent.id)
+        ? state.agentOrder
+        : [...state.agentOrder, action.agent.id];
+      return { ...state, agents: newAgents, agentOrder };
     }
 
     case 'REMOVE_AGENT': {
@@ -93,13 +97,16 @@ export function agentReducer(state: AppState, action: AgentAction): AppState {
       return {
         ...state,
         agents: newAgents,
+        agentOrder: state.agentOrder.filter((id) => id !== action.agentId),
         activeAgentId: state.activeAgentId === action.agentId ? null : state.activeAgentId,
       };
     }
 
     case 'SET_AGENTS': {
       const newAgents = new Map<string, AgentState>();
+      const agentOrder: string[] = [];
       for (const snapshot of action.agents) {
+        agentOrder.push(snapshot.id);
         // Preserve existing state if agent already exists (reconnect scenario)
         const existing = state.agents.get(snapshot.id);
         if (existing) {
@@ -126,7 +133,7 @@ export function agentReducer(state: AppState, action: AgentAction): AppState {
           newAgents.set(snapshot.id, snapshotToAgentState(snapshot));
         }
       }
-      return { ...state, agents: newAgents };
+      return { ...state, agents: newAgents, agentOrder };
     }
 
     case 'UPDATE_AGENT_STATUS': {

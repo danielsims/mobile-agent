@@ -454,10 +454,6 @@ export function AgentDetailScreen({
             finalUri = manipulated.uri;
             finalBase64 = manipulated.base64;
             finalMime = 'image/jpeg';
-            console.log('Image downsampled:', {
-              original: `${w}x${h} (${Math.round(asset.base64.length / 1024)}KB)`,
-              resized: `${manipulated.width}x${manipulated.height} (${Math.round(manipulated.base64.length / 1024)}KB)`,
-            });
           }
         } catch (err) {
           // Native module not available yet (needs dev build rebuild).
@@ -471,13 +467,6 @@ export function AgentDetailScreen({
         uri: finalUri,
         base64: finalBase64,
         mimeType: finalMime,
-      });
-
-      console.log('Image attached:', {
-        width: w,
-        height: h,
-        mimeType: finalMime,
-        base64Length: finalBase64.length,
       });
     }
   }, []);
@@ -598,14 +587,8 @@ export function AgentDetailScreen({
 
   const isDisabled = connectionStatus !== 'connected';
   const permissions = Array.from(agent.pendingPermissions.values());
-  const questionPerm = useMemo(
-    () => permissions.find((p) => isQuestionTool(agent.type, p.toolName)),
-    [permissions, agent.type],
-  );
-  const pendingPermissionToolNames = useMemo(
-    () => new Set(permissions.map(p => p.toolName)),
-    [permissions],
-  );
+  const questionPerm = permissions.find((p) => isQuestionTool(agent.type, p.toolName));
+  const pendingPermissionToolNames = new Set(permissions.map(p => p.toolName));
   const modelDisplayName = formatModelName(agent.model, agent.type);
 
   // Build project/branch subtitle
