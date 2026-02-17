@@ -13,6 +13,5 @@ export type {
   AgentAction,
   AgentSnapshot,
   ServerMessage,
+  ConnectionStatus,
 } from '../state/types';
-
-export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected';
