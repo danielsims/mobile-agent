@@ -36,3 +36,7 @@ Thumbs.db
 
 # Metro
 .metro-health-check*
+
+# Tauri / Rust
+desktop/src-tauri/target/
+desktop/src-tauri/icons/

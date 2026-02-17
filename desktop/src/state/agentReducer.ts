@@ -1,0 +1,383 @@
+import type { AppState, AgentState, AgentAction, AgentMessage, AgentSnapshot, PermissionRequest } from '@shared/types';
+
+let messageIdCounter = 0;
+
+function nextMessageId(): string {
+  return String(messageIdCounter++);
+}
+
+function permissionsArrayToMap(perms: AgentSnapshot['pendingPermissions']): Map<string, PermissionRequest> {
+  const map = new Map<string, PermissionRequest>();
+  if (Array.isArray(perms)) {
+    for (const p of perms) {
+      if (p.requestId) map.set(p.requestId, p);
+    }
+  }
+  return map;
+}
+
+function deriveLastOutput(messages: AgentMessage[], fallback: string): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.type === 'assistant') {
+      if (typeof msg.content === 'string') {
+        return msg.content.slice(-2000);
+      }
+      if (Array.isArray(msg.content)) {
+        const text = msg.content
+          .filter((b): b is { type: 'text'; text: string } => b.type === 'text' && 'text' in b)
+          .map(b => b.text)
+          .join('\n');
+        if (text) return text.slice(-2000);
+      }
+      break;
+    }
+  }
+  return fallback;
+}
+
+function snapshotToAgentState(snapshot: AgentSnapshot): AgentState {
+  return {
+    id: snapshot.id,
+    type: snapshot.type,
+    status: snapshot.status,
+    sessionId: snapshot.sessionId,
+    sessionName: snapshot.sessionName || 'New Agent',
+    messages: [],
+    pendingPermissions: permissionsArrayToMap(snapshot.pendingPermissions),
+    model: snapshot.model,
+    tools: [],
+    cwd: snapshot.cwd || null,
+    gitBranch: snapshot.gitBranch || null,
+    projectName: snapshot.projectName || null,
+    totalCost: snapshot.totalCost,
+    contextUsedPercent: snapshot.contextUsedPercent,
+    outputTokens: snapshot.outputTokens,
+    lastOutput: snapshot.lastOutput || '',
+    draftText: '',
+    createdAt: snapshot.createdAt,
+    autoApprove: snapshot.autoApprove || false,
+  };
+}
+
+function updateAgent(
+  state: AppState,
+  agentId: string,
+  updater: (agent: AgentState) => AgentState,
+): AppState {
+  const agent = state.agents.get(agentId);
+  if (!agent) return state;
+
+  const updated = updater(agent);
+  const newAgents = new Map(state.agents);
+  newAgents.set(agentId, updated);
+  return { ...state, agents: newAgents };
+}
+
+export const initialState: AppState = {
+  agents: new Map(),
+  agentOrder: [],
+  activeAgentId: null,
+};
+
+export function agentReducer(state: AppState, action: AgentAction): AppState {
+  switch (action.type) {
+    case 'ADD_AGENT': {
+      const newAgents = new Map(state.agents);
+      newAgents.set(action.agent.id, snapshotToAgentState(action.agent));
+      const newOrder = state.agentOrder.includes(action.agent.id)
+        ? state.agentOrder
+        : [...state.agentOrder, action.agent.id];
+      return { ...state, agents: newAgents, agentOrder: newOrder };
+    }
+
+    case 'REMOVE_AGENT': {
+      const newAgents = new Map(state.agents);
+      newAgents.delete(action.agentId);
+      return {
+        ...state,
+        agents: newAgents,
+        agentOrder: state.agentOrder.filter(id => id !== action.agentId),
+        activeAgentId: state.activeAgentId === action.agentId ? null : state.activeAgentId,
+      };
+    }
+
+    case 'REORDER_AGENTS': {
+      return { ...state, agentOrder: action.order };
+    }
+
+    case 'SET_AGENTS': {
+      const newAgents = new Map<string, AgentState>();
+      for (const snapshot of action.agents) {
+        const existing = state.agents.get(snapshot.id);
+        if (existing) {
+          const serverPerms = permissionsArrayToMap(snapshot.pendingPermissions);
+          const mergedPerms = serverPerms.size > 0 ? serverPerms : existing.pendingPermissions;
+          newAgents.set(snapshot.id, {
+            ...existing,
+            status: snapshot.status,
+            model: snapshot.model || existing.model,
+            cwd: snapshot.cwd || existing.cwd,
+            gitBranch: snapshot.gitBranch || existing.gitBranch,
+            projectName: snapshot.projectName || existing.projectName,
+            totalCost: snapshot.totalCost,
+            contextUsedPercent: snapshot.contextUsedPercent,
+            outputTokens: snapshot.outputTokens,
+            lastOutput: snapshot.lastOutput || existing.lastOutput,
+            pendingPermissions: mergedPerms,
+            autoApprove: snapshot.autoApprove || false,
+          });
+        } else {
+          newAgents.set(snapshot.id, snapshotToAgentState(snapshot));
+        }
+      }
+      // Preserve existing order, append new IDs
+      const incomingIds = new Set(action.agents.map(a => a.id));
+      const preserved = state.agentOrder.filter(id => incomingIds.has(id));
+      const preservedSet = new Set(preserved);
+      const newIds = action.agents.filter(a => !preservedSet.has(a.id)).map(a => a.id);
+      return { ...state, agents: newAgents, agentOrder: [...preserved, ...newIds] };
+    }
+
+    case 'UPDATE_AGENT_STATUS': {
+      return updateAgent(state, action.agentId, (agent) => ({
+        ...agent,
+        status: action.status,
+      }));
+    }
+
+    case 'ADD_MESSAGE': {
+      return updateAgent(state, action.agentId, (agent) => ({
+        ...agent,
+        messages: [...agent.messages, action.message],
+      }));
+    }
+
+    case 'APPEND_STREAM_CONTENT': {
+      return updateAgent(state, action.agentId, (agent) => {
+        const msgs = [...agent.messages];
+        const last = msgs[msgs.length - 1];
+
+        if (last && last.type === 'assistant' && typeof last.content === 'string') {
+          msgs[msgs.length - 1] = {
+            ...last,
+            content: last.content + action.text,
+          };
+        } else {
+          msgs.push({
+            id: nextMessageId(),
+            type: 'assistant',
+            content: action.text,
+            timestamp: Date.now(),
+          });
+        }
+
+        let lastOutput = agent.lastOutput + action.text;
+        if (lastOutput.length > 2000) {
+          lastOutput = lastOutput.slice(-2000);
+        }
+
+        return { ...agent, messages: msgs, lastOutput };
+      });
+    }
+
+    case 'FINALIZE_ASSISTANT_MESSAGE': {
+      return updateAgent(state, action.agentId, (agent) => {
+        const msgs = [...agent.messages];
+        const last = msgs[msgs.length - 1];
+
+        if (last && last.type === 'assistant' && typeof last.content === 'string') {
+          msgs[msgs.length - 1] = {
+            ...last,
+            content: action.content,
+            timestamp: action.timestamp,
+          };
+        } else {
+          msgs.push({
+            id: nextMessageId(),
+            type: 'assistant',
+            content: action.content,
+            timestamp: action.timestamp,
+          });
+        }
+
+        return {
+          ...agent,
+          messages: msgs,
+          lastOutput: deriveLastOutput(msgs, agent.lastOutput),
+        };
+      });
+    }
+
+    case 'MERGE_TOOL_RESULTS': {
+      return updateAgent(state, action.agentId, (agent) => {
+        const msgs = [...agent.messages];
+
+        const findMatchingToolUseMessage = (toolUseId: string) => {
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            const msg = msgs[i];
+            if (msg.type !== 'assistant' || !Array.isArray(msg.content)) continue;
+            const hasMatch = msg.content.some(
+              b => b.type === 'tool_use' && 'id' in b && b.id === toolUseId,
+            );
+            if (hasMatch) return i;
+          }
+          return -1;
+        };
+
+        const findLatestStructuredAssistant = () => {
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            const msg = msgs[i];
+            if (msg.type === 'assistant' && Array.isArray(msg.content)) return i;
+          }
+          return -1;
+        };
+
+        for (const r of action.results) {
+          const matchIdx = findMatchingToolUseMessage(r.toolUseId);
+          const targetIdx = matchIdx >= 0 ? matchIdx : findLatestStructuredAssistant();
+          if (targetIdx < 0) continue;
+
+          const target = msgs[targetIdx];
+          if (!Array.isArray(target.content)) continue;
+          const updated = [...target.content];
+          const exists = updated.some(
+            b => b.type === 'tool_result' && 'toolUseId' in b && b.toolUseId === r.toolUseId,
+          );
+
+          if (!exists) {
+            updated.push({
+              type: 'tool_result',
+              toolUseId: r.toolUseId,
+              content: typeof r.content === 'string' ? r.content : JSON.stringify(r.content),
+            });
+            msgs[targetIdx] = { ...target, content: updated };
+          }
+        }
+
+        return { ...agent, messages: msgs };
+      });
+    }
+
+    case 'UPDATE_TOOL_INPUT': {
+      return updateAgent(state, action.agentId, (agent) => {
+        const msgs = [...agent.messages];
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          const msg = msgs[i];
+          if (msg.type !== 'assistant' || !Array.isArray(msg.content)) continue;
+          const blockIdx = msg.content.findIndex(
+            b => b.type === 'tool_use' && 'id' in b && b.id === action.toolCallId,
+          );
+          if (blockIdx >= 0) {
+            const updated = [...msg.content];
+            updated[blockIdx] = { ...updated[blockIdx], input: action.input } as typeof updated[number];
+            msgs[i] = { ...msg, content: updated };
+            return { ...agent, messages: msgs };
+          }
+        }
+        return agent;
+      });
+    }
+
+    case 'SET_MESSAGES': {
+      return updateAgent(state, action.agentId, (agent) => ({
+        ...agent,
+        messages: action.messages,
+        lastOutput: deriveLastOutput(action.messages, agent.lastOutput),
+      }));
+    }
+
+    case 'BATCH_SET_MESSAGES': {
+      const newAgents = new Map(state.agents);
+      for (const { agentId, messages } of action.batch) {
+        const agent = newAgents.get(agentId);
+        if (!agent) continue;
+        newAgents.set(agentId, {
+          ...agent,
+          messages,
+          lastOutput: deriveLastOutput(messages, agent.lastOutput),
+        });
+      }
+      return { ...state, agents: newAgents };
+    }
+
+    case 'ADD_PERMISSION': {
+      return updateAgent(state, action.agentId, (agent) => {
+        const perms = new Map(agent.pendingPermissions);
+        perms.set(action.permission.requestId, action.permission);
+        return { ...agent, pendingPermissions: perms, status: 'awaiting_permission' };
+      });
+    }
+
+    case 'REMOVE_PERMISSION': {
+      return updateAgent(state, action.agentId, (agent) => {
+        const perms = new Map(agent.pendingPermissions);
+        perms.delete(action.requestId);
+        return {
+          ...agent,
+          pendingPermissions: perms,
+          status: perms.size === 0 ? 'running' : 'awaiting_permission',
+        };
+      });
+    }
+
+    case 'SET_SESSION_INFO': {
+      return updateAgent(state, action.agentId, (agent) => ({
+        ...agent,
+        ...(action.sessionId !== undefined && { sessionId: action.sessionId }),
+        ...(action.model !== undefined && { model: action.model }),
+        ...(action.tools !== undefined && { tools: action.tools }),
+        ...(action.sessionName !== undefined && { sessionName: action.sessionName }),
+        ...(action.status !== undefined && { status: action.status }),
+        ...(action.cwd !== undefined && { cwd: action.cwd }),
+        ...(action.gitBranch !== undefined && { gitBranch: action.gitBranch }),
+        ...(action.projectName !== undefined && { projectName: action.projectName }),
+        ...(action.autoApprove !== undefined && { autoApprove: action.autoApprove }),
+      }));
+    }
+
+    case 'UPDATE_COST': {
+      return updateAgent(state, action.agentId, (agent) => ({
+        ...agent,
+        totalCost: action.totalCost,
+        outputTokens: action.outputTokens,
+        contextUsedPercent: action.contextUsedPercent,
+      }));
+    }
+
+    case 'SET_PERMISSIONS': {
+      return updateAgent(state, action.agentId, (agent) => {
+        const perms = new Map<string, PermissionRequest>();
+        for (const p of action.permissions) {
+          if (p.requestId) perms.set(p.requestId, p);
+        }
+        return {
+          ...agent,
+          pendingPermissions: perms,
+          status: perms.size > 0 ? 'awaiting_permission' : agent.status,
+        };
+      });
+    }
+
+    case 'SET_DRAFT': {
+      return updateAgent(state, action.agentId, (agent) => ({
+        ...agent,
+        draftText: action.text,
+      }));
+    }
+
+    case 'SET_LAST_OUTPUT': {
+      return updateAgent(state, action.agentId, (agent) => ({
+        ...agent,
+        lastOutput: action.text,
+      }));
+    }
+
+    case 'SET_ACTIVE_AGENT': {
+      return { ...state, activeAgentId: action.agentId };
+    }
+
+    default:
+      return state;
+  }
+}
