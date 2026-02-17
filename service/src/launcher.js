@@ -54,6 +54,13 @@ if (subcommand === 'projects') {
   process.exit(0);
 }
 
+// --- CLI Flags ---
+
+const args = process.argv.slice(2);
+const headless = args.includes('--headless');
+const desktopTokenFlag = args.find(a => a.startsWith('--desktop-token='));
+const desktopToken = desktopTokenFlag ? desktopTokenFlag.split('=')[1] : null;
+
 // --- Server ---
 
 const PORT = parseInt(process.env.PORT, 10) || 3001;
@@ -104,9 +111,29 @@ function showPairingQR(pairingInfo) {
 }
 
 async function main() {
-  const bridge = new Bridge(PORT);
+  const bridge = new Bridge(PORT, { desktopToken });
   await bridge.start();
 
+  // Graceful shutdown
+  const shutdown = () => {
+    console.log('\nShutting down...');
+    logAudit('server_shutdown', {});
+    bridge.shutdown();
+    process.exit(0);
+  };
+
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
+  // --- Headless mode: skip tunnel, QR, and stdin ---
+  if (headless) {
+    logAudit('server_started', { port: PORT, mode: 'headless' });
+    // Emit a JSON ready event on stdout for the desktop app to detect
+    console.log(JSON.stringify({ event: 'ready', port: PORT }));
+    return;
+  }
+
+  // --- Interactive mode (default): tunnel + QR pairing ---
   let tunnelUrl = null;
   try {
     tunnelUrl = await startTunnel();
@@ -160,17 +187,6 @@ async function main() {
       }
     });
   }
-
-  // Graceful shutdown
-  const shutdown = () => {
-    console.log('\nShutting down...');
-    logAudit('server_shutdown', {});
-    bridge.shutdown();
-    process.exit(0);
-  };
-
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
 }
 
 main().catch((e) => {

@@ -39,8 +39,9 @@ const IDLE_TIMEOUT_MS = 30 * 60_000; // 30 minutes
 const AUTH_TIMEOUT_MS = 10_000; // 10 seconds to authenticate after WebSocket connect
 
 export class Bridge {
-  constructor(port) {
+  constructor(port, options = {}) {
     this.port = port;
+    this.desktopToken = options.desktopToken || null;
     this.agents = new Map(); // agentId -> AgentSession
     this.mobileClients = new Set(); // authenticated mobile WebSocket connections
     this.httpServer = null;
@@ -262,9 +263,26 @@ export class Bridge {
       return;
     }
 
+    // Desktop token auth: simple shared-secret for local desktop app
+    if (msg.type === 'desktopAuth') {
+      if (!this.desktopToken) {
+        console.log(`[auth] desktopAuth rejected from ${ip}: no desktop token configured`);
+        this._sendTo(ws, 'authError', { error: 'Desktop auth not enabled on this server.' });
+        return;
+      }
+      if (msg.token === this.desktopToken) {
+        console.log(`[auth] Desktop auth successful from ${ip}`);
+        callback({ success: true, deviceId: `desktop-${Date.now()}` });
+      } else {
+        console.log(`[auth] Desktop auth rejected from ${ip}: invalid token`);
+        this._sendTo(ws, 'authError', { error: 'Invalid desktop token.' });
+      }
+      return;
+    }
+
     // Unknown auth message type
     console.log(`[auth] Unknown auth message type "${msg.type}" from ${ip}`);
-    this._sendTo(ws, 'authError', { error: 'Send "authenticate" or "pair" as first message.' });
+    this._sendTo(ws, 'authError', { error: 'Send "authenticate", "pair", or "desktopAuth" as first message.' });
   }
 
   _onMobileAuthenticated(ws, deviceId, ip) {
@@ -965,7 +983,7 @@ export class Bridge {
   async _handleSearchSkills(ws, msg) {
     const { query } = msg;
     if (!query) {
-      this._sendTo(ws, 'skillSearchResults', { results: [] });
+      this._sendTo(ws, 'skillSearchResults', { searchResults: [] });
       return;
     }
 
@@ -986,13 +1004,13 @@ export class Bridge {
       const results = result.results || [];
       console.log(`[Skills] Search returned ${results.length} result(s), broadcasting to mobile`);
       for (const client of this.mobileClients) {
-        this._sendTo(client, 'skillSearchResults', { results });
+        this._sendTo(client, 'skillSearchResults', { searchResults: results });
       }
     } catch (e) {
       if (gen !== this._skillSearchGen) return;
       console.error(`[Skills] _handleSearchSkills failed:`, e);
       for (const client of this.mobileClients) {
-        this._sendTo(client, 'skillSearchResults', { results: [] });
+        this._sendTo(client, 'skillSearchResults', { searchResults: [] });
       }
     }
   }
