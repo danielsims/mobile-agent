@@ -34,12 +34,15 @@ function AppInner() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [models, setModels] = useState<ProviderModelOption[]>([]);
+  const [addingProject, setAddingProject] = useState(false);
+  const addingProjectRef = useRef(false);
 
   // Activity bar state
   const [activeTab, setActiveTab] = useState<ActivityTab>('git');
 
   // Git state
   const [gitDataMap, setGitDataMap] = useState<Map<string, GitStatusData>>(new Map());
+  const [projectGitDataMap, setProjectGitDataMap] = useState<Map<string, GitStatusData>>(new Map());
   const [gitDiffMap, setGitDiffMap] = useState<Map<string, string>>(new Map());
 
   // Derive loading state: an agent is loading if it has a cwd but no git data yet
@@ -80,6 +83,13 @@ function AppInner() {
     // Handle project/model list responses
     if (msg.type === 'projectList' && msg.projects) {
       setProjects(msg.projects);
+      addingProjectRef.current = false;
+      setAddingProject(false);
+    }
+    if (msg.type === 'error' && addingProjectRef.current) {
+      console.warn('[desktop] registerProject failed:', msg.error);
+      addingProjectRef.current = false;
+      setAddingProject(false);
     }
     if (msg.type === 'modelList' && msg.models) {
       setModels(msg.models);
@@ -90,6 +100,20 @@ function AppInner() {
       setGitDataMap(prev => {
         const next = new Map(prev);
         next.set(msg.agentId!, {
+          branch: msg.branch ?? null,
+          files: msg.files ?? [],
+          ahead: msg.ahead ?? 0,
+          behind: msg.behind ?? 0,
+        });
+        return next;
+      });
+    }
+
+    // Handle project-level git status (worktreeStatus)
+    if (msg.type === 'worktreeStatus' && msg.worktreePath) {
+      setProjectGitDataMap(prev => {
+        const next = new Map(prev);
+        next.set(msg.worktreePath!, {
           branch: msg.branch ?? null,
           files: msg.files ?? [],
           ahead: msg.ahead ?? 0,
@@ -138,6 +162,7 @@ function AppInner() {
         setTimeout(() => setInstallStatus(null), 2000);
       }
     }
+
   }, [handleServerMessage]);
 
   const { status, connect, send, disconnect: _disconnect } = useWebSocket({
@@ -287,6 +312,19 @@ function AppInner() {
     }
   }, [status]);
 
+  // Request git status for all registered projects when project list updates
+  const projectGitRequestedRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (status !== 'connected') return;
+    for (const project of projects) {
+      if (project.isGit === false) continue;
+      if (!projectGitRequestedRef.current.has(project.path)) {
+        projectGitRequestedRef.current.add(project.path);
+        sendRef.current('getWorktreeStatus', { worktreePath: project.path });
+      }
+    }
+  }, [status, projects]);
+
   // Pending prompt for newly created agents
   const pendingPromptRef = useRef<string | null>(null);
   const prevAgentCountRef = useRef(state.agents.size);
@@ -335,6 +373,35 @@ function AppInner() {
 
   const handleRequestProjects = useCallback(() => {
     sendRef.current('listProjects', {});
+  }, []);
+
+  const handleAddProject = useCallback(async () => {
+    if (addingProjectRef.current) return;
+    addingProjectRef.current = true;
+    setAddingProject(true);
+    try {
+      const selectedFolder = await invoke<string | null>('pick_project_folder');
+      if (!selectedFolder) {
+        addingProjectRef.current = false;
+        setAddingProject(false);
+        return;
+      }
+
+      const sent = sendRef.current('registerProject', { path: selectedFolder });
+      if (!sent) {
+        addingProjectRef.current = false;
+        setAddingProject(false);
+      }
+    } catch (e) {
+      console.error('[desktop] failed to pick/register project:', e);
+      addingProjectRef.current = false;
+      setAddingProject(false);
+    }
+  }, []);
+
+  // Setup git for a non-git project
+  const handleSetupGit = useCallback((projectId: string) => {
+    sendRef.current('initializeGitProject', { projectId });
   }, []);
 
   // Git file click → open diff in main area
@@ -415,9 +482,13 @@ function AppInner() {
         activeTab={activeTab}
         agents={state.agents}
         projects={projects}
+        onAddProject={handleAddProject}
+        onSetupGit={handleSetupGit}
+        addingProject={addingProject}
         settings={settings}
         onUpdateSetting={updateSetting}
         gitDataMap={gitDataMap}
+        projectGitDataMap={projectGitDataMap}
         loadingGitStatus={loadingGitStatus}
         onFileClick={handleFileClick}
         activeFile={activeDiff}

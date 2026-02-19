@@ -1342,6 +1342,7 @@ body {
   height: 49px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   padding: 0 14px;
   font-size: 11px;
   font-weight: 600;
@@ -1350,6 +1351,26 @@ body {
   letter-spacing: 0.04em;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+}
+
+.sidebar-header-action {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+.sidebar-header-action:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.sidebar-header-action:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .sidebar-section {
@@ -1447,6 +1468,24 @@ body {
   font-size: 10px;
   color: var(--accent);
   opacity: 0.8;
+}
+
+.git-project-pill {
+  font-size: 9px;
+  color: var(--text-muted);
+  background: var(--bg-active);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1px 6px;
+}
+
+.git-project-pill-action {
+  cursor: pointer;
+}
+
+.git-project-pill-action:hover {
+  color: var(--text);
+  border-color: var(--text-muted);
 }
 
 .git-clean {
