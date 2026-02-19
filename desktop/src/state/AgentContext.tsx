@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useReducer, useCallback, useRef, useMemo, useEffect } from 'react';
 import type { AppState, AgentState, AgentAction, ServerMessage, AgentMessage, PermissionRequest, ImageAttachment, ContentBlock } from '@shared/types';
 import { agentReducer, initialState } from './agentReducer';
+import { writeToTerminal } from '../components/XtermTerminal';
 
 let msgSeq = 0;
 function nextMsgId(suffix: string): string {
@@ -26,7 +27,10 @@ interface AgentContextValue {
 
 const AgentContext = createContext<AgentContextValue | null>(null);
 
-const STREAM_FLUSH_INTERVAL = 50;
+// AI agent streams: flushed on the next animation frame (~16ms at 60Hz).
+// Terminal streams: rendered instantly via direct-write; React state updated
+// every 2s for persistence only — this avoids re-rendering the entire tree
+// on every keystroke echo.
 
 export function AgentProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(agentReducer, initialState);
@@ -65,12 +69,13 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // Per-agent streaming throttle
+  // Per-agent streaming throttle — uses rAF for low-latency terminal output
   const pendingStreamsRef = useRef<Map<string, string>>(new Map());
   const streamSeenRef = useRef<Set<string>>(new Set());
-  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flushRafRef = useRef<number | null>(null);
 
   const flushStreams = useCallback(() => {
+    flushRafRef.current = null;
     const pending = pendingStreamsRef.current;
     if (pending.size === 0) return;
 
@@ -81,13 +86,33 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const scheduleFlush = useCallback(() => {
-    if (!flushTimerRef.current) {
-      flushTimerRef.current = setTimeout(() => {
-        flushTimerRef.current = null;
-        flushStreams();
-      }, STREAM_FLUSH_INTERVAL);
+    if (flushRafRef.current === null) {
+      flushRafRef.current = requestAnimationFrame(flushStreams);
     }
   }, [flushStreams]);
+
+  // Terminal agents: slow persistence-only flush (2s).
+  // Visual rendering is handled by the direct-write registry — React state
+  // is only needed for HMR recovery and session persistence.
+  const terminalPendingRef = useRef<Map<string, string>>(new Map());
+  const terminalFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flushTerminalStreams = useCallback(() => {
+    terminalFlushTimerRef.current = null;
+    const pending = terminalPendingRef.current;
+    if (pending.size === 0) return;
+
+    for (const [agentId, text] of pending) {
+      dispatch({ type: 'APPEND_STREAM_CONTENT', agentId, text });
+    }
+    pending.clear();
+  }, []);
+
+  const scheduleTerminalFlush = useCallback(() => {
+    if (terminalFlushTimerRef.current === null) {
+      terminalFlushTimerRef.current = setTimeout(flushTerminalStreams, 2000);
+    }
+  }, [flushTerminalStreams]);
 
   const handleServerMessage = useCallback((msg: ServerMessage) => {
     switch (msg.type) {
@@ -111,6 +136,7 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
           historyLoadedRef.current.delete(msg.agentId);
           streamSeenRef.current.delete(msg.agentId);
           pendingStreamsRef.current.delete(msg.agentId);
+          terminalPendingRef.current.delete(msg.agentId);
           dispatch({ type: 'REMOVE_AGENT', agentId: msg.agentId });
         }
         break;
@@ -162,6 +188,17 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
 
       case 'streamChunk': {
         if (msg.agentId && msg.text) {
+          // Terminal agents: write directly to xterm (zero latency), persist
+          // to React state on a slow 2s timer to avoid re-rendering the tree.
+          const agent = stateRef.current.agents.get(msg.agentId);
+          if (agent?.type === 'terminal' && writeToTerminal(msg.agentId, msg.text)) {
+            const pending = terminalPendingRef.current;
+            const current = pending.get(msg.agentId) || '';
+            pending.set(msg.agentId, current + msg.text);
+            scheduleTerminalFlush();
+            break;
+          }
+          // AI agents: rAF-batched state update for render
           const pending = pendingStreamsRef.current;
           const current = pending.get(msg.agentId) || '';
           pending.set(msg.agentId, current + msg.text);
@@ -313,7 +350,7 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
         break;
       }
     }
-  }, [scheduleFlush, flushHistory]);
+  }, [scheduleFlush, scheduleTerminalFlush, flushHistory]);
 
   const value = useMemo(() => ({
     state,

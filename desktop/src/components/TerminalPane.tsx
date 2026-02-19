@@ -6,6 +6,7 @@ import {
   MessageRow,
   PermissionBanner,
 } from './AgentMessages';
+import { XtermTerminal } from './XtermTerminal';
 
 const statusColors: Record<AgentStatus, string> = {
   running: 'var(--status-running)',
@@ -16,6 +17,17 @@ const statusColors: Record<AgentStatus, string> = {
   connected: 'var(--status-starting)',
   exited: 'var(--status-exited)',
 };
+
+function formatModelName(model: string | null, type: AgentState['type']): string {
+  if (!model) {
+    if (type === 'terminal') return 'Interactive Terminal';
+    return type.charAt(0).toUpperCase() + type.slice(1);
+  }
+  if (type === 'terminal' && model === 'interactive-shell') {
+    return 'Interactive Terminal';
+  }
+  return model;
+}
 
 function matchProject(agent: AgentState, projects: Project[]): Project | null {
   if (!projects.length) return null;
@@ -39,6 +51,8 @@ interface TerminalPaneProps {
   projects?: Project[];
   colorfulGitLabels?: boolean;
   onSendMessage: (text: string) => void;
+  onWriteTerminal: (data: string) => void;
+  onResizeTerminal: (cols: number, rows: number) => void;
   onInterrupt: () => void;
   onRespondPermission: (requestId: string, behavior: 'allow' | 'deny') => void;
   onSetAutoApprove: (enabled: boolean) => void;
@@ -51,6 +65,8 @@ export function TerminalPane({
   projects = [],
   colorfulGitLabels = true,
   onSendMessage,
+  onWriteTerminal,
+  onResizeTerminal,
   onInterrupt,
   onRespondPermission,
   onSetAutoApprove,
@@ -72,8 +88,13 @@ export function TerminalPane({
     isDragging,
   } = useSortable({ id: agent.id });
 
-  const toolResultMap = useMemo(() => buildToolResultMap(agent.messages), [agent.messages]);
   const matched = useMemo(() => matchProject(agent, projects), [agent, projects]);
+  const isTerminal = agent.type === 'terminal';
+  const toolResultMap = useMemo(
+    () => (isTerminal ? new Map() : buildToolResultMap(agent.messages)),
+    [agent.messages, isTerminal],
+  );
+  const modelLabel = useMemo(() => formatModelName(agent.model, agent.type), [agent.model, agent.type]);
 
   // Measure prefix width for text-indent + sync textarea height
   useEffect(() => {
@@ -157,47 +178,47 @@ export function TerminalPane({
             </div>
           ) : (
             <div className="pane-type-icon">
-              {agent.type[0]?.toUpperCase()}
+              {isTerminal ? '>' : agent.type[0]?.toUpperCase()}
             </div>
           )}
-          {agent.model && (
-            <span className="pane-model">{agent.model}</span>
-          )}
+          <span className="pane-model">{modelLabel}</span>
           <div className="pane-status-dot" style={{ background: statusColors[agent.status] }} />
         </div>
         <div className="pane-header-right">
-          <div
-            className="pane-mode-toggle"
-            onPointerDown={(e) => e.stopPropagation()}
-          >
-            <button
-              type="button"
-              className={`pane-mode-btn ${!agent.autoApprove ? 'pane-mode-btn-active' : ''}`}
+          {!isTerminal && (
+            <div
+              className="pane-mode-toggle"
               onPointerDown={(e) => e.stopPropagation()}
-              onClick={(e) => { e.stopPropagation(); onSetAutoApprove(false); }}
             >
-              Ask
-            </button>
-            <button
-              type="button"
-              className={`pane-mode-btn ${agent.autoApprove ? 'pane-mode-btn-active pane-mode-btn-auto' : ''}`}
-              onPointerDown={(e) => e.stopPropagation()}
-              onClick={(e) => { e.stopPropagation(); onSetAutoApprove(true); }}
-            >
-              Auto
-            </button>
-          </div>
-          {agent.contextUsedPercent > 0 && (
+              <button
+                type="button"
+                className={`pane-mode-btn ${!agent.autoApprove ? 'pane-mode-btn-active' : ''}`}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => { e.stopPropagation(); onSetAutoApprove(false); }}
+              >
+                Ask
+              </button>
+              <button
+                type="button"
+                className={`pane-mode-btn ${agent.autoApprove ? 'pane-mode-btn-active pane-mode-btn-auto' : ''}`}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => { e.stopPropagation(); onSetAutoApprove(true); }}
+              >
+                Auto
+              </button>
+            </div>
+          )}
+          {!isTerminal && agent.contextUsedPercent > 0 && (
             <span className="pane-context">{Math.round(agent.contextUsedPercent)}%</span>
           )}
-          {costStr && <span className="pane-cost">{costStr}</span>}
-          {agentRunning && (
+          {!isTerminal && costStr && <span className="pane-cost">{costStr}</span>}
+          {(agentRunning || isTerminal) && (
             <div className="pane-header-actions">
               <button
                 className="pane-btn pane-btn-interrupt"
                 onClick={(e) => { e.stopPropagation(); onInterrupt(); }}
                 onPointerDown={(e) => e.stopPropagation()}
-                title="Interrupt"
+                title={isTerminal ? 'Send Ctrl+C' : 'Interrupt'}
               >
                 <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
                   <rect x="1" y="1" width="8" height="8" rx="1" />
@@ -219,104 +240,118 @@ export function TerminalPane({
         </div>
       </div>
 
-      {/* Messages */}
-      <div ref={scrollRef} className="pane-messages" onScroll={handleScroll}>
-        {agent.messages.length === 0 && (
-          <div className="pane-empty">No messages yet</div>
-        )}
-
-        {agent.messages.map((msg, i) => (
-          <MessageRow
-            key={msg.id}
-            message={msg}
-            toolResultMap={toolResultMap}
-            isLastMessage={i === agent.messages.length - 1}
-            agentRunning={agentRunning}
-            isStreaming={lastIsStreaming && i === agent.messages.length - 1}
-          />
-        ))}
-
-        {agentRunning && !lastIsStreaming && agent.messages.length > 0 && (
-          <div className="assistant-message-row">
-            <div className="streaming-indicator">
-              <span className="streaming-dot" />
-              <span className="streaming-dot" style={{ animationDelay: '0.15s' }} />
-              <span className="streaming-dot" style={{ animationDelay: '0.3s' }} />
-            </div>
-          </div>
-        )}
-
-        {permissions.map((perm) => (
-          <PermissionBanner key={perm.requestId} permission={perm} onRespond={onRespondPermission} />
-        ))}
-      </div>
-
-      {/* Terminal-style prompt input */}
-      <div className="pane-prompt" onPointerDown={(e) => e.stopPropagation()}>
-        <div className="pane-prompt-scroll">
-          <div className="pane-prompt-prefix" ref={prefixRef}>
-            <span className="pane-prompt-arrow">→</span>
-            {agent.projectName && (
-              <>
-                <span className={`pane-prompt-project ${colorfulGitLabels ? 'pane-project-color' : ''}`}>
-                  {agent.projectName}
-                </span>
-                {agent.gitBranch && (
-                  <>
-                    <span className={`pane-prompt-git ${colorfulGitLabels ? 'pane-git-color' : ''}`}>
-                      git:(
-                    </span>
-                    <span className={`pane-prompt-branch ${colorfulGitLabels ? 'pane-branch-color' : ''}`}>
-                      {agent.gitBranch}
-                    </span>
-                    <span className={`pane-prompt-git ${colorfulGitLabels ? 'pane-git-color' : ''}`}>
-                      )
-                    </span>
-                  </>
-                )}
-              </>
-            )}
-          </div>
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={handleInputChange}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                handleSubmit();
-              }
-            }}
-            className="pane-prompt-input"
-            style={prefixWidth ? { textIndent: `${prefixWidth + 4}px` } : undefined}
-            rows={1}
-            disabled={agentRunning}
+      {isTerminal ? (
+        <div className="pane-terminal-live">
+          <XtermTerminal
+            agentId={agent.id}
+            messages={agent.messages}
+            onWrite={onWriteTerminal}
+            onResize={onResizeTerminal}
           />
         </div>
-        {agentRunning ? (
-          <button
-            className="pane-prompt-btn pane-prompt-btn-stop"
-            onClick={onInterrupt}
-            title="Stop"
-          >
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
-              <rect x="2" y="2" width="8" height="8" rx="1.5" />
-            </svg>
-          </button>
-        ) : (
-          <button
-            className={`pane-prompt-btn pane-prompt-btn-send ${input.trim() ? '' : 'pane-prompt-btn-muted'}`}
-            onClick={handleSubmit}
-            disabled={!input.trim()}
-            title="Send"
-          >
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="6" y1="10" x2="6" y2="2" />
-              <polyline points="2 5 6 1.5 10 5" />
-            </svg>
-          </button>
-        )}
-      </div>
+      ) : (
+        <>
+          {/* Messages */}
+          <div ref={scrollRef} className="pane-messages" onScroll={handleScroll}>
+            {agent.messages.length === 0 && (
+              <div className="pane-empty">No messages yet</div>
+            )}
+
+            {agent.messages.map((msg, i) => (
+              <MessageRow
+                key={msg.id}
+                message={msg}
+                toolResultMap={toolResultMap}
+                isLastMessage={i === agent.messages.length - 1}
+                agentRunning={agentRunning}
+                isStreaming={lastIsStreaming && i === agent.messages.length - 1}
+              />
+            ))}
+
+            {agentRunning && !lastIsStreaming && agent.messages.length > 0 && (
+              <div className="assistant-message-row">
+                <div className="streaming-indicator">
+                  <span className="streaming-dot" />
+                  <span className="streaming-dot" style={{ animationDelay: '0.15s' }} />
+                  <span className="streaming-dot" style={{ animationDelay: '0.3s' }} />
+                </div>
+              </div>
+            )}
+
+            {permissions.map((perm) => (
+              <PermissionBanner key={perm.requestId} permission={perm} onRespond={onRespondPermission} />
+            ))}
+          </div>
+
+          {/* Terminal-style prompt input */}
+          <div className="pane-prompt" onPointerDown={(e) => e.stopPropagation()}>
+            <div className="pane-prompt-scroll">
+              <div className="pane-prompt-prefix" ref={prefixRef}>
+                <span className="pane-prompt-arrow">→</span>
+                {agent.projectName && (
+                  <>
+                    <span className={`pane-prompt-project ${colorfulGitLabels ? 'pane-project-color' : ''}`}>
+                      {agent.projectName}
+                    </span>
+                    {agent.gitBranch && (
+                      <>
+                        <span className={`pane-prompt-git ${colorfulGitLabels ? 'pane-git-color' : ''}`}>
+                          git:(
+                        </span>
+                        <span className={`pane-prompt-branch ${colorfulGitLabels ? 'pane-branch-color' : ''}`}>
+                          {agent.gitBranch}
+                        </span>
+                        <span className={`pane-prompt-git ${colorfulGitLabels ? 'pane-git-color' : ''}`}>
+                          )
+                        </span>
+                      </>
+                    )}
+                  </>
+                )}
+              </div>
+              <textarea
+                ref={inputRef}
+                value={input}
+                onChange={handleInputChange}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSubmit();
+                  }
+                }}
+                className="pane-prompt-input"
+                style={prefixWidth ? { textIndent: `${prefixWidth + 4}px` } : undefined}
+                rows={1}
+                disabled={agentRunning}
+                placeholder="Send a message..."
+              />
+            </div>
+            {agentRunning ? (
+              <button
+                className="pane-prompt-btn pane-prompt-btn-stop"
+                onClick={onInterrupt}
+                title="Stop"
+              >
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+                  <rect x="2" y="2" width="8" height="8" rx="1.5" />
+                </svg>
+              </button>
+            ) : (
+              <button
+                className={`pane-prompt-btn pane-prompt-btn-send ${input.trim() ? '' : 'pane-prompt-btn-muted'}`}
+                onClick={handleSubmit}
+                disabled={!input.trim()}
+                title="Send"
+              >
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="6" y1="10" x2="6" y2="2" />
+                  <polyline points="2 5 6 1.5 10 5" />
+                </svg>
+              </button>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }

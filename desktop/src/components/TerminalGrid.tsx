@@ -37,6 +37,8 @@ interface TerminalGridProps {
   colorfulGitLabels?: boolean;
   dispatch: React.Dispatch<AgentAction>;
   onSendMessage: (agentId: string, text: string) => void;
+  onWriteTerminal: (agentId: string, data: string) => void;
+  onResizeTerminal: (agentId: string, cols: number, rows: number) => void;
   onInterrupt: (agentId: string) => void;
   onRespondPermission: (agentId: string, requestId: string, behavior: 'allow' | 'deny') => void;
   onSetAutoApprove: (agentId: string, enabled: boolean) => void;
@@ -59,6 +61,7 @@ function getPaneBasis(count: number): string {
 }
 
 function DragOverlayContent({ agent }: { agent: AgentState }) {
+  const modelLabel = agent.model || (agent.type === 'terminal' ? 'Interactive Terminal' : '');
   const costStr = agent.totalCost > 0
     ? agent.totalCost < 0.01 ? '<$0.01' : `$${agent.totalCost.toFixed(2)}`
     : '';
@@ -68,9 +71,9 @@ function DragOverlayContent({ agent }: { agent: AgentState }) {
       <div className="pane-header" style={{ cursor: 'grabbing' }}>
         <div className="pane-header-left">
           <div className="pane-type-icon">
-            {agent.type[0]?.toUpperCase()}
+            {agent.type === 'terminal' ? '>' : agent.type[0]?.toUpperCase()}
           </div>
-          {agent.model && <span className="pane-model">{agent.model}</span>}
+          {modelLabel && <span className="pane-model">{modelLabel}</span>}
           <div className="pane-status-dot" style={{ background: statusColors[agent.status] }} />
         </div>
         <div className="pane-header-right">
@@ -96,6 +99,8 @@ export function TerminalGrid({
   colorfulGitLabels,
   dispatch,
   onSendMessage,
+  onWriteTerminal,
+  onResizeTerminal,
   onInterrupt,
   onRespondPermission,
   onSetAutoApprove,
@@ -174,12 +179,12 @@ export function TerminalGrid({
   if (orderedAgents.length === 0) {
     return (
       <div className="terminal-grid-empty">
-        <div style={{ fontSize: 14 }}>No agents running</div>
+        <div style={{ fontSize: 14 }}>No sessions running</div>
         <button onClick={onCreateAgent} className="terminal-grid-create-btn">
-          Create Agent
+          Create Session
         </button>
         <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
-          <kbd className="kbd">N</kbd> New agent
+          <kbd className="kbd">N</kbd> New session
         </div>
       </div>
     );
@@ -220,6 +225,8 @@ export function TerminalGrid({
                   projects={projects}
                   colorfulGitLabels={colorfulGitLabels}
                   onSendMessage={(text) => onSendMessage(agent.id, text)}
+                  onWriteTerminal={(data) => onWriteTerminal(agent.id, data)}
+                  onResizeTerminal={(cols, rows) => onResizeTerminal(agent.id, cols, rows)}
                   onInterrupt={() => onInterrupt(agent.id)}
                   onRespondPermission={(requestId, behavior) => onRespondPermission(agent.id, requestId, behavior)}
                   onSetAutoApprove={(enabled) => onSetAutoApprove(agent.id, enabled)}

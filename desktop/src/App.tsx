@@ -187,10 +187,28 @@ function AppInner() {
 
   // Listen for service crash
   useEffect(() => {
-    const unlisten = listen<string>('service-crashed', (event) => {
+    let cancelled = false;
+    let dispose: (() => void) | null = null;
+
+    listen<string>('service-crashed', (event) => {
       setServiceError(event.payload);
-    });
-    return () => { unlisten.then((fn) => fn()); };
+    })
+      .then((unlisten) => {
+        if (cancelled) {
+          unlisten();
+          return;
+        }
+        dispose = unlisten;
+      })
+      .catch((err) => {
+        // If Tauri capabilities are misconfigured, avoid unhandled rejections.
+        console.warn('[tauri] failed to register service-crashed listener:', err);
+      });
+
+    return () => {
+      cancelled = true;
+      if (dispose) dispose();
+    };
   }, []);
 
   // Keyboard shortcut for creating agents
@@ -198,6 +216,7 @@ function AppInner() {
     const handler = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
+      if (target.closest('.xterm-host')) return;
 
       if (e.key === 'n' || e.key === 'N') {
         e.preventDefault();
@@ -435,16 +454,25 @@ function AppInner() {
             dispatch={dispatch}
             onSendMessage={(agentId, text) => {
               sendRef.current('sendMessage', { agentId, text });
-              dispatch({
-                type: 'ADD_MESSAGE',
-                agentId,
-                message: {
-                  id: `local-${Date.now()}`,
-                  type: 'user',
-                  content: text,
-                  timestamp: Date.now(),
-                },
-              });
+              const agent = state.agents.get(agentId);
+              if (agent?.type !== 'terminal') {
+                dispatch({
+                  type: 'ADD_MESSAGE',
+                  agentId,
+                  message: {
+                    id: `local-${Date.now()}`,
+                    type: 'user',
+                    content: text,
+                    timestamp: Date.now(),
+                  },
+                });
+              }
+            }}
+            onWriteTerminal={(agentId, data) => {
+              sendRef.current('writeTerminal', { agentId, data });
+            }}
+            onResizeTerminal={(agentId, cols, rows) => {
+              sendRef.current('resizeTerminal', { agentId, cols, rows });
             }}
             onInterrupt={(agentId) => sendRef.current('interruptAgent', { agentId })}
             onRespondPermission={(agentId, requestId, behavior) => {
