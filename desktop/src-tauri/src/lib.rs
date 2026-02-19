@@ -29,13 +29,23 @@ fn get_service_status(state: tauri::State<'_, Mutex<ServiceState>>) -> bool {
     guard.child.is_some()
 }
 
+#[tauri::command]
+fn pick_project_folder() -> Result<Option<String>, String> {
+    let selected = rfd::FileDialog::new().pick_folder();
+    Ok(selected.map(|path| path.to_string_lossy().to_string()))
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(Mutex::new(ServiceState {
             info: None,
             child: None,
         }))
-        .invoke_handler(tauri::generate_handler![get_service_info, get_service_status])
+        .invoke_handler(tauri::generate_handler![
+            get_service_info,
+            get_service_status,
+            pick_project_folder
+        ])
         .setup(|app| {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
