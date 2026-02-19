@@ -62,7 +62,7 @@ export function Toolbar({ connectionStatus, onCreateAgent }: ToolbarProps) {
             fontWeight: 500,
           }}
         >
-          New Agent
+          New Session
         </button>
       </div>
     </div>

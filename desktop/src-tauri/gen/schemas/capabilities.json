@@ -1,1 +1,1 @@
-{}
+{"default-capability":{"identifier":"default-capability","description":"Default capability for the main desktop window.","local":true,"windows":["main"],"permissions":["core:default"]}}

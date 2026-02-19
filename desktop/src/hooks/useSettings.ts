@@ -57,6 +57,9 @@ const DARK_VARS: Record<string, string> = {
   "--status-idle": "#6b7280",
   "--status-starting": "#3b82f6",
   "--status-exited": "#64748b",
+  "--git-label-cyan": "#23d3ee",
+  "--git-label-blue": "#60a5fa",
+  "--git-label-red": "#f87171",
 };
 
 const LIGHT_VARS: Record<string, string> = {
@@ -81,6 +84,9 @@ const LIGHT_VARS: Record<string, string> = {
   "--status-idle": "#6b7280",
   "--status-starting": "#2563eb",
   "--status-exited": "#64748b",
+  "--git-label-cyan": "#05b6d5",
+  "--git-label-blue": "#3a82f6",
+  "--git-label-red": "#ee4444",
 };
 
 function applyThemeVars(effective: "light" | "dark") {

@@ -3,6 +3,29 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { AgentMessage, ContentBlock, PermissionRequest } from '@shared/types';
 
+// ── Text Sanitization ──────────────────────────
+
+const SYSTEM_TAG_RE = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
+const TURN_ABORTED_RE = /<turn_aborted>[\s\S]*?<\/turn_aborted>/g;
+
+function sanitizeDisplayText(text: string): string {
+  let cleaned = text.replace(SYSTEM_TAG_RE, '');
+  cleaned = cleaned.replace(TURN_ABORTED_RE, '');
+  return cleaned.trim();
+}
+
+function hasAbortedTag(text: string): boolean {
+  return TURN_ABORTED_RE.test(text);
+}
+
+function rawMessageText(message: AgentMessage): string {
+  if (typeof message.content === 'string') return message.content;
+  if (Array.isArray(message.content)) {
+    return message.content.filter(b => b.type === 'text').map(b => (b as { text: string }).text).join('\n');
+  }
+  return String(message.content);
+}
+
 // ── Utilities ──────────────────────────────────
 
 export function shortPath(filePath: string): string {
@@ -340,7 +363,7 @@ export function renderContentBlocks(
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
     if (block.type === 'text') {
-      pendingText += (pendingText ? '\n\n' : '') + block.text;
+      pendingText += (pendingText ? '\n\n' : '') + sanitizeDisplayText(block.text);
     } else {
       if (pendingText) {
         groups.push({ type: 'markdown', text: pendingText });
@@ -411,16 +434,20 @@ export function MessageRow({ message, toolResultMap, isLastMessage, agentRunning
   }
 
   if (message.type === 'user') {
+    const raw = rawMessageText(message);
+    const userText = sanitizeDisplayText(raw);
+    const wasAborted = hasAbortedTag(raw);
     return (
-      <div className="user-message-row">
-        <div className="user-message">
-          {typeof message.content === 'string'
-            ? message.content
-            : Array.isArray(message.content)
-              ? message.content.filter(b => b.type === 'text').map((b, i) => <span key={i}>{(b as { text: string }).text}</span>)
-              : String(message.content)}
-        </div>
-      </div>
+      <>
+        {userText && (
+          <div className="user-message-row">
+            <div className="user-message">{userText}</div>
+          </div>
+        )}
+        {wasAborted && (
+          <div className="interrupted-notice">Agent interrupted by user</div>
+        )}
+      </>
     );
   }
 
@@ -430,7 +457,7 @@ export function MessageRow({ message, toolResultMap, isLastMessage, agentRunning
       <div className="assistant-message">
         {typeof message.content === 'string' ? (
           <>
-            <MarkdownContent text={message.content} />
+            <MarkdownContent text={sanitizeDisplayText(message.content)} />
             {isStreaming && <span className="streaming-cursor" />}
           </>
         ) : (
