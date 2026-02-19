@@ -42,7 +42,7 @@ function snapshotToAgentState(snapshot: AgentSnapshot): AgentState {
     type: snapshot.type,
     status: snapshot.status,
     sessionId: snapshot.sessionId,
-    sessionName: snapshot.sessionName || 'New Agent',
+    sessionName: snapshot.sessionName || 'New Session',
     messages: [],
     pendingPermissions: permissionsArrayToMap(snapshot.pendingPermissions),
     model: snapshot.model,
@@ -154,19 +154,25 @@ export function agentReducer(state: AppState, action: AgentAction): AppState {
       return updateAgent(state, action.agentId, (agent) => {
         const msgs = [...agent.messages];
         const last = msgs[msgs.length - 1];
+        const maxStreamChars = agent.type === 'terminal' ? 120_000 : 40_000;
 
         if (last && last.type === 'assistant' && typeof last.content === 'string') {
           // Append to existing streaming message
+          const appended = last.content + action.text;
           msgs[msgs.length - 1] = {
             ...last,
-            content: last.content + action.text,
+            content: appended.length > maxStreamChars
+              ? appended.slice(-maxStreamChars)
+              : appended,
           };
         } else {
           // Create new streaming message
           msgs.push({
             id: nextMessageId(),
             type: 'assistant',
-            content: action.text,
+            content: action.text.length > maxStreamChars
+              ? action.text.slice(-maxStreamChars)
+              : action.text,
             timestamp: Date.now(),
           });
         }

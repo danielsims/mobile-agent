@@ -57,6 +57,7 @@ const STATUS_LABELS: Record<AgentStatus, string> = {
 // e.g. "claude-sonnet-4-5-20250929" → "Claude Sonnet 4.5"
 function formatModelName(model: string | null, type: AgentType): string {
   if (!model) {
+    if (type === 'terminal') return 'Interactive Terminal';
     return type.charAt(0).toUpperCase() + type.slice(1);
   }
 
@@ -102,7 +103,7 @@ interface PreviewLine {
 
 const CARD_MESSAGE_WINDOW = 30;
 
-function buildTerminalPreview(messages: AgentMessage[], maxMessages: number): PreviewLine[] {
+function buildTerminalPreview(messages: AgentMessage[], maxMessages: number, agentType: AgentType): PreviewLine[] {
   const startIdx = Math.max(0, messages.length - maxMessages);
   const lines: PreviewLine[] = [];
   let prevType: string | null = null;
@@ -112,7 +113,9 @@ function buildTerminalPreview(messages: AgentMessage[], maxMessages: number): Pr
     if (!body) continue;
     // Only show header when the sender changes
     if (msg.type !== prevType) {
-      const header = msg.type === 'user' ? '❯ You' : '❯ Assistant';
+      const header = msg.type === 'user'
+        ? '❯ You'
+        : (agentType === 'terminal' ? '❯ Shell' : '❯ Assistant');
       lines.push({ text: header, isHeader: true });
       prevType = msg.type;
     }
@@ -258,8 +261,8 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
   // Build terminal content preview from the same messages array the detail screen uses.
   // Single source of truth — last N messages, no content truncation.
   const terminalLines = useMemo(() => {
-    return buildTerminalPreview(agent.messages, isFull ? CARD_MESSAGE_WINDOW : 4);
-  }, [isFull, agent.messages]);
+    return buildTerminalPreview(agent.messages, isFull ? CARD_MESSAGE_WINDOW : 4, agent.type);
+  }, [isFull, agent.messages, agent.type]);
 
   // Auto-scroll to bottom when content changes
   useEffect(() => {
@@ -403,7 +406,7 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
     )
   ) : (
     <Text style={[styles.emptyText, isFull && styles.emptyTextFull]}>
-      {agent.status === 'idle' ? 'Waiting for prompt...' :
+      {agent.status === 'idle' ? (agent.type === 'terminal' ? 'Waiting for command...' : 'Waiting for prompt...') :
        agent.status === 'starting' ? 'Starting...' :
        agent.status === 'exited' ? 'Session ended' : ''}
     </Text>
@@ -412,8 +415,8 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
   const handleDestroyPress = useCallback(() => {
     setShowMenu(false);
     Alert.alert(
-      'Remove Agent',
-      `End "${agent.sessionName}"? This will terminate the agent process.`,
+      'Remove Session',
+      `End "${agent.sessionName}"? This will terminate the session process.`,
       [
         { text: 'Cancel', style: 'cancel' },
         { text: 'Remove', style: 'destructive', onPress: onDestroy },
@@ -436,7 +439,7 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
             {showMenu && (
               <View style={styles.menuDropdown}>
                 <TouchableOpacity style={styles.menuItem} onPress={handleDestroyPress}>
-                  <Text style={styles.menuItemDestructive}>Remove agent</Text>
+                  <Text style={styles.menuItemDestructive}>Remove session</Text>
                 </TouchableOpacity>
               </View>
             )}
@@ -472,14 +475,16 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
         >
           <KeyboardIcon size={16} color="#666" />
         </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.iconButton}
-          onPress={() => onVoice?.()}
-          activeOpacity={0.6}
-          hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
-        >
-          <MicIcon size={16} color="#666" />
-        </TouchableOpacity>
+        {agent.type !== 'terminal' && (
+          <TouchableOpacity
+            style={styles.iconButton}
+            onPress={() => onVoice?.()}
+            activeOpacity={0.6}
+            hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+          >
+            <MicIcon size={16} color="#666" />
+          </TouchableOpacity>
+        )}
         <TouchableOpacity
           style={styles.openButton}
           onPress={onPress}
@@ -522,7 +527,7 @@ export function AgentCard({ agent, projects, onPress, onLongPress, onDestroy, on
   );
 }
 
-// "New Agent" card (for grid layout)
+// "New Session" card (for grid layout)
 export function NewAgentCard({ onPress }: { onPress: () => void }) {
   return (
     <TouchableOpacity style={[styles.card, styles.newCard]} onPress={onPress} activeOpacity={0.7}>
@@ -531,13 +536,13 @@ export function NewAgentCard({ onPress }: { onPress: () => void }) {
           <View style={styles.plusH} />
           <View style={styles.plusV} />
         </View>
-        <Text style={styles.newCardText}>New Agent</Text>
+        <Text style={styles.newCardText}>New Session</Text>
       </View>
     </TouchableOpacity>
   );
 }
 
-// Compact "New Agent" button (for single-column layout)
+// Compact "New Session" button (for single-column layout)
 export function NewAgentButton({ onPress }: { onPress: () => void }) {
   return (
     <TouchableOpacity style={styles.newButton} onPress={onPress} activeOpacity={0.7}>
@@ -545,7 +550,7 @@ export function NewAgentButton({ onPress }: { onPress: () => void }) {
         <View style={styles.plusH} />
         <View style={styles.plusV} />
       </View>
-      <Text style={styles.newButtonText}>New Agent</Text>
+      <Text style={styles.newButtonText}>New Session</Text>
     </TouchableOpacity>
   );
 }

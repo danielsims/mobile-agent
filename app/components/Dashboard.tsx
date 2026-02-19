@@ -101,7 +101,7 @@ function BottomPillNav({ currentPage, totalPages, connectionStatus, onOpenSettin
           onCreateAgent();
         }} style={pillStyles.centerSection} activeOpacity={0.7}>
           <Text style={pillStyles.addIcon}>+</Text>
-          <Text style={pillStyles.sectionLabel}>Agent</Text>
+          <Text style={pillStyles.sectionLabel}>Session</Text>
         </TouchableOpacity>
         {hasGit && <View style={pillStyles.divider} />}
         <TouchableOpacity onPress={onOpenSettings} style={pillStyles.sideSection} activeOpacity={0.7}>
@@ -263,8 +263,8 @@ export function Dashboard({
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
     }
     Alert.alert(
-      'Destroy Agent',
-      `End "${agent.sessionName}"? This will terminate the agent process.`,
+      'End Session',
+      `End "${agent.sessionName}"? This will terminate the session process.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -471,8 +471,8 @@ export function Dashboard({
     <View style={styles.container}>
       {agents.length === 0 ? (
         <View style={styles.emptyState}>
-          <Text style={styles.emptyTitle}>No agents running</Text>
-          <Text style={styles.emptySubtitle}>Create an agent to get started</Text>
+          <Text style={styles.emptyTitle}>No sessions running</Text>
+          <Text style={styles.emptySubtitle}>Create a session to get started</Text>
         </View>
       ) : (
         <View style={styles.cardArea} onLayout={(e) => setContentHeight(e.nativeEvent.layout.height)}>

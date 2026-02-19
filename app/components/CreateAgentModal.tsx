@@ -48,6 +48,7 @@ const AGENT_TYPES: Array<{
   color: string;
   bg: string;
 }> = [
+  { type: 'terminal', label: 'Interactive Terminal', color: '#22C55E', bg: '#FFFFFF' },
   { type: 'claude', label: 'Claude Code', color: '#D97757', bg: '#FFFFFF' },
   { type: 'codex', label: 'Codex', color: '#111111', bg: '#FFFFFF' },
   { type: 'opencode', label: 'OpenCode', color: '#3B82F6', bg: '#FFFFFF' },
@@ -98,7 +99,7 @@ export function CreateAgentModal({
   initialWorktreePath,
 }: CreateAgentModalProps) {
   const [step, setStep] = useState<Step>('type');
-  const [selectedType, setSelectedType] = useState<AgentType>('claude');
+  const [selectedType, setSelectedType] = useState<AgentType>('terminal');
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [expandedNewWorktree, setExpandedNewWorktree] = useState<string | null>(null);
   const [newBranchName, setNewBranchName] = useState('');
@@ -109,7 +110,7 @@ export function CreateAgentModal({
     if (!visible) {
       // Reset state after modal closes
       setStep('type');
-      setSelectedType('claude');
+      setSelectedType('terminal');
       setSelectedModel('');
       setExpandedNewWorktree(null);
       setNewBranchName('');
@@ -120,7 +121,7 @@ export function CreateAgentModal({
   // Reset internal state — called after the Drawer's close animation completes
   const handleDrawerClose = useCallback(() => {
     setStep('type');
-    setSelectedType('claude');
+    setSelectedType('terminal');
     setSelectedModel('');
     setExpandedNewWorktree(null);
     setNewBranchName('');
@@ -131,9 +132,20 @@ export function CreateAgentModal({
   const handleTypeSelect = useCallback((type: AgentType) => {
     setSelectedType(type);
     setSelectedModel('');
+    if (type === 'terminal') {
+      // Terminal sessions intentionally skip model selection.
+      if (initialProjectId && initialWorktreePath) {
+        onSubmit({ agentType: type, projectId: initialProjectId, worktreePath: initialWorktreePath });
+        onClose();
+        return;
+      }
+      setStep('project');
+      onRequestProjects();
+      return;
+    }
     onRequestModels(type);
     setStep('model');
-  }, [onRequestModels]);
+  }, [initialProjectId, initialWorktreePath, onClose, onRequestModels, onRequestProjects, onSubmit]);
 
   const handleModelSelect = useCallback((model: string) => {
     // If project/worktree is pre-filled (e.g. from Git worktrees tab), skip the project picker
@@ -176,14 +188,14 @@ export function CreateAgentModal({
 
   const handleBack = useCallback(() => {
     if (step === 'project') {
-      setStep('model');
+      setStep(selectedType === 'terminal' ? 'type' : 'model');
     } else {
       setStep('type');
     }
     setExpandedNewWorktree(null);
     setNewBranchName('');
     setMenuProjectId(null);
-  }, [step]);
+  }, [step, selectedType]);
 
   const handleUnregister = useCallback((projectId: string, projectName: string) => {
     setMenuProjectId(null);
@@ -201,7 +213,7 @@ export function CreateAgentModal({
     );
   }, [onUnregisterProject]);
 
-  const stepTitle = step === 'type' ? 'New Agent'
+  const stepTitle = step === 'type' ? 'New Session'
     : step === 'model' ? 'Select Model'
     : 'Select Project';
 
@@ -235,7 +247,7 @@ export function CreateAgentModal({
       {/* Step 1: Agent Type */}
       {step === 'type' && (
         <>
-          <Text style={styles.stepLabel}>Select agent type</Text>
+          <Text style={styles.stepLabel}>Select session type</Text>
 
           {AGENT_TYPES.map(({ type, label, color, bg }) => (
             <TouchableOpacity
@@ -253,6 +265,8 @@ export function CreateAgentModal({
                   <Svg width={16} height={16} viewBox="0 0 24 24">
                     <Path d={OPENAI_LOGO_PATH} fill={color} fillRule="evenodd" />
                   </Svg>
+                ) : type === 'terminal' ? (
+                  <Text style={[styles.typeIconLetter, { color, fontSize: 13 }]}>{'>_'}</Text>
                 ) : type === 'opencode' ? (
                   <OpenCodeLogo width={16} height={28} variant="dark" />
                 ) : (
@@ -316,16 +330,20 @@ export function CreateAgentModal({
       {/* Step 3: Project + Worktree */}
       {step === 'project' && (
         <>
-          {/* No project option */}
-          <TouchableOpacity style={styles.noProjectRow} onPress={handleNoProject} activeOpacity={0.7}>
-            <View style={styles.noProjectIcon}>
-              <Text style={styles.noProjectIconText}>~</Text>
-            </View>
-            <View style={styles.noProjectInfo}>
-              <Text style={styles.noProjectLabel}>No project</Text>
-              <Text style={styles.noProjectHint}>Starts in home directory</Text>
-            </View>
-          </TouchableOpacity>
+          <Text style={styles.stepLabel}>
+            {selectedType === 'terminal' ? 'Select project/worktree for terminal' : 'Select project (optional)'}
+          </Text>
+          {selectedType !== 'terminal' && (
+            <TouchableOpacity style={styles.noProjectRow} onPress={handleNoProject} activeOpacity={0.7}>
+              <View style={styles.noProjectIcon}>
+                <Text style={styles.noProjectIconText}>~</Text>
+              </View>
+              <View style={styles.noProjectInfo}>
+                <Text style={styles.noProjectLabel}>No project</Text>
+                <Text style={styles.noProjectHint}>Starts in home directory</Text>
+              </View>
+            </TouchableOpacity>
+          )}
 
           {projectsLoading ? (
             <View style={styles.loadingContainer}>

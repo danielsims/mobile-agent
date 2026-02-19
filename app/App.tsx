@@ -261,7 +261,7 @@ function AppInner() {
     if (msg.type === 'agentResult' && msg.agentId) {
       playChime();
       const agent = stateRef.current.agents.get(msg.agentId);
-      const name = agent?.sessionName || 'Agent';
+      const name = agent?.sessionName || 'Session';
       const cost = msg.totalCost || msg.cost || 0;
       const preview = agent?.lastOutput?.split('\n')[0]?.slice(0, 100) || 'Task completed';
       notifyTaskComplete(`[${name}] ${preview} ($${cost.toFixed(2)})`);
@@ -617,7 +617,7 @@ function AppInner() {
         <View style={styles.pairingContainer}>
           <Text style={styles.pairingTitle}>Mobile Agent</Text>
           <Text style={styles.pairingSubtitle}>
-            Control coding agents remotely from your phone
+            Control coding sessions remotely from your phone
           </Text>
 
           {isConnecting ? (

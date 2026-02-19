@@ -69,7 +69,10 @@ function formatCost(cost: number): string {
 }
 
 function formatModelName(model: string | null, type: AgentType): string {
-  if (!model) return type.charAt(0).toUpperCase() + type.slice(1);
+  if (!model) {
+    if (type === 'terminal') return 'Interactive Terminal';
+    return type.charAt(0).toUpperCase() + type.slice(1);
+  }
   const claudeMatch = model.match(/^claude-(\w+)-(\d+)-(\d+)/);
   if (claudeMatch) {
     const variant = claudeMatch[1].charAt(0).toUpperCase() + claudeMatch[1].slice(1);
@@ -174,6 +177,7 @@ function PermissionCard({
 // Agent type icon — SVG logo or colored letter fallback
 function AgentIcon({ type, size = 28 }: { type: AgentType; size?: number }) {
   const BRAND: Record<string, { color: string; bg: string; letter: string }> = {
+    terminal: { color: '#22C55E', bg: '#FFFFFF', letter: '>' },
     claude:   { color: '#D97757', bg: '#FFFFFF', letter: 'C' },
     codex:    { color: '#111111', bg: '#FFFFFF', letter: 'X' },
     opencode: { color: '#3B82F6', bg: '#FFFFFF', letter: 'O' },
@@ -520,6 +524,14 @@ export function AgentDetailScreen({
     }
   }, [activeTab]);
 
+  useEffect(() => {
+    if (agent?.type !== 'terminal') return;
+    setActiveTab('chat');
+    setVoiceOpen(false);
+    setShowPlusModal(false);
+    setShowSkillPicker(false);
+  }, [agent?.id, agent?.type]);
+
   // Count artifact URLs for badge
   const artifactCount = useMemo(() => {
     if (!agent) return 0;
@@ -578,7 +590,7 @@ export function AgentDetailScreen({
             </TouchableOpacity>
           </View>
           <View style={styles.emptyContainer}>
-            <Text style={styles.emptyText}>Agent not found</Text>
+            <Text style={styles.emptyText}>Session not found</Text>
           </View>
         </View>
       </View>
@@ -586,6 +598,7 @@ export function AgentDetailScreen({
   }
 
   const isDisabled = connectionStatus !== 'connected';
+  const isTerminal = agent.type === 'terminal';
   const permissions = Array.from(agent.pendingPermissions.values());
   const questionPerm = permissions.find((p) => isQuestionTool(agent.type, p.toolName));
   const pendingPermissionToolNames = new Set(permissions.map(p => p.toolName));
@@ -643,7 +656,7 @@ export function AgentDetailScreen({
           </View>
 
           {/* Ask / Auto permission toggle */}
-          {agent.status !== 'exited' && (
+          {agent.status !== 'exited' && !isTerminal && (
             <View style={styles.modeToggle}>
               <TouchableOpacity
                 style={[styles.modeOption, !agent.autoApprove && styles.modeOptionActive]}
@@ -680,35 +693,41 @@ export function AgentDetailScreen({
             onPress={() => handleTabSwitch('chat')}
             activeOpacity={0.7}
           >
-            <Text style={[styles.tabText, activeTab === 'chat' && styles.tabTextActive]}>Chat</Text>
+            <Text style={[styles.tabText, activeTab === 'chat' && styles.tabTextActive]}>
+              {isTerminal ? 'Terminal' : 'Chat'}
+            </Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.tab, activeTab === 'git' && styles.tabActive]}
-            onPress={() => handleTabSwitch('git')}
-            activeOpacity={0.7}
-          >
-            <Text style={[styles.tabText, activeTab === 'git' && styles.tabTextActive]}>Git</Text>
-            {gitStatus && gitStatus.files.length > 0 && (
-              <View style={[styles.tabBadgeCircle, activeTab === 'git' && styles.tabBadgeCircleActive]}>
-                <Text style={[styles.tabBadgeText, activeTab === 'git' && styles.tabBadgeTextActive]}>{gitStatus.files.length}</Text>
-              </View>
-            )}
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.tab, activeTab === 'artifacts' && styles.tabActive]}
-            onPress={() => handleTabSwitch('artifacts')}
-            activeOpacity={0.7}
-          >
-            <Text style={[styles.tabText, activeTab === 'artifacts' && styles.tabTextActive]}>Artifacts</Text>
-            {artifactCount > 0 && (
-              <View style={[styles.tabBadgeCircle, activeTab === 'artifacts' && styles.tabBadgeCircleActive]}>
-                <Text style={[styles.tabBadgeText, activeTab === 'artifacts' && styles.tabBadgeTextActive]}>{artifactCount}</Text>
-              </View>
-            )}
-          </TouchableOpacity>
+          {!isTerminal && (
+            <TouchableOpacity
+              style={[styles.tab, activeTab === 'git' && styles.tabActive]}
+              onPress={() => handleTabSwitch('git')}
+              activeOpacity={0.7}
+            >
+              <Text style={[styles.tabText, activeTab === 'git' && styles.tabTextActive]}>Git</Text>
+              {gitStatus && gitStatus.files.length > 0 && (
+                <View style={[styles.tabBadgeCircle, activeTab === 'git' && styles.tabBadgeCircleActive]}>
+                  <Text style={[styles.tabBadgeText, activeTab === 'git' && styles.tabBadgeTextActive]}>{gitStatus.files.length}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+          )}
+          {!isTerminal && (
+            <TouchableOpacity
+              style={[styles.tab, activeTab === 'artifacts' && styles.tabActive]}
+              onPress={() => handleTabSwitch('artifacts')}
+              activeOpacity={0.7}
+            >
+              <Text style={[styles.tabText, activeTab === 'artifacts' && styles.tabTextActive]}>Artifacts</Text>
+              {artifactCount > 0 && (
+                <View style={[styles.tabBadgeCircle, activeTab === 'artifacts' && styles.tabBadgeCircleActive]}>
+                  <Text style={[styles.tabBadgeText, activeTab === 'artifacts' && styles.tabBadgeTextActive]}>{artifactCount}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+          )}
 
           {/* Compact stats inline */}
-          {(agent.totalCost > 0 || agent.outputTokens > 0) && (
+          {!isTerminal && (agent.totalCost > 0 || agent.outputTokens > 0) && (
             <View style={styles.tabStats}>
               <Text style={styles.tabStatText}>{formatCost(agent.totalCost)}</Text>
               {agent.contextUsedPercent > 0 && (
@@ -739,13 +758,15 @@ export function AgentDetailScreen({
             onMomentumScrollEnd={handleTabScroll}
             scrollEventThrottle={16}
             keyboardShouldPersistTaps="handled"
-            scrollEnabled={!gitDiffOpen}
+            scrollEnabled={!gitDiffOpen && !isTerminal}
           >
             {/* Chat tab */}
             <View style={[styles.tabPage, activeTab === 'chat' && keyboardHeight > 0 && { paddingBottom: keyboardHeight }]}>
               <KeyboardScrollView style={styles.chatArea} contentContainerStyle={styles.chatContent}>
                 {agent.messages.length === 0 ? (
-                  <Text style={styles.placeholder}>Send a message to start...</Text>
+                  <Text style={styles.placeholder}>
+                    {isTerminal ? 'Run a command to start...' : 'Send a message to start...'}
+                  </Text>
                 ) : (
                   <>
                     {hasHiddenMessages && (
@@ -837,122 +858,130 @@ export function AgentDetailScreen({
                   onSend={handleSend}
                   onStop={handleStop}
                   showStop={agent.status === 'running'}
-                  onVoice={handleVoiceOpen}
-                  onPlus={() => setShowPlusModal(true)}
+                  onVoice={isTerminal ? undefined : handleVoiceOpen}
+                  onPlus={isTerminal ? undefined : () => setShowPlusModal(true)}
                   disabled={isDisabled}
-                  placeholder={agent.status === 'running' ? 'Agent is working...' : 'Ask anything...'}
+                  placeholder={
+                    agent.status === 'running'
+                      ? (isTerminal ? 'Command is running...' : 'Agent is working...')
+                      : (isTerminal ? 'Enter command...' : 'Ask anything...')
+                  }
                   shimmer={agent.status === 'running'}
                   onActivity={onResetPingTimer}
                   initialValue={agent.draftText}
                   onDraftChange={handleDraftChange}
-                  attachedImage={attachedImage}
-                  onRemoveImage={() => setAttachedImage(null)}
+                  attachedImage={isTerminal ? null : attachedImage}
+                  onRemoveImage={isTerminal ? undefined : () => setAttachedImage(null)}
                 />
               )}
             </View>
 
-            {/* Git tab */}
-            <View style={styles.tabPage}>
-              <GitTabContent
-                agentStatus={agent.status}
-                gitStatus={gitStatus}
-                gitDiff={gitDiff}
-                loading={gitLoading}
-                diffLoading={gitDiffLoading}
-                onRequestStatus={handleRequestGitStatus}
-                onRequestDiff={handleRequestGitDiff}
-                onDiffViewChange={setGitDiffOpen}
-              />
-            </View>
+            {!isTerminal && (
+              <View style={styles.tabPage}>
+                <GitTabContent
+                  agentStatus={agent.status}
+                  gitStatus={gitStatus}
+                  gitDiff={gitDiff}
+                  loading={gitLoading}
+                  diffLoading={gitDiffLoading}
+                  onRequestStatus={handleRequestGitStatus}
+                  onRequestDiff={handleRequestGitDiff}
+                  onDiffViewChange={setGitDiffOpen}
+                />
+              </View>
+            )}
 
-            {/* Artifacts tab */}
-            <View style={styles.tabPage}>
-              <ArtifactsTabContent messages={agent.messages} />
-            </View>
+            {!isTerminal && (
+              <View style={styles.tabPage}>
+                <ArtifactsTabContent messages={agent.messages} />
+              </View>
+            )}
           </ScrollView>
         </View>
       </Animated.View>
 
-      {/* Plus button modal — actions */}
-      <BottomModal isVisible={showPlusModal} onClose={() => setShowPlusModal(false)} title="Actions">
-        <View style={plusModalStyles.list}>
-          <TouchableOpacity
-            style={plusModalStyles.row}
-            activeOpacity={0.7}
-            onPress={handleImageUpload}
-          >
-            <View style={plusModalStyles.icon}>
-              <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
-                <Path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12" stroke="#ccc" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
-              </Svg>
-            </View>
-            <View style={plusModalStyles.rowContent}>
-              <Text style={plusModalStyles.label}>Upload Image</Text>
-              <Text style={plusModalStyles.description}>Send an image from your device</Text>
-            </View>
-          </TouchableOpacity>
+      {!isTerminal && (
+        <BottomModal isVisible={showPlusModal} onClose={() => setShowPlusModal(false)} title="Actions">
+          <View style={plusModalStyles.list}>
+            <TouchableOpacity
+              style={plusModalStyles.row}
+              activeOpacity={0.7}
+              onPress={handleImageUpload}
+            >
+              <View style={plusModalStyles.icon}>
+                <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+                  <Path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12" stroke="#ccc" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+                </Svg>
+              </View>
+              <View style={plusModalStyles.rowContent}>
+                <Text style={plusModalStyles.label}>Upload Image</Text>
+                <Text style={plusModalStyles.description}>Send an image from your device</Text>
+              </View>
+            </TouchableOpacity>
 
-          <TouchableOpacity
-            style={plusModalStyles.row}
-            activeOpacity={0.7}
-            onPress={() => {
-              setShowPlusModal(false);
-              setShowSkillPicker(true);
-            }}
-          >
-            <View style={plusModalStyles.icon}>
-              <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
-                <Path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" stroke="#ccc" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
-              </Svg>
-            </View>
-            <View style={plusModalStyles.rowContent}>
-              <Text style={plusModalStyles.label}>Use Skill</Text>
-              <Text style={plusModalStyles.description}>Run an installed skill in this chat</Text>
-            </View>
-          </TouchableOpacity>
-        </View>
-      </BottomModal>
+            <TouchableOpacity
+              style={plusModalStyles.row}
+              activeOpacity={0.7}
+              onPress={() => {
+                setShowPlusModal(false);
+                setShowSkillPicker(true);
+              }}
+            >
+              <View style={plusModalStyles.icon}>
+                <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+                  <Path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" stroke="#ccc" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+                </Svg>
+              </View>
+              <View style={plusModalStyles.rowContent}>
+                <Text style={plusModalStyles.label}>Use Skill</Text>
+                <Text style={plusModalStyles.description}>Run an installed skill in this chat</Text>
+              </View>
+            </TouchableOpacity>
+          </View>
+        </BottomModal>
+      )}
 
-      {/* Skill picker modal */}
-      <BottomModal isVisible={showSkillPicker} onClose={() => setShowSkillPicker(false)} title="Choose Skill">
-        <ScrollView style={plusModalStyles.scrollList} contentContainerStyle={plusModalStyles.list}>
-          {skills.filter(s => s.source !== 'builtin').length === 0 ? (
-            <Text style={plusModalStyles.emptyText}>No skills installed</Text>
-          ) : (
-            skills.filter(s => s.source !== 'builtin').map(skill => (
-              <TouchableOpacity
-                key={skill.name}
-                style={plusModalStyles.row}
-                activeOpacity={0.7}
-                onPress={() => {
-                  setShowSkillPicker(false);
-                  onSendMessage(agentId, skill.body);
-                }}
-              >
-                <View style={plusModalStyles.icon}>
-                  {skill.icon === 'commit' ? (
-                    <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
-                      <Path d="M12 16a4 4 0 100-8 4 4 0 000 8zM12 3v5M12 16v5" stroke="#ccc" strokeWidth={2} strokeLinecap="round" />
-                    </Svg>
-                  ) : skill.icon === 'vercel' ? (
-                    <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
-                      <Path d="M12 2L2 22h20L12 2z" fill="#ccc" />
-                    </Svg>
-                  ) : (
-                    <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
-                      <Path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" stroke="#ccc" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
-                    </Svg>
-                  )}
-                </View>
-                <View style={plusModalStyles.rowContent}>
-                  <Text style={plusModalStyles.label}>{skill.name}</Text>
-                  <Text style={plusModalStyles.description} numberOfLines={2}>{skill.description}</Text>
-                </View>
-              </TouchableOpacity>
-            ))
-          )}
-        </ScrollView>
-      </BottomModal>
+      {!isTerminal && (
+        <BottomModal isVisible={showSkillPicker} onClose={() => setShowSkillPicker(false)} title="Choose Skill">
+          <ScrollView style={plusModalStyles.scrollList} contentContainerStyle={plusModalStyles.list}>
+            {skills.filter(s => s.source !== 'builtin').length === 0 ? (
+              <Text style={plusModalStyles.emptyText}>No skills installed</Text>
+            ) : (
+              skills.filter(s => s.source !== 'builtin').map(skill => (
+                <TouchableOpacity
+                  key={skill.name}
+                  style={plusModalStyles.row}
+                  activeOpacity={0.7}
+                  onPress={() => {
+                    setShowSkillPicker(false);
+                    onSendMessage(agentId, skill.body);
+                  }}
+                >
+                  <View style={plusModalStyles.icon}>
+                    {skill.icon === 'commit' ? (
+                      <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+                        <Path d="M12 16a4 4 0 100-8 4 4 0 000 8zM12 3v5M12 16v5" stroke="#ccc" strokeWidth={2} strokeLinecap="round" />
+                      </Svg>
+                    ) : skill.icon === 'vercel' ? (
+                      <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+                        <Path d="M12 2L2 22h20L12 2z" fill="#ccc" />
+                      </Svg>
+                    ) : (
+                      <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+                        <Path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" stroke="#ccc" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+                      </Svg>
+                    )}
+                  </View>
+                  <View style={plusModalStyles.rowContent}>
+                    <Text style={plusModalStyles.label}>{skill.name}</Text>
+                    <Text style={plusModalStyles.description} numberOfLines={2}>{skill.description}</Text>
+                  </View>
+                </TouchableOpacity>
+              ))
+            )}
+          </ScrollView>
+        </BottomModal>
+      )}
     </View>
   );
 }
