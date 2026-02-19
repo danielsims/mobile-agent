@@ -27,6 +27,21 @@ export function writeToTerminal(agentId: string, text: string): boolean {
   return false;
 }
 
+// Focus registry: allows parent components to focus the xterm terminal
+const terminalFocusers = new Map<string, () => void>();
+
+export function registerTerminalFocuser(agentId: string, focuser: () => void): void {
+  terminalFocusers.set(agentId, focuser);
+}
+
+export function unregisterTerminalFocuser(agentId: string): void {
+  terminalFocusers.delete(agentId);
+}
+
+export function focusTerminal(agentId: string): void {
+  terminalFocusers.get(agentId)?.();
+}
+
 // Full ANSI color palettes for dark and light themes.
 const DARK_THEME: ITheme = {
   background: '#13120a',
@@ -128,6 +143,11 @@ export function XtermTerminal({ agentId, messages, onWrite, onResize }: XtermTer
     const host = hostRef.current;
     if (!host) return;
 
+    // Clear any leftover DOM from a previous terminal instance.
+    // Protects against React StrictMode double-mount or Vite HMR leaving
+    // stale xterm textareas/canvases that would duplicate keyboard input.
+    host.innerHTML = '';
+
     // Read the monospace font stack from the CSS variable so the terminal
     // matches code/mono text elsewhere in the app.
     const monoFamily = getCssVar('--mono')
@@ -173,6 +193,11 @@ export function XtermTerminal({ agentId, messages, onWrite, onResize }: XtermTer
     // Register direct writer for zero-latency PTY output
     registerTerminalWriter(agentId, (text: string) => {
       terminal.write(text);
+    });
+
+    // Register focuser so parent pane can focus the terminal on click
+    registerTerminalFocuser(agentId, () => {
+      terminal.focus();
     });
 
     // Write any existing messages (e.g. after HMR reload)
@@ -239,6 +264,7 @@ export function XtermTerminal({ agentId, messages, onWrite, onResize }: XtermTer
     return () => {
       clearTimeout(initTimer);
       unregisterTerminalWriter(agentId);
+      unregisterTerminalFocuser(agentId);
       themeObserver.disconnect();
       host.removeEventListener('mousedown', focusTerminal);
       host.removeEventListener('keydown', stopKeyBubble);

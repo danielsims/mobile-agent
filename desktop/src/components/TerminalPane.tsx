@@ -6,7 +6,7 @@ import {
   MessageRow,
   PermissionBanner,
 } from './AgentMessages';
-import { XtermTerminal } from './XtermTerminal';
+import { XtermTerminal, focusTerminal } from './XtermTerminal';
 
 const statusColors: Record<AgentStatus, string> = {
   running: 'var(--status-running)',
@@ -156,6 +156,35 @@ export function TerminalPane({
     }
   }, []);
 
+  // Click anywhere in the pane body → focus the input (textarea or xterm).
+  // Track mousedown position so drag-to-select doesn't trigger focus.
+  const mouseDownPos = useRef<{ x: number; y: number } | null>(null);
+
+  const handlePaneMouseDown = useCallback((e: React.MouseEvent) => {
+    mouseDownPos.current = { x: e.clientX, y: e.clientY };
+  }, []);
+
+  const handlePaneMouseUp = useCallback((e: React.MouseEvent) => {
+    const down = mouseDownPos.current;
+    mouseDownPos.current = null;
+    if (!down) return;
+
+    // If the mouse moved more than a few pixels, it's a selection drag — skip focus
+    const dx = e.clientX - down.x;
+    const dy = e.clientY - down.y;
+    if (dx * dx + dy * dy > 9) return;
+
+    const target = e.target as HTMLElement;
+    // Don't steal focus from buttons, links, or existing inputs
+    if (target.closest('button, a, textarea, input, .pane-header')) return;
+
+    if (isTerminal) {
+      focusTerminal(agent.id);
+    } else {
+      inputRef.current?.focus();
+    }
+  }, [isTerminal, agent.id]);
+
   const permissions = Array.from(agent.pendingPermissions.values());
   const agentRunning = agent.status === 'running';
   const lastMsg = agent.messages[agent.messages.length - 1];
@@ -166,7 +195,7 @@ export function TerminalPane({
     : '';
 
   return (
-    <div ref={setNodeRef} className={`terminal-pane ${isDragging ? 'pane-dragging' : ''}`}>
+    <div ref={setNodeRef} className={`terminal-pane ${isDragging ? 'pane-dragging' : ''}`} onMouseDown={handlePaneMouseDown} onMouseUp={handlePaneMouseUp}>
       {/* Header — drag handle */}
       <div className={`pane-header ${isDragging ? 'dragging' : ''}`} {...attributes} {...listeners}>
         <div className="pane-header-left">
