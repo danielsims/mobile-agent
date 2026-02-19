@@ -49,6 +49,11 @@ describe('AgentSession', () => {
       expect(codexSession.driver.name).toBe('Codex');
     });
 
+    it('creates terminal driver for terminal type', () => {
+      const terminalSession = new AgentSession('agent-term', 'terminal');
+      expect(terminalSession.driver.name).toBe('Interactive Terminal');
+    });
+
     it('accepts an initial model override', () => {
       const modelSession = new AgentSession('agent-999', 'claude', { model: 'sonnet' });
       expect(modelSession.model).toBe('sonnet');
@@ -598,9 +603,9 @@ describe('AgentSession', () => {
       expect(snapshot.pendingPermissions[0].requestId).toBe('req-1');
     });
 
-    it('defaults sessionName to New Agent', () => {
+    it('defaults sessionName to New Session', () => {
       const snapshot = session.getSnapshot();
-      expect(snapshot.sessionName).toBe('New Agent');
+      expect(snapshot.sessionName).toBe('New Session');
     });
   });
 

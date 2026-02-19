@@ -80,9 +80,15 @@ export class ClaudeDriver extends BaseDriver {
 
     console.log(`[Claude ${agentId.slice(0, 8)}] Spawning: ${CLAUDE_PATH} ${resumeSessionId ? `--resume ${resumeSessionId.slice(0, 8)}...` : '--sdk-url'} ws://.../${agentId.slice(0, 8)}...`);
 
+    // Strip Claude Code session markers so the CLI doesn't think it's nested
+    const childEnv = { ...process.env };
+    delete childEnv.CLAUDECODE;
+    delete childEnv.CLAUDE_CODE_ENTRYPOINT;
+    delete childEnv.CLAUDE_CODE_SESSION_ID;
+
     this._process = spawn(CLAUDE_PATH, args, {
       cwd: cwd || process.env.HOME,
-      env: { ...process.env },
+      env: childEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 

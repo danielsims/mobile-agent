@@ -367,12 +367,13 @@ export class Bridge {
         removeSession(agentId);
         continue;
       }
+      const isTerminal = info.type === 'terminal';
 
       const session = new AgentSession(agentId, info.type || 'claude', {
-        model: info.model || null,
+        model: isTerminal ? null : (info.model || null),
       });
       session.sessionId = info.sessionId;
-      session.sessionName = info.sessionName || 'Restored Agent';
+      session.sessionName = info.sessionName || (isTerminal ? 'Interactive Terminal' : 'Restored Session');
       session.createdAt = info.createdAt || Date.now();
       session.cwd = info.cwd || null;
       if (info.cwd) {
@@ -384,16 +385,18 @@ export class Bridge {
         } catch { /* not a git repo or git not available */ }
       }
 
-      // Read conversation history from CLI's session storage (not our own DB)
-      const transcript = readTranscript(info.type || 'claude', info.sessionId, info.cwd);
-      if (transcript) {
-        session.loadTranscript(transcript);
-        console.log(`[Agent ${agentId.slice(0, 8)}] Loaded transcript: ${transcript.messages.length} messages, model=${transcript.model || '?'}`);
+      // Read conversation history from CLI's session storage (terminals have none)
+      if (!isTerminal) {
+        const transcript = readTranscript(info.type || 'claude', info.sessionId, info.cwd);
+        if (transcript) {
+          session.loadTranscript(transcript);
+          console.log(`[Agent ${agentId.slice(0, 8)}] Loaded transcript: ${transcript.messages.length} messages, model=${transcript.model || '?'}`);
+        }
       }
 
       this._setupAgentBroadcast(session);
       this.agents.set(agentId, session);
-      session.spawn(this.port, info.sessionId, info.cwd || null);
+      session.spawn(this.port, isTerminal ? null : info.sessionId, info.cwd || null);
 
       logAudit('agent_restored', {
         agentId: agentId.slice(0, 8),
@@ -423,6 +426,10 @@ export class Bridge {
         this._handleSendMessage(ws, msg, deviceId);
         break;
 
+      case 'writeTerminal':
+        this._handleWriteTerminal(ws, msg, deviceId);
+        break;
+
       case 'interruptAgent':
         this._handleInterruptAgent(ws, msg, deviceId);
         break;
@@ -433,6 +440,10 @@ export class Bridge {
 
       case 'setAutoApprove':
         this._handleSetAutoApprove(ws, msg, deviceId);
+        break;
+
+      case 'resizeTerminal':
+        this._handleResizeTerminal(ws, msg);
         break;
 
       case 'getHistory':
@@ -527,7 +538,14 @@ export class Bridge {
 
     const agentId = uuidv4();
     const type = msg.agentType || 'claude';
-    const model = typeof msg.model === 'string' && msg.model.trim() ? msg.model.trim() : null;
+    const model = type === 'terminal'
+      ? null
+      : (typeof msg.model === 'string' && msg.model.trim() ? msg.model.trim() : null);
+
+    if (type === 'terminal' && !msg.projectId) {
+      this._sendTo(ws, 'error', { error: 'Terminal sessions must target a registered project/worktree.' });
+      return;
+    }
 
     // Resolve working directory from project/worktree selection
     let cwd = null;
@@ -557,11 +575,24 @@ export class Bridge {
       } catch { /* ignore */ }
     }
 
+    if (type === 'terminal') {
+      session.sessionName = session.projectName
+        ? `${session.projectName} Terminal`
+        : 'Interactive Terminal';
+    }
+
     this._broadcastToMobile('agentCreated', { agent: session.getSnapshot() });
   }
 
   async _handleListModels(ws, msg) {
     const agentType = msg.agentType || 'claude';
+    if (agentType === 'terminal') {
+      this._sendTo(ws, 'modelList', {
+        agentType,
+        models: [{ value: '', label: 'Interactive Shell' }],
+      });
+      return;
+    }
     const autoOption = { value: '', label: 'Auto (Recommended)' };
     try {
       const models = await listModelsForAgentType(agentType);
@@ -609,12 +640,62 @@ export class Bridge {
       this._sendTo(ws, 'error', { error: 'Message text required.' });
       return;
     }
+    if (text.length > 20_000) {
+      this._sendTo(ws, 'error', { error: 'Message too large (max 20,000 chars).' });
+      return;
+    }
+    if (session.type === 'terminal' && text.includes('\u0000')) {
+      this._sendTo(ws, 'error', { error: 'Terminal input contains invalid control characters.' });
+      return;
+    }
+    if (session.type === 'terminal' && msg.imageData) {
+      this._sendTo(ws, 'error', { error: 'Image attachments are not supported in terminal sessions.' });
+      return;
+    }
 
     logAudit('message_sent', { agentId: msg.agentId.slice(0, 8), deviceId, length: text.length, hasImage: !!msg.imageData });
     session.sendPrompt(text, null, msg.imageData);
 
     // Echo the user message to other mobile clients (not the sender)
     this._broadcastToMobileExcept(ws, 'userMessage', { agentId: msg.agentId, content: text, imageData: msg.imageData });
+  }
+
+  _handleWriteTerminal(ws, msg, deviceId) {
+    const session = this.agents.get(msg.agentId);
+    if (!session) {
+      this._sendTo(ws, 'error', { error: 'Agent not found.' });
+      return;
+    }
+
+    if (session.type !== 'terminal') {
+      this._sendTo(ws, 'error', { error: 'writeTerminal is only valid for terminal sessions.' });
+      return;
+    }
+
+    const data = msg.data;
+    if (typeof data !== 'string' || data.length === 0) {
+      return;
+    }
+    if (data.length > 20_000) {
+      this._sendTo(ws, 'error', { error: 'Terminal input too large (max 20,000 chars).' });
+      return;
+    }
+    if (data.includes('\u0000')) {
+      this._sendTo(ws, 'error', { error: 'Terminal input contains invalid control characters.' });
+      return;
+    }
+
+    const ok = session.writeTerminal(data);
+    if (!ok) {
+      this._sendTo(ws, 'error', { error: 'Terminal session is not writable.' });
+      return;
+    }
+
+    logAudit('terminal_input', {
+      agentId: msg.agentId.slice(0, 8),
+      deviceId,
+      length: data.length,
+    });
   }
 
   async _handleInterruptAgent(ws, msg, deviceId) {
@@ -691,6 +772,22 @@ export class Bridge {
       agentId: msg.agentId,
       autoApprove: enabled,
     });
+  }
+
+  _handleResizeTerminal(ws, msg) {
+    const { agentId, cols, rows } = msg;
+    if (!agentId || !Number.isInteger(cols) || !Number.isInteger(rows)) {
+      this._sendTo(ws, 'error', { error: 'agentId, cols, rows required.' });
+      return;
+    }
+
+    const session = this.agents.get(agentId);
+    if (!session) {
+      this._sendTo(ws, 'error', { error: 'Agent not found.' });
+      return;
+    }
+
+    session.resize(cols, rows);
   }
 
   _handleGetHistory(ws, msg) {

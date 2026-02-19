@@ -435,6 +435,10 @@ export class AgentSession {
       resumeSessionId,
       cwd,
       model: this.model,
+    }).catch((err) => {
+      console.error(`[Agent ${this.id.slice(0, 8)}] driver.start() rejected:`, err);
+      this.status = 'error';
+      this._broadcast('agentUpdated', { agentId: this.id, status: 'error' });
     });
   }
 
@@ -447,7 +451,7 @@ export class AgentSession {
   sendPrompt(text, sessionId = null, imageData = null) {
     this._checkBranchChange();
 
-    if (!this.sessionName) {
+    if (!this.sessionName && this.type !== 'terminal') {
       this.sessionName = text.slice(0, 60) + (text.length > 60 ? '...' : '');
       this._broadcast('agentUpdated', { agentId: this.id, sessionName: this.sessionName });
     }
@@ -465,9 +469,18 @@ export class AgentSession {
 
     this.messageHistory.push(historyMessage);
     this._trimHistory();
-    this._setStatus('running');
+    if (this.type !== 'terminal') {
+      this._setStatus('running');
+    }
 
     this.driver.sendPrompt(text, sessionId || this.sessionId, imageData);
+  }
+
+  writeTerminal(data) {
+    if (this.type !== 'terminal') return false;
+    if (typeof this.driver.write !== 'function') return false;
+    this.driver.write(data);
+    return true;
   }
 
   /**
@@ -526,6 +539,15 @@ export class AgentSession {
   }
 
   /**
+   * Resize terminal dimensions for drivers that support it.
+   */
+  resize(cols, rows) {
+    if (typeof this.driver.resize === 'function') {
+      this.driver.resize(cols, rows);
+    }
+  }
+
+  /**
    * Called by the bridge when a CLI WebSocket connects back.
    * Only relevant for drivers that use websocket-server transport (Claude).
    */
@@ -544,7 +566,7 @@ export class AgentSession {
       type: this.type,
       status: this.status,
       sessionId: this.sessionId,
-      sessionName: this.sessionName || 'New Agent',
+      sessionName: this.sessionName || 'New Session',
       model: this.model,
       cwd: this.cwd,
       gitBranch: this.gitBranch,
