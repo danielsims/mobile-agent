@@ -182,6 +182,20 @@ export function useWebSocket({ onMessage, onConnect, onDisconnect }: UseWebSocke
     setStatus('disconnected');
   }, [cleanupTimers]);
 
+  useEffect(() => () => {
+    autoReconnectRef.current = false;
+    isAuthenticatedRef.current = false;
+    cleanupTimers();
+    if (ws.current) {
+      const socket = ws.current;
+      ws.current = null;
+      socket.onclose = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      try { socket.close(); } catch { /* ignore */ }
+    }
+  }, [cleanupTimers]);
+
   return {
     status,
     connect,
