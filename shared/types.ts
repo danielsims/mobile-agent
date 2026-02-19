@@ -1,6 +1,6 @@
 // --- Agent Types (extensible) ---
 
-export type AgentType = 'claude' | 'codex' | 'opencode' | (string & {});
+export type AgentType = 'terminal' | 'claude' | 'codex' | 'opencode' | (string & {});
 
 export type AgentStatus =
   | 'starting'

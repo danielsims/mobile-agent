@@ -296,7 +296,9 @@ export async function listModelsForAgentType(type) {
   let options = [];
 
   try {
-    if (type === 'codex') {
+    if (type === 'terminal') {
+      options = [];
+    } else if (type === 'codex') {
       const codex = await listCodexModels();
       const seen = new Set();
       for (const m of codex) {
