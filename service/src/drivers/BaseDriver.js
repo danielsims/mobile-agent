@@ -22,7 +22,7 @@ export class BaseDriver extends EventEmitter {
   constructor(name, transportType) {
     super();
     this.name = name;               // e.g. "Claude Code", "Codex"
-    this.transportType = transportType; // 'websocket-server' | 'stdio-jsonrpc' | 'http-client'
+    this.transportType = transportType; // 'websocket-server' | 'stdio-jsonrpc' | 'http-client' | 'pty'
     this._ready = false;
   }
 

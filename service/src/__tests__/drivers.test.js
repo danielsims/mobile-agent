@@ -13,6 +13,7 @@ import { BaseDriver } from '../drivers/BaseDriver.js';
 import { ClaudeDriver } from '../drivers/ClaudeDriver.js';
 import { CodexDriver } from '../drivers/CodexDriver.js';
 import { OpenCodeDriver } from '../drivers/OpenCodeDriver.js';
+import { TerminalDriver } from '../drivers/TerminalDriver.js';
 import { createDriver, getSupportedTypes } from '../drivers/index.js';
 
 // ---------------------------------------------------------------------------
@@ -179,12 +180,20 @@ describe('Driver Registry', () => {
     expect(driver.transportType).toBe('stdio-jsonrpc');
   });
 
+  it('creates terminal driver', () => {
+    const driver = createDriver('terminal');
+    expect(driver).toBeInstanceOf(TerminalDriver);
+    expect(driver.name).toBe('Interactive Terminal');
+    expect(driver.transportType).toBe('pty');
+  });
+
   it('throws for unknown agent type', () => {
     expect(() => createDriver('unknown')).toThrow('Unknown agent type');
   });
 
   it('lists supported types', () => {
     const types = getSupportedTypes();
+    expect(types).toContain('terminal');
     expect(types).toContain('claude');
     expect(types).toContain('codex');
     expect(types).toContain('opencode');
@@ -2591,6 +2600,10 @@ describe('AgentSession with Drivers', () => {
   // and the event binding logic separately.
 
   it('createDriver returns correct driver for each supported type', () => {
+    const terminal = createDriver('terminal');
+    expect(terminal).toBeInstanceOf(TerminalDriver);
+    expect(terminal.name).toBe('Interactive Terminal');
+
     const claude = createDriver('claude');
     expect(claude).toBeInstanceOf(ClaudeDriver);
     expect(claude.name).toBe('Claude Code');

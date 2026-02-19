@@ -4,12 +4,15 @@ export { BaseDriver } from './BaseDriver.js';
 export { ClaudeDriver } from './ClaudeDriver.js';
 export { CodexDriver } from './CodexDriver.js';
 export { OpenCodeDriver } from './OpenCodeDriver.js';
+export { TerminalDriver } from './TerminalDriver.js';
 
 import { ClaudeDriver } from './ClaudeDriver.js';
 import { CodexDriver } from './CodexDriver.js';
 import { OpenCodeDriver } from './OpenCodeDriver.js';
+import { TerminalDriver } from './TerminalDriver.js';
 
 const DRIVER_MAP = {
+  terminal: TerminalDriver,
   claude: ClaudeDriver,
   codex: CodexDriver,
   opencode: OpenCodeDriver,
