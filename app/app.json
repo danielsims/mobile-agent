@@ -15,7 +15,8 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.mobileagent.app"
+      "bundleIdentifier": "com.latentsupply.mobileagent",
+      "appleTeamId": "P77BP64K7R"
     },
     "android": {
       "adaptiveIcon": {
@@ -23,7 +24,7 @@
         "backgroundColor": "#0d1117"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.mobileagent.app"
+      "package": "com.latentsupply.mobileagent"
     },
     "web": {
       "favicon": "./assets/favicon.png"
