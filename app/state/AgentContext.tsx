@@ -2,6 +2,7 @@ import React, { createContext, useContext, useReducer, useCallback, useRef, useM
 import type { AppState, AgentState, AgentAction, ServerMessage, AgentMessage, PermissionRequest, ImageAttachment, ContentBlock } from './types';
 import { agentReducer, initialState } from './agentReducer';
 import { saveMessages, loadMessages, clearMessages } from './messageCache';
+import { writeToMobileTerminal } from '../utils/terminalBridge';
 
 // Unique message ID generator — avoids Date.now() collisions within same ms
 let msgSeq = 0;
@@ -176,7 +177,17 @@ export function AgentProvider({ children }: { children: React.ReactNode }) {
 
       case 'streamChunk': {
         if (msg.agentId && msg.text) {
-          // Batch stream chunks and flush every 50ms
+          // Terminal agents: direct-write to xterm WebView (zero latency).
+          // Skip React state batching to avoid re-rendering the TerminalView
+          // parent on every 50ms flush, which was causing "re-streaming" and
+          // performance issues. State is still updated on assistantMessage
+          // finalization for cache persistence.
+          if (writeToMobileTerminal(msg.agentId, msg.text)) {
+            streamSeenRef.current.add(msg.agentId);
+            break;
+          }
+
+          // Non-terminal agents: batch to React state for rendering
           const pending = pendingStreamsRef.current;
           const current = pending.get(msg.agentId) || '';
           pending.set(msg.agentId, current + msg.text);

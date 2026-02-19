@@ -187,6 +187,7 @@ export function InputBar({ onSend, onStop, showStop = false, onVoice, onPlus, di
             placeholder={placeholder}
             placeholderTextColor="#666"
             onSubmitEditing={handleSend}
+            blurOnSubmit
             returnKeyType="send"
             multiline
             editable={!disabled}

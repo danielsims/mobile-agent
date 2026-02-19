@@ -6,6 +6,7 @@ import {
   TextInput,
   Image,
   TouchableOpacity,
+  Pressable,
   StyleSheet,
   Platform,
   Keyboard,
@@ -31,6 +32,8 @@ import { ArtifactsTabContent } from './ArtifactsTabContent';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 import { useSettings } from '../state/SettingsContext';
 import { getCanonicalToolKey, isQuestionTool } from '../utils/toolRegistry';
+import { TerminalView } from './TerminalView';
+import type { TerminalViewHandle } from './TerminalView';
 
 // Claude logo SVG path (shared with AgentCard)
 const CLAUDE_LOGO_PATH = 'M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z';
@@ -54,6 +57,8 @@ interface AgentDetailScreenProps {
   onRespondPermission: (agentId: string, requestId: string, behavior: 'allow' | 'deny', updatedInput?: Record<string, unknown>) => void;
   onSetAutoApprove?: (agentId: string, enabled: boolean) => void;
   onResetPingTimer: () => void;
+  onWriteTerminal?: (agentId: string, data: string) => void;
+  onResizeTerminal?: (agentId: string, cols: number, rows: number) => void;
   onRequestGitStatus?: (agentId: string) => void;
   onRequestGitDiff?: (agentId: string, filePath: string) => void;
   gitStatus?: GitStatusData | null;
@@ -221,6 +226,8 @@ export function AgentDetailScreen({
   onRespondPermission,
   onSetAutoApprove,
   onResetPingTimer,
+  onWriteTerminal,
+  onResizeTerminal,
   onRequestGitStatus,
   onRequestGitDiff,
   gitStatus = null,
@@ -235,6 +242,7 @@ export function AgentDetailScreen({
   const [activeTab, setActiveTab] = useState<DetailTab>('chat');
   const [gitDiffOpen, setGitDiffOpen] = useState(false);
   const tabScrollRef = useRef<ScrollView>(null);
+  const terminalViewRef = useRef<TerminalViewHandle>(null);
   const INITIAL_MESSAGE_WINDOW = 30;
   const [messageWindow, setMessageWindow] = useState(INITIAL_MESSAGE_WINDOW);
   const [showPlusModal, setShowPlusModal] = useState(false);
@@ -335,12 +343,33 @@ export function AgentDetailScreen({
     extrapolate: 'clamp',
   });
 
+  const handleTerminalResize = useCallback((cols: number, rows: number) => {
+    onResizeTerminal?.(agentId, cols, rows);
+  }, [agentId, onResizeTerminal]);
+
+  const handleTerminalInput = useCallback((data: string) => {
+    onWriteTerminal?.(agentId, data);
+  }, [agentId, onWriteTerminal]);
+
+  // Dismiss the WebView keyboard for terminal agents
+  const handleDismissTerminalKeyboard = useCallback(() => {
+    terminalViewRef.current?.blurInput();
+  }, []);
+
   const handleSend = useCallback((text: string) => {
-    onSendMessage(agentId, text, attachedImage || undefined);
-    // Clear draft and attached image after sending
-    dispatch({ type: 'SET_DRAFT', agentId, text: '' });
-    setAttachedImage(null);
-  }, [agentId, onSendMessage, dispatch, attachedImage]);
+    if (agent?.type === 'terminal' && onWriteTerminal) {
+      // Terminal agents: write raw input + carriage return to PTY.
+      // PTY programs expect \r for Enter (what a real terminal sends).
+      // Using writeTerminal bypasses sendPrompt's \n which doesn't trigger
+      // readline/raw-mode input handlers in many terminal programs.
+      onWriteTerminal(agentId, text + '\r');
+      dispatch({ type: 'SET_DRAFT', agentId, text: '' });
+    } else {
+      onSendMessage(agentId, text, attachedImage || undefined);
+      dispatch({ type: 'SET_DRAFT', agentId, text: '' });
+      setAttachedImage(null);
+    }
+  }, [agentId, agent?.type, onSendMessage, onWriteTerminal, dispatch, attachedImage]);
 
   const handleStop = useCallback(() => {
     onStopAgent?.(agentId);
@@ -654,12 +683,12 @@ export function AgentDetailScreen({
 
           {iconElement}
 
-          <View style={styles.headerInfo}>
+          <Pressable style={styles.headerInfo} onPress={isTerminal ? handleDismissTerminalKeyboard : undefined}>
             <Text style={styles.headerTitle} numberOfLines={1}>
               {subtitle || agent.sessionName}
             </Text>
             <Text style={styles.headerSubtitle} numberOfLines={1}>{modelDisplayName}</Text>
-          </View>
+          </Pressable>
 
           {/* Ask / Auto permission toggle */}
           {agent.status !== 'exited' && !isTerminal && (
@@ -692,11 +721,11 @@ export function AgentDetailScreen({
           )}
         </View>
 
-        {/* Tab bar */}
-        <View style={styles.tabBar}>
+        {/* Tab bar — tapping dismisses terminal keyboard */}
+        <Pressable style={styles.tabBar} onPress={isTerminal ? handleDismissTerminalKeyboard : undefined}>
           <TouchableOpacity
             style={[styles.tab, activeTab === 'chat' && styles.tabActive]}
-            onPress={() => handleTabSwitch('chat')}
+            onPress={() => { handleTabSwitch('chat'); if (isTerminal) handleDismissTerminalKeyboard(); }}
             activeOpacity={0.7}
           >
             <Text style={[styles.tabText, activeTab === 'chat' && styles.tabTextActive]}>
@@ -752,7 +781,7 @@ export function AgentDetailScreen({
               )}
             </View>
           )}
-        </View>
+        </Pressable>
 
         {/* Tab content — horizontal paging ScrollView for swipe between tabs */}
         <View style={styles.main}>
@@ -767,11 +796,24 @@ export function AgentDetailScreen({
             scrollEnabled={!gitDiffOpen && !isTerminal}
           >
             {/* Chat tab */}
-            <View style={[styles.tabPage, activeTab === 'chat' && keyboardHeight > 0 && { paddingBottom: keyboardHeight }]}>
+            <View style={[
+              styles.tabPage,
+              activeTab === 'chat' && keyboardHeight > 0 && { paddingBottom: keyboardHeight },
+              activeTab === 'chat' && isTerminal && keyboardHeight === 0 && { paddingBottom: insets.bottom },
+            ]}>
+              {isTerminal ? (
+                <TerminalView
+                  ref={terminalViewRef}
+                  agentId={agentId}
+                  messages={agent.messages}
+                  onResize={handleTerminalResize}
+                  onInput={handleTerminalInput}
+                />
+              ) : (
               <KeyboardScrollView style={styles.chatArea} contentContainerStyle={styles.chatContent}>
                 {agent.messages.length === 0 ? (
                   <Text style={styles.placeholder}>
-                    {isTerminal ? 'Run a command to start...' : 'Send a message to start...'}
+                    Send a message to start...
                   </Text>
                 ) : (
                   <>
@@ -812,8 +854,9 @@ export function AgentDetailScreen({
                   />
                 ))}
               </KeyboardScrollView>
+              )}
 
-              {voiceOpen ? (
+              {!isTerminal && (voiceOpen ? (
                 <View style={[styles.voiceOverlay, keyboardHeight === 0 && styles.voiceOverlaySafeArea]}>
                   <View style={styles.voiceHeader}>
                     <Text style={styles.voiceLabel} numberOfLines={1}>
@@ -864,22 +907,22 @@ export function AgentDetailScreen({
                   onSend={handleSend}
                   onStop={handleStop}
                   showStop={agent.status === 'running'}
-                  onVoice={isTerminal ? undefined : handleVoiceOpen}
-                  onPlus={isTerminal ? undefined : () => setShowPlusModal(true)}
+                  onVoice={handleVoiceOpen}
+                  onPlus={() => setShowPlusModal(true)}
                   disabled={isDisabled}
                   placeholder={
                     agent.status === 'running'
-                      ? (isTerminal ? 'Command is running...' : 'Agent is working...')
-                      : (isTerminal ? 'Enter command...' : 'Ask anything...')
+                      ? 'Agent is working...'
+                      : 'Ask anything...'
                   }
                   shimmer={agent.status === 'running'}
                   onActivity={onResetPingTimer}
                   initialValue={agent.draftText}
                   onDraftChange={handleDraftChange}
-                  attachedImage={isTerminal ? null : attachedImage}
-                  onRemoveImage={isTerminal ? undefined : () => setAttachedImage(null)}
+                  attachedImage={attachedImage}
+                  onRemoveImage={() => setAttachedImage(null)}
                 />
-              )}
+              ))}
             </View>
 
             {!isTerminal && (

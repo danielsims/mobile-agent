@@ -461,6 +461,14 @@ function AppInner() {
     });
   };
 
+  const handleWriteTerminal = (agentId: string, data: string) => {
+    send('writeTerminal', { agentId, data });
+  };
+
+  const handleResizeTerminal = (agentId: string, cols: number, rows: number) => {
+    send('resizeTerminal', { agentId, cols, rows });
+  };
+
   const handleStopAgent = (agentId: string) => {
     send('interruptAgent', { agentId });
     // Optimistic: unblock input immediately while backend performs interrupt.
@@ -663,7 +671,7 @@ function AppInner() {
       <View style={styles.container}>
         <StatusBar style="light" />
         <SafeAreaView style={styles.safeTop} />
-        <View style={styles.layerBase} pointerEvents={screen === 'dashboard' ? 'auto' : 'none'}>
+        <View style={styles.layerBase} pointerEvents="auto">
           <Dashboard
             connectionStatus={connectionStatus}
             projects={projects}
@@ -689,6 +697,8 @@ function AppInner() {
               onRespondPermission={handleRespondPermission}
               onSetAutoApprove={handleSetAutoApprove}
               onResetPingTimer={resetPingTimer}
+              onWriteTerminal={handleWriteTerminal}
+              onResizeTerminal={handleResizeTerminal}
               onRequestGitStatus={handleRequestGitStatus}
               onRequestGitDiff={handleRequestGitDiff}
               gitStatus={gitStatus}
