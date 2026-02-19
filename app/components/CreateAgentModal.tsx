@@ -12,7 +12,7 @@ import {
   Platform,
   Keyboard,
 } from 'react-native';
-import Svg, { Path } from 'react-native-svg';
+import Svg, { Path, Rect, Polyline, Line } from 'react-native-svg';
 import { BottomModal } from './BottomModal';
 import { OpenCodeLogo } from './OpenCodeLogo';
 import type { AgentType, Project, ProviderModelOption } from '../state/types';
@@ -48,7 +48,7 @@ const AGENT_TYPES: Array<{
   color: string;
   bg: string;
 }> = [
-  { type: 'terminal', label: 'Interactive Terminal', color: '#22C55E', bg: '#FFFFFF' },
+  { type: 'terminal', label: 'Interactive Terminal', color: '#111111', bg: '#FFFFFF' },
   { type: 'claude', label: 'Claude Code', color: '#D97757', bg: '#FFFFFF' },
   { type: 'codex', label: 'Codex', color: '#111111', bg: '#FFFFFF' },
   { type: 'opencode', label: 'OpenCode', color: '#3B82F6', bg: '#FFFFFF' },
@@ -266,7 +266,11 @@ export function CreateAgentModal({
                     <Path d={OPENAI_LOGO_PATH} fill={color} fillRule="evenodd" />
                   </Svg>
                 ) : type === 'terminal' ? (
-                  <Text style={[styles.typeIconLetter, { color, fontSize: 13 }]}>{'>_'}</Text>
+                  <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+                    <Rect x={2} y={4} width={20} height={16} rx={3} stroke={color} strokeWidth={1.75} fill="none" />
+                    <Polyline points="7 10 10.5 13 7 16" stroke={color} strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+                    <Line x1={13} y1={16} x2={17} y2={16} stroke={color} strokeWidth={1.75} strokeLinecap="round" />
+                  </Svg>
                 ) : type === 'opencode' ? (
                   <OpenCodeLogo width={16} height={28} variant="dark" />
                 ) : (

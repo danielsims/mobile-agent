@@ -23,7 +23,13 @@ const OPENAI_LOGO_PATH = 'M9.205 8.658v-2.26c0-.19.072-.333.238-.428l4.543-2.616
 
 function AgentTypeIcon({ type, color }: { type: AgentType; color: string }): ReactNode {
   if (type === 'terminal') {
-    return <span style={{ color, fontWeight: 700, fontSize: 12 }}>{'>_'}</span>;
+    return (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+        <rect x="2" y="4" width="20" height="16" rx="3" stroke={color} strokeWidth="1.75" />
+        <polyline points="7 10 10.5 13 7 16" stroke={color} strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+        <line x1="13" y1="16" x2="17" y2="16" stroke={color} strokeWidth="1.75" strokeLinecap="round" />
+      </svg>
+    );
   }
   if (type === 'claude') {
     return (
@@ -51,7 +57,7 @@ function AgentTypeIcon({ type, color }: { type: AgentType; color: string }): Rea
 }
 
 const AGENT_TYPES: { value: AgentType; label: string; color: string; bg: string }[] = [
-  { value: 'terminal', label: 'Interactive Terminal', color: '#22C55E', bg: '#FFFFFF' },
+  { value: 'terminal', label: 'Interactive Terminal', color: '#111111', bg: '#FFFFFF' },
   { value: 'claude', label: 'Claude Code', color: '#D97757', bg: '#FFFFFF' },
   { value: 'codex', label: 'Codex', color: '#111111', bg: '#FFFFFF' },
   { value: 'opencode', label: 'OpenCode', color: '#3B82F6', bg: '#FFFFFF' },

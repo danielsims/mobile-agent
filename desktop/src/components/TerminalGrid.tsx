@@ -71,7 +71,12 @@ function DragOverlayContent({ agent }: { agent: AgentState }) {
       <div className="pane-header" style={{ cursor: 'grabbing' }}>
         <div className="pane-header-left">
           <div className="pane-type-icon">
-            {agent.type === 'terminal' ? '>' : agent.type[0]?.toUpperCase()}
+            {agent.type === 'terminal' ? (
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none">
+                <polyline points="4 7 10 12 4 17" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+                <line x1="13" y1="17" x2="20" y2="17" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+              </svg>
+            ) : agent.type[0]?.toUpperCase()}
           </div>
           {modelLabel && <span className="pane-model">{modelLabel}</span>}
           <div className="pane-status-dot" style={{ background: statusColors[agent.status] }} />

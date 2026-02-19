@@ -15,7 +15,7 @@ import {
   Dimensions,
   ScrollView,
 } from 'react-native';
-import Svg, { Path } from 'react-native-svg';
+import Svg, { Path, Rect, Polyline, Line } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
 import * as ImagePicker from 'expo-image-picker';
 import { useAgent, useAgentState } from '../state/AgentContext';
@@ -177,7 +177,7 @@ function PermissionCard({
 // Agent type icon — SVG logo or colored letter fallback
 function AgentIcon({ type, size = 28 }: { type: AgentType; size?: number }) {
   const BRAND: Record<string, { color: string; bg: string; letter: string }> = {
-    terminal: { color: '#22C55E', bg: '#FFFFFF', letter: '>' },
+    terminal: { color: '#111111', bg: '#FFFFFF', letter: '>' },
     claude:   { color: '#D97757', bg: '#FFFFFF', letter: 'C' },
     codex:    { color: '#111111', bg: '#FFFFFF', letter: 'X' },
     opencode: { color: '#3B82F6', bg: '#FFFFFF', letter: 'O' },
@@ -187,7 +187,13 @@ function AgentIcon({ type, size = 28 }: { type: AgentType; size?: number }) {
 
   return (
     <View style={[styles.agentIcon, { width: size, height: size, backgroundColor: brand.bg }]}>
-      {type === 'claude' ? (
+      {type === 'terminal' ? (
+        <Svg width={iconSize} height={iconSize} viewBox="0 0 24 24" fill="none">
+          <Rect x={2} y={4} width={20} height={16} rx={3} stroke={brand.color} strokeWidth={1.75} fill="none" />
+          <Polyline points="7 10 10.5 13 7 16" stroke={brand.color} strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+          <Line x1={13} y1={16} x2={17} y2={16} stroke={brand.color} strokeWidth={1.75} strokeLinecap="round" />
+        </Svg>
+      ) : type === 'claude' ? (
         <Svg width={iconSize} height={iconSize} viewBox="0 0 24 24">
           <Path d={CLAUDE_LOGO_PATH} fill={brand.color} fillRule="nonzero" />
         </Svg>

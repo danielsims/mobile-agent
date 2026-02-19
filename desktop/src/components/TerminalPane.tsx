@@ -178,7 +178,12 @@ export function TerminalPane({
             </div>
           ) : (
             <div className="pane-type-icon">
-              {isTerminal ? '>' : agent.type[0]?.toUpperCase()}
+              {isTerminal ? (
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none">
+                  <polyline points="4 7 10 12 4 17" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+                  <line x1="13" y1="17" x2="20" y2="17" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+                </svg>
+              ) : agent.type[0]?.toUpperCase()}
             </div>
           )}
           <span className="pane-model">{modelLabel}</span>
