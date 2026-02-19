@@ -1,6 +1,6 @@
 # Mobile Agent
 
-Control coding agents (Claude Code, Codex, OpenCode) remotely from your phone. Spawn multiple agents across different repos, manage git worktrees, and approve tool permissions — all from a single dashboard.
+Control coding sessions remotely from your phone. Spawn multiple coding agents (Claude Code, Codex, OpenCode) or interactive terminal sessions across different repos, manage git worktrees, and approve tool permissions — all from a single dashboard.
 
 ## Quick Start
 
@@ -55,7 +55,7 @@ Once registered, projects appear in the agent creation flow on the phone. You ca
 ## Usage
 
 Once connected:
-- Tap **+** to create a new agent — pick agent type, project, and worktree
+- Tap **+** to create a new session — pick session type, project, and worktree
 - Watch output stream in real-time on the agent detail screen
 - Approve or deny tool permission requests
 - Long-press an agent card on the dashboard for quick actions
