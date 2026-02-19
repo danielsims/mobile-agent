@@ -153,6 +153,7 @@ export interface Project {
   id: string;
   name: string;
   path: string;
+  isGit?: boolean;
   icon: string | null;
   worktrees: Worktree[];
 }

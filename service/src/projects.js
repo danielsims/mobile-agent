@@ -52,7 +52,7 @@ export function loadProjects() {
 
 /**
  * Get all registered projects.
- * @returns {Object} id -> { name, path, registeredAt }
+ * @returns {Object} id -> { name, path, isGit, registeredAt }
  */
 export function getProjects() {
   return { ...projects };
@@ -61,18 +61,19 @@ export function getProjects() {
 /**
  * Get a single project by ID.
  * @param {string} projectId
- * @returns {{ name: string, path: string, registeredAt: string } | null}
+ * @returns {{ name: string, path: string, isGit?: boolean, registeredAt: string } | null}
  */
 export function getProject(projectId) {
   return projects[projectId] || null;
 }
 
 /**
- * Register a git repository as a project.
- * Validates the path is a git repo and resolves to the repo root.
+ * Register a directory as a project.
+ * If it's a git repo (or inside one), stores the repo root and marks isGit=true.
+ * Otherwise stores the selected directory and marks isGit=false.
  * @param {string} inputPath - Path to the repo (resolved to absolute)
  * @param {string} [name] - Optional display name (defaults to directory basename)
- * @returns {{ id: string, name: string, path: string }}
+ * @returns {{ id: string, name: string, path: string, isGit: boolean }}
  */
 export function registerProject(inputPath, name) {
   const absPath = resolve(inputPath);
@@ -86,38 +87,67 @@ export function registerProject(inputPath, name) {
     throw new Error(`Not a directory: ${absPath}`);
   }
 
-  // Resolve to git root
-  let gitRoot;
+  // If it's a git repo (or nested inside one), normalize to git root.
+  let resolvedPath = absPath;
+  let isGit = false;
   try {
-    gitRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+    resolvedPath = execFileSync('git', ['rev-parse', '--show-toplevel'], {
       cwd: absPath,
       encoding: 'utf-8',
       timeout: 5000,
     }).trim();
+    isGit = true;
   } catch {
-    throw new Error(`Not a git repository: ${absPath}`);
+    resolvedPath = absPath;
+    isGit = false;
   }
 
   // Check for duplicates
   for (const [id, project] of Object.entries(projects)) {
-    if (project.path === gitRoot) {
+    if (project.path === resolvedPath) {
       throw new Error(`Already registered as "${project.name}" (${id})`);
     }
   }
 
   const id = randomBytes(4).toString('hex');
-  const projectName = name || basename(gitRoot);
+  const projectName = name || basename(resolvedPath);
 
   projects[id] = {
     name: projectName,
-    path: gitRoot,
+    path: resolvedPath,
+    isGit,
     registeredAt: new Date().toISOString(),
   };
 
   writeProjects();
-  logAudit('project_registered', { id, name: projectName, path: gitRoot });
+  logAudit('project_registered', { id, name: projectName, path: resolvedPath, isGit });
 
-  return { id, name: projectName, path: gitRoot };
+  return { id, name: projectName, path: resolvedPath, isGit };
+}
+
+/**
+ * Initialize git for an existing registered non-git project.
+ * @param {string} projectId
+ * @returns {{ id: string, path: string, isGit: boolean }}
+ */
+export function initializeProjectGit(projectId) {
+  const project = projects[projectId];
+  if (!project) throw new Error('Project not found');
+  if (project.isGit !== false) {
+    return { id: projectId, path: project.path, isGit: true };
+  }
+
+  execFileSync('git', ['init'], {
+    cwd: project.path,
+    encoding: 'utf-8',
+    timeout: 10000,
+  });
+
+  project.isGit = true;
+  writeProjects();
+  logAudit('project_git_initialized', { id: projectId, path: project.path });
+
+  return { id: projectId, path: project.path, isGit: true };
 }
 
 /**
@@ -146,6 +176,7 @@ export function unregisterProject(projectId) {
 export function listWorktrees(projectId) {
   const project = projects[projectId];
   if (!project) throw new Error('Project not found');
+  if (project.isGit === false) throw new Error('Project is not a git repository');
 
   const output = execFileSync('git', ['worktree', 'list', '--porcelain'], {
     cwd: project.path,
@@ -229,6 +260,7 @@ export function listWorktrees(projectId) {
 export function createWorktree(projectId, branchName) {
   const project = projects[projectId];
   if (!project) throw new Error('Project not found');
+  if (project.isGit === false) throw new Error('Project is not a git repository');
 
   if (!BRANCH_NAME_RE.test(branchName)) {
     throw new Error('Invalid branch name. Use alphanumeric characters, hyphens, underscores, dots, and slashes only.');
@@ -278,6 +310,7 @@ export function createWorktree(projectId, branchName) {
 export function removeWorktree(projectId, worktreePath) {
   const project = projects[projectId];
   if (!project) throw new Error('Project not found');
+  if (project.isGit === false) throw new Error('Project is not a git repository');
 
   // Validate the path is an actual worktree of this project
   const worktrees = listWorktrees(projectId);
@@ -306,6 +339,9 @@ export function resolveProjectCwd(projectId, worktreePath) {
 
   if (!worktreePath) {
     return project.path;
+  }
+  if (project.isGit === false) {
+    throw new Error('Non-git projects do not support worktrees.');
   }
 
   // Validate worktree path is actually a worktree of this project

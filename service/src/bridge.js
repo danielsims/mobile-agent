@@ -23,6 +23,8 @@ import {
   loadProjects,
   getProjects,
   getProject,
+  registerProject,
+  initializeProjectGit,
   unregisterProject,
   listWorktrees,
   createWorktree,
@@ -277,7 +279,8 @@ export class Bridge {
       }
       if (msg.token === this.desktopToken) {
         console.log(`[auth] Desktop auth successful from ${ip}`);
-        callback({ success: true, deviceId: `desktop-${Date.now()}` });
+        // Stable ID per service token so reconnects supersede prior desktop sockets.
+        callback({ success: true, deviceId: `desktop-${this.desktopToken}` });
       } else {
         console.log(`[auth] Desktop auth rejected from ${ip}: invalid token`);
         this._sendTo(ws, 'authError', { error: 'Invalid desktop token.' });
@@ -464,6 +467,14 @@ export class Bridge {
 
       case 'removeWorktree':
         this._handleRemoveWorktree(ws, msg, deviceId);
+        break;
+
+      case 'registerProject':
+        this._handleRegisterProject(ws, msg, deviceId);
+        break;
+
+      case 'initializeGitProject':
+        this._handleInitializeGitProject(ws, msg, deviceId);
         break;
 
       case 'unregisterProject':
@@ -814,11 +825,14 @@ export class Bridge {
       const result = [];
 
       for (const [id, project] of Object.entries(all)) {
+        const isGit = project.isGit !== false;
         let worktrees = [];
-        try {
-          worktrees = listWorktrees(id);
-        } catch (e) {
-          console.error(`[Projects] Failed to list worktrees for ${id}:`, e.message);
+        if (isGit) {
+          try {
+            worktrees = listWorktrees(id);
+          } catch (e) {
+            console.error(`[Projects] Failed to list worktrees for ${id}:`, e.message);
+          }
         }
 
         let icon = null;
@@ -832,6 +846,7 @@ export class Bridge {
           id,
           name: project.name,
           path: project.path,
+          isGit,
           icon,
           worktrees,
         });
@@ -878,6 +893,51 @@ export class Bridge {
 
       const worktrees = listWorktrees(projectId);
       this._sendTo(ws, 'worktreeRemoved', { projectId, worktrees });
+    } catch (e) {
+      this._sendTo(ws, 'error', { error: e.message });
+    }
+  }
+
+  _handleRegisterProject(ws, msg, deviceId) {
+    const { path, name } = msg;
+
+    if (!path) {
+      this._sendTo(ws, 'error', { error: 'path required.' });
+      return;
+    }
+
+    try {
+      loadProjects(); // Reload from disk before mutation
+      const registered = registerProject(path, typeof name === 'string' && name.trim() ? name.trim() : undefined);
+      logAudit('project_registered_remote', {
+        projectId: registered.id,
+        name: registered.name,
+        path: registered.path,
+        deviceId,
+      });
+      // Send updated project list
+      this._handleListProjects(ws);
+    } catch (e) {
+      this._sendTo(ws, 'error', { error: e.message });
+    }
+  }
+
+  _handleInitializeGitProject(ws, msg, deviceId) {
+    const { projectId } = msg;
+    if (!projectId) {
+      this._sendTo(ws, 'error', { error: 'projectId required.' });
+      return;
+    }
+
+    try {
+      loadProjects();
+      const initialized = initializeProjectGit(projectId);
+      logAudit('project_git_initialized_remote', {
+        projectId: initialized.id,
+        path: initialized.path,
+        deviceId,
+      });
+      this._handleListProjects(ws);
     } catch (e) {
       this._sendTo(ws, 'error', { error: e.message });
     }
